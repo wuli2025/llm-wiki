@@ -1,0 +1,16 @@
+node_modules
+dist
+dist-ssr
+*.local
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+src-tauri/target
+src-tauri/gen
+src-tauri/Cargo.lock
+
+# Runtime outputs / local logs
+.dev.log
+output/
+PolarisKB/output/

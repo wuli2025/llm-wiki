@@ -1,0 +1,34 @@
+# Polaris 安全沙箱镜像 — 轻量版 (PRD-v6 §11.3 缩水)
+#
+# 基线: alpine:3.20  (~7MB)
+# + node 20 LTS    (~50MB)
+# + @anthropic-ai/claude-code (~30MB, 含依赖)
+# 期望成品镜像 < 200MB
+#
+# 安全策略 (容器运行时由 docker run 注入):
+#   --memory=4g --cpus=2
+#   --security-opt=no-new-privileges
+#   -v ~/Polaris:/workspace  (读写)
+#   -v ~/Polaris/PolarisKB:/kb:ro  (只读)
+
+FROM alpine:3.20
+
+# 仅装 node + git + bash (claude CLI 偶尔调 git, 交互需要 bash)
+RUN apk add --no-cache nodejs npm git bash ca-certificates \
+    && update-ca-certificates
+
+# 创建非 root 用户
+RUN addgroup -g 1000 polaris \
+    && adduser -D -u 1000 -G polaris -s /bin/bash polaris
+
+# 安装 Claude Code CLI (用 npm; 也可以替换成 anthropic 官方 install.sh)
+RUN npm install -g @anthropic-ai/claude-code \
+    && npm cache clean --force
+
+# 工作目录
+WORKDIR /workspace
+
+USER polaris
+
+# 默认指令由 docker run 覆盖 (sleep infinity)
+CMD ["sh"]
