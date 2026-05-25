@@ -36,7 +36,7 @@ const sending = ref(false);
 const currentReq = ref<string | null>(null);
 const showPermDropdown = ref(false);
 const permMode = ref<PermissionMode>("manual");
-const deepSearchActive = ref(false);
+const activeSkillId = ref<string | null>(null); // 当前激活的 skill（单选）
 const showSkillPanel = ref(false);
 const skillSearch = ref("");
 const skillsList = ref<Skill[]>([]);
@@ -93,6 +93,30 @@ function skillIcon(id: string) {
 function goToSkillCenter() {
   showSkillPanel.value = false;
   app.setView("skill_center");
+}
+
+function activeSkillName(): string {
+  if (activeSkillId.value === "deep-research") return "深度搜索";
+  const s = skillsList.value.find((x) => x.id === activeSkillId.value);
+  return s?.name || "";
+}
+
+function activeSkillIcon() {
+  if (activeSkillId.value === "deep-research") return Search;
+  return skillIcon(activeSkillId.value || "");
+}
+
+function toggleSkill(id: string) {
+  if (activeSkillId.value === id) {
+    activeSkillId.value = null;
+  } else {
+    activeSkillId.value = id;
+  }
+  showSkillPanel.value = false;
+}
+
+function clearActiveSkill() {
+  activeSkillId.value = null;
 }
 
 async function loadHistory(convId: string | null) {
@@ -185,7 +209,7 @@ async function send() {
     const reqId = await chat.send({
       prompt: text,
       permissionMode: permMode.value,
-      skillId: deepSearchActive.value ? "deep-research" : undefined,
+      skillId: activeSkillId.value || undefined,
       conversationId: convId ?? undefined,
     });
     currentReq.value = reqId;
@@ -329,6 +353,14 @@ async function newChat() {
 
       <!-- 输入卡片 -->
       <div class="input-card">
+        <!-- Skill 标签 -->
+        <div v-if="activeSkillId" class="skill-tags">
+          <div class="skill-tag" @click="clearActiveSkill">
+            <component :is="activeSkillIcon()" :size="12" :stroke-width="1.8" />
+            <span>{{ activeSkillName() }}</span>
+            <X :size="10" :stroke-width="2" class="tag-close" />
+          </div>
+        </div>
         <textarea
           v-model="input"
           placeholder="请输入消息 (Ctrl + Enter 发送) …"
@@ -347,12 +379,11 @@ async function newChat() {
             </button>
             <button
               class="toolbar-btn"
-              :class="{ active: deepSearchActive }"
-              @click="deepSearchActive = !deepSearchActive"
+              :class="{ active: activeSkillId === 'deep-research' }"
+              @click="toggleSkill('deep-research')"
             >
               <Search :size="14" :stroke-width="1.8" />
               <span>深度搜索</span>
-              <!-- tooltip 放在按钮下方，避免穿模 -->
               <div class="btn-tooltip">
                 <div class="btn-tooltip-inner">
                   使用 LLM 大规模联网搜索相关内容
@@ -385,9 +416,9 @@ async function newChat() {
         </div>
       </div>
 
-      <!-- 底部授权栏（参考图：输入框外右下角） -->
+      <!-- 底部授权栏 -->
       <div class="auth-bar">
-        <div class="perm-wrap">
+        <div class="perm-wrap" style="margin-right: 48px;">
           <button
             class="auth-btn"
             :class="{ deny: permMode === 'deny' }"
@@ -792,6 +823,36 @@ textarea {
   color: var(--dim);
 }
 
+/* Skill 标签 */
+.skill-tags {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 0 2px;
+}
+.skill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  border: 1px solid rgba(44, 70, 97, 0.15);
+  border-radius: 16px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.skill-tag:hover {
+  background: rgba(44, 70, 97, 0.12);
+}
+.tag-close {
+  opacity: 0.6;
+}
+.skill-tag:hover .tag-close {
+  opacity: 1;
+}
+
 .toolbar-right {
   display: flex;
   align-items: center;
@@ -862,11 +923,11 @@ textarea {
   margin-right: 2px;
 }
 
-/* 授权下拉菜单 */
+/* 授权下拉菜单 — 向上展开 */
 .dropdown {
   position: absolute;
   right: 0;
-  top: calc(100% + 6px);
+  bottom: calc(100% + 6px);
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
