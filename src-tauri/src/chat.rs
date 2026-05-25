@@ -42,7 +42,8 @@ impl PermissionMode {
         match self {
             PermissionMode::Manual => "default",
             PermissionMode::AutoCurrent => "acceptEdits",
-            PermissionMode::AutoAll => "bypassPermissions",
+            // AutoAll 不再 bypass permissions，与 AutoCurrent 一致
+            PermissionMode::AutoAll => "acceptEdits",
             PermissionMode::Deny => "plan",
         }
     }
