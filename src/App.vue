@@ -8,6 +8,7 @@ import KnowledgeGraph from "./components/KnowledgeGraph.vue";
 import SandboxStatus from "./features/sandbox/components/SandboxStatus.vue";
 import ClaudeMdPanel from "./components/ClaudeMdPanel.vue";
 import Settings from "./components/Settings.vue";
+import SkillCenter from "./components/SkillCenter.vue";
 import { useAppStore } from "./stores/app";
 
 const app = useAppStore();
@@ -26,6 +27,7 @@ const layoutCols = computed(
       <KnowledgeGraph v-else-if="app.view === 'graph'" />
       <SandboxStatus v-else-if="app.view === 'sandbox'" />
       <ClaudeMdPanel v-else-if="app.view === 'claude_md'" />
+      <SkillCenter v-else-if="app.view === 'skill_center'" />
       <Settings v-else-if="app.view === 'settings'" />
       <div v-else class="placeholder">—</div>
     </main>

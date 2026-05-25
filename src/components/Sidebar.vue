@@ -11,6 +11,7 @@ const navItems: { key: typeof app.view; label: string; glyph: string }[] = [
   { key: "graph", label: "图谱", glyph: "◈" },
   { key: "sandbox", label: "沙箱", glyph: "⛨" },
   { key: "claude_md", label: "目录说明", glyph: "❡" },
+  { key: "skill_center", label: "技能中心", glyph: "🧩" },
   { key: "settings", label: "设置", glyph: "⚙" },
 ];
 

@@ -1,11 +1,24 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, watch } from "vue";
 import {
+  Puzzle,
+  Search,
+  ChevronDown,
+  X,
+  ArrowRight,
+  Square,
+  Sparkles,
+  Globe,
+  Wrench,
+} from "@lucide/vue";
+import {
   chat,
   convApi,
   listen,
+  skills as skillsApi,
   type PermissionMode,
   type ChatStreamEvent,
+  type Skill,
 } from "../tauri";
 import { useAppStore } from "../stores/app";
 
@@ -23,17 +36,64 @@ const sending = ref(false);
 const currentReq = ref<string | null>(null);
 const showPermDropdown = ref(false);
 const permMode = ref<PermissionMode>("manual");
-const deepSearchActive = ref(false); // 深度搜索开关
+const deepSearchActive = ref(false);
+const showSkillPanel = ref(false);
+const skillSearch = ref("");
+const skillsList = ref<Skill[]>([]);
 const scrollEl = ref<HTMLDivElement | null>(null);
 
 let unlisten: (() => void) | null = null;
 
 const permLabel: Record<PermissionMode, string> = {
   manual: "手动授权",
-  auto_current: "仅当前会话",
-  auto_all: "所有会话",
+  auto_current: "自动 · 仅当前会话",
+  auto_all: "自动 · 所有会话",
   deny: "拒绝授权",
 };
+
+// Load skills for panel
+async function loadSkills() {
+  try {
+    skillsList.value = await skillsApi.list();
+  } catch {
+    skillsList.value = [
+      {
+        id: "deep-research",
+        name: "深度搜索",
+        description:
+          "使用 LLM 大规模联网搜索相关内容，自动检索、汇总、交叉验证多来源信息",
+        source: "third-party",
+      },
+      {
+        id: "skill-creator",
+        name: "Skill 创建向导",
+        description: "引导用户创建自定义 Skill，自动生成模板和配置文件",
+        source: "official",
+      },
+    ];
+  }
+}
+
+function filteredSkills() {
+  if (!skillSearch.value.trim()) return skillsList.value;
+  const q = skillSearch.value.toLowerCase();
+  return skillsList.value.filter(
+    (s) =>
+      s.name.toLowerCase().includes(q) ||
+      s.description.toLowerCase().includes(q)
+  );
+}
+
+function skillIcon(id: string) {
+  if (id === "deep-research") return Globe;
+  if (id === "skill-creator") return Wrench;
+  return Sparkles;
+}
+
+function goToSkillCenter() {
+  showSkillPanel.value = false;
+  app.setView("skill_center");
+}
 
 async function loadHistory(convId: string | null) {
   if (!convId) {
@@ -91,6 +151,7 @@ onMounted(async () => {
     });
   });
   await loadHistory(app.currentConvId);
+  await loadSkills();
 });
 onUnmounted(() => {
   if (unlisten) unlisten();
@@ -201,13 +262,22 @@ async function newChat() {
           本地优先 · 调用 Claude Code · 维基知识库 KB-first 召回
         </div>
         <div class="hero-tips">
-          <div>· <strong>对话历史会自动保存到当前项目</strong></div>
-          <div>· 默认走宿主机 <code>claude</code>(已检测安装);切到沙箱前需先在「沙箱」页启动容器</div>
+          <div>
+            · <strong>对话历史会自动保存到当前项目</strong>
+          </div>
+          <div>
+            · 默认走宿主机 <code>claude</code>(已检测安装)
+          </div>
           <div>· 首次用 <code>claude</code> 请确认已 <code>claude login</code></div>
         </div>
       </div>
 
-      <div v-for="(b, i) in bubbles" :key="i" class="bubble" :class="b.role">
+      <div
+        v-for="(b, i) in bubbles"
+        :key="i"
+        class="bubble"
+        :class="b.role"
+      >
         <div class="who">
           <template v-if="b.role === 'user'">你</template>
           <template v-else-if="b.role === 'tool'">⚙ 工具</template>
@@ -217,91 +287,154 @@ async function newChat() {
       </div>
     </div>
 
-    <div class="input-wrap">
+    <!-- 输入区域 -->
+    <div class="input-area">
+      <!-- 技能选择弹窗 -->
+      <div v-if="showSkillPanel" class="skill-panel">
+        <div class="skill-panel-head">
+          <span class="skill-panel-title">选择技能</span>
+          <button class="skill-panel-close" @click="showSkillPanel = false">
+            <X :size="14" :stroke-width="2" />
+          </button>
+        </div>
+        <div class="skill-panel-search">
+          <Search :size="14" :stroke-width="1.8" class="sp-search-icon" />
+          <input v-model="skillSearch" placeholder="搜索技能..." type="text" />
+        </div>
+        <div class="skill-panel-list">
+          <div
+            v-for="s in filteredSkills()"
+            :key="s.id"
+            class="skill-panel-item"
+          >
+            <component
+              :is="skillIcon(s.id)"
+              :size="16"
+              :stroke-width="1.6"
+              class="sp-item-icon"
+            />
+            <div class="sp-item-info">
+              <div class="sp-item-name">{{ s.name }}</div>
+              <div class="sp-item-desc">{{ s.description }}</div>
+            </div>
+          </div>
+        </div>
+        <div class="skill-panel-foot">
+          <button class="sp-manage" @click="goToSkillCenter">
+            <ArrowRight :size="12" :stroke-width="2" />
+            <span>探索和管理技能</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 输入卡片 -->
       <div class="input-card">
         <textarea
           v-model="input"
-          placeholder="请输入消息(Ctrl + Enter 发送) …"
+          placeholder="请输入消息 (Ctrl + Enter 发送) …"
           rows="3"
           @keydown="onKeydown"
         ></textarea>
-        <div class="bottom">
-          <button
-            class="btn"
-            :class="{ active: deepSearchActive }"
-            @click="deepSearchActive = !deepSearchActive"
-          >
-            <span class="tooltip-wrap">
-              🔍 深度搜索
-              <span class="tooltip">
-                使用 LLM 大规模联网搜索相关内容<br/>
-                <span class="tooltip-sub">激活后 Claude 会自动检索多来源信息并交叉验证</span>
-              </span>
-            </span>
-          </button>
-          <div class="spacer"></div>
-          <div class="perm-wrap">
+        <div class="toolbar">
+          <div class="toolbar-left">
             <button
-              class="btn perm"
-              :class="{ deny: permMode === 'deny' }"
-              @click="showPermDropdown = !showPermDropdown"
+              class="toolbar-btn"
+              :class="{ active: showSkillPanel }"
+              @click="showSkillPanel = !showSkillPanel"
             >
-              <img
-                v-if="permMode !== 'deny'"
-                src="../assets/perm-hand.png"
-                class="perm-ic-img"
-                alt="授权"
-              />
-              <span v-else class="perm-ic">⊘</span>
-              {{ permLabel[permMode] }} ▾
+              <Puzzle :size="14" :stroke-width="1.8" />
+              <span>技能</span>
             </button>
-            <div v-if="showPermDropdown" class="dropdown">
-              <div
-                v-for="m in [
-                  { k: 'manual', l: '手动授权', d: '每次工具调用前确认' },
-                  {
-                    k: 'auto_current',
-                    l: '自动 · 仅当前会话',
-                    d: '本会话放行非高危操作',
-                  },
-                  {
-                    k: 'auto_all',
-                    l: '自动 · 所有会话',
-                    d: '所有会话放行非高危操作(不绕过权限确认)',
-                  },
-                  {
-                    k: 'deny',
-                    l: '拒绝授权(只读)',
-                    d: '禁止写入/执行,只允许 Read/Grep/Glob',
-                  },
-                ]"
-                :key="m.k"
-                class="perm-row"
-                :class="{ active: permMode === m.k, deny: m.k === 'deny' }"
-                @click="pickPerm(m.k as PermissionMode)"
-              >
-                <div class="title">{{ m.l }}</div>
-                <div class="desc">{{ m.d }}</div>
+            <button
+              class="toolbar-btn"
+              :class="{ active: deepSearchActive }"
+              @click="deepSearchActive = !deepSearchActive"
+            >
+              <Search :size="14" :stroke-width="1.8" />
+              <span>深度搜索</span>
+              <!-- tooltip 放在按钮下方，避免穿模 -->
+              <div class="btn-tooltip">
+                <div class="btn-tooltip-inner">
+                  使用 LLM 大规模联网搜索相关内容
+                  <div class="btn-tooltip-sub">
+                    激活后 Claude 会自动检索多来源信息并交叉验证
+                  </div>
+                </div>
               </div>
+            </button>
+          </div>
+          <div class="toolbar-right">
+            <button
+              v-if="sending"
+              class="send-btn stop"
+              title="停止"
+              @click="cancel"
+            >
+              <Square :size="14" :stroke-width="2" fill="currentColor" />
+            </button>
+            <button
+              v-else
+              class="send-btn"
+              title="发送 (Ctrl+Enter)"
+              :disabled="!input.trim()"
+              @click="send"
+            >
+              <ArrowRight :size="16" :stroke-width="2" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 底部授权栏（参考图：输入框外右下角） -->
+      <div class="auth-bar">
+        <div class="perm-wrap">
+          <button
+            class="auth-btn"
+            :class="{ deny: permMode === 'deny' }"
+            @click="showPermDropdown = !showPermDropdown"
+          >
+            <img
+              v-if="permMode !== 'deny'"
+              src="../assets/perm-hand.png"
+              class="auth-hand"
+              alt="授权"
+            />
+            <span v-else class="auth-deny">⊘</span>
+            <span class="auth-label">{{ permLabel[permMode] }}</span>
+            <ChevronDown :size="12" :stroke-width="2" />
+          </button>
+          <div v-if="showPermDropdown" class="dropdown">
+            <div
+              v-for="m in [
+                { k: 'manual', l: '手动授权', d: '每次工具调用前确认' },
+                {
+                  k: 'auto_current',
+                  l: '自动 · 仅当前会话',
+                  d: '本会话放行非高危操作',
+                },
+                {
+                  k: 'auto_all',
+                  l: '自动 · 所有会话',
+                  d: '所有会话放行非高危操作(不绕过权限确认)',
+                },
+                {
+                  k: 'deny',
+                  l: '拒绝授权(只读)',
+                  d: '禁止写入/执行,只允许 Read/Grep/Glob',
+                },
+              ]"
+              :key="m.k"
+              class="perm-row"
+              :class="{
+                active: permMode === m.k,
+                deny: m.k === 'deny',
+              }"
+              @click="pickPerm(m.k as PermissionMode)"
+            >
+              <div class="title">{{ m.l }}</div>
+              <div class="desc">{{ m.d }}</div>
             </div>
           </div>
-          <button
-            v-if="sending"
-            class="send-btn stop"
-            title="停止"
-            @click="cancel"
-          >
-            ⏹
-          </button>
-          <button
-            v-else
-            class="send-btn"
-            title="发送 (Ctrl+Enter)"
-            :disabled="!input.trim()"
-            @click="send"
-          >
-            ↑
-          </button>
         </div>
       </div>
     </div>
@@ -319,7 +452,7 @@ async function newChat() {
   display: flex;
   align-items: center;
   gap: 12px;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--border);
   background: var(--bg);
 }
 .chat-title {
@@ -349,6 +482,7 @@ async function newChat() {
   border-radius: 4px;
   font-size: 12px;
   color: var(--text-2);
+  cursor: pointer;
 }
 .new-chat-btn:hover {
   border-color: var(--primary);
@@ -387,7 +521,7 @@ async function newChat() {
   display: inline-block;
 }
 .hero-tips code {
-  background: var(--code-bg);
+  background: var(--bg-soft);
   padding: 1px 5px;
   border-radius: 2px;
   font-family: var(--mono);
@@ -398,7 +532,7 @@ async function newChat() {
   max-width: 820px;
   margin: 0 auto 14px;
   background: var(--panel);
-  border: 1px solid var(--hairline);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 14px 18px;
   box-shadow: var(--shadow-sm);
@@ -412,7 +546,7 @@ async function newChat() {
   border-color: var(--border-soft);
   font-family: var(--mono);
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--text-2);
 }
 .who {
   font-family: var(--serif);
@@ -429,19 +563,155 @@ async function newChat() {
   word-break: break-word;
   font-size: 13.5px;
   color: var(--text);
+  line-height: 1.6;
 }
 
-.input-wrap {
-  padding: 12px 32px 24px;
+/* ─────────── 输入区域 ─────────── */
+.input-area {
+  padding: 12px 32px 16px;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  position: relative;
 }
+
+/* 技能选择弹窗 */
+.skill-panel {
+  position: absolute;
+  bottom: calc(100% - 8px);
+  left: 32px;
+  width: 360px;
+  max-height: 420px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.skill-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px 8px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.skill-panel-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.skill-panel-close {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.skill-panel-close:hover {
+  background: var(--bg-soft);
+  color: var(--text);
+}
+.skill-panel-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 14px;
+  padding: 6px 10px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+.sp-search-icon {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.skill-panel-search input {
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 12.5px;
+  color: var(--text);
+  width: 100%;
+}
+.skill-panel-search input::placeholder {
+  color: var(--dim);
+}
+.skill-panel-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 6px;
+}
+.skill-panel-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.skill-panel-item:hover {
+  background: var(--bg-soft);
+}
+.sp-item-icon {
+  color: var(--primary);
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+.sp-item-info {
+  flex: 1;
+  min-width: 0;
+}
+.sp-item-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.sp-item-desc {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.skill-panel-foot {
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.sp-manage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  color: var(--primary);
+  font-size: 12.5px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.sp-manage:hover {
+  background: var(--primary-soft);
+}
+
+/* 输入卡片 */
 .input-card {
   width: 100%;
   max-width: 820px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   box-shadow: var(--shadow);
   padding: 12px 14px;
 }
@@ -457,100 +727,153 @@ textarea {
   line-height: 1.7;
 }
 
-.bottom {
+/* 工具栏 */
+.toolbar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-  margin-top: 6px;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
 }
-.btn {
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.toolbar-btn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 6px 10px;
-  border-radius: 4px;
-  font-size: 12.5px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 12px;
   color: var(--text-2);
   border: none;
   background: transparent;
+  cursor: pointer;
+  position: relative;
 }
-.btn:hover {
-  background: var(--selection-bg);
-}
-.btn.active {
-  background: var(--selection-bg);
-  color: var(--text);
-  font-weight: 500;
-}
-.btn.perm {
+.toolbar-btn:hover {
   background: var(--bg-soft);
   color: var(--text);
-  border: 1px solid var(--border);
 }
-.btn.perm:hover {
-  border-color: var(--primary);
-}
-.btn.perm.deny {
-  color: var(--vermilion);
-  border-color: rgba(192, 57, 43, 0.3);
-}
-.perm-ic {
+.toolbar-btn.active {
+  background: var(--primary-soft);
   color: var(--primary);
 }
-.btn.perm.deny .perm-ic {
-  color: var(--vermilion);
-}
-.perm-ic-img {
-  width: 14px;
-  height: 14px;
-  vertical-align: middle;
-  margin-right: 2px;
-}
-.tooltip-wrap {
-  position: relative;
-  display: inline-block;
-}
-.tooltip {
+
+/* Tooltip — 放在按钮下方，避免顶部穿模 */
+.btn-tooltip {
   position: absolute;
-  bottom: calc(100% + 8px);
+  top: calc(100% + 6px);
   left: 50%;
   transform: translateX(-50%);
-  background: var(--ink);
-  color: #fafaf7;
-  padding: 8px 12px;
-  border-radius: 6px;
-  font-size: 12px;
-  white-space: nowrap;
+  z-index: 25;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
-  z-index: 20;
 }
-.tooltip-sub {
+.toolbar-btn:hover .btn-tooltip {
+  opacity: 1;
+}
+.btn-tooltip-inner {
+  background: var(--ink);
+  color: #fafaf7;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  line-height: 1.5;
+}
+.btn-tooltip-sub {
   font-size: 11px;
   color: var(--dim);
 }
-.tooltip-wrap:hover .tooltip {
-  opacity: 1;
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
-.spacer {
-  flex: 1;
+.send-btn {
+  width: 32px;
+  height: 32px;
+  background: var(--ink);
+  color: #fafaf7;
+  border: none;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.send-btn:hover {
+  background: var(--primary);
+}
+.send-btn:disabled {
+  background: var(--border);
+  cursor: not-allowed;
+}
+.send-btn.stop {
+  background: var(--vermilion);
+}
+
+/* ─────────── 底部授权栏 ─────────── */
+.auth-bar {
+  width: 100%;
+  max-width: 820px;
+  display: flex;
+  justify-content: flex-end;
 }
 .perm-wrap {
   position: relative;
 }
+.auth-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  cursor: pointer;
+}
+.auth-btn:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+.auth-btn.deny {
+  color: var(--vermilion);
+  border-color: rgba(192, 57, 43, 0.2);
+}
+.auth-hand {
+  width: 13px;
+  height: 13px;
+  object-fit: contain;
+}
+.auth-deny {
+  color: var(--vermilion);
+}
+.auth-label {
+  margin-right: 2px;
+}
+
+/* 授权下拉菜单 */
 .dropdown {
   position: absolute;
   right: 0;
-  bottom: 38px;
+  top: calc(100% + 6px);
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: var(--shadow-lg);
-  width: 320px;
+  width: 280px;
   padding: 6px;
-  z-index: 10;
+  z-index: 20;
 }
 .perm-row {
   padding: 8px 10px;
@@ -558,10 +881,10 @@ textarea {
   cursor: pointer;
 }
 .perm-row:hover {
-  background: var(--selection-bg);
+  background: var(--bg-soft);
 }
 .perm-row.active {
-  background: var(--selection-bg);
+  background: var(--primary-soft);
 }
 .perm-row.deny .title {
   color: var(--vermilion);
@@ -576,23 +899,5 @@ textarea {
   color: var(--muted);
   margin-top: 2px;
   line-height: 1.5;
-}
-
-.send-btn {
-  width: 32px;
-  height: 32px;
-  background: var(--ink);
-  color: #fafaf7;
-  border: none;
-  border-radius: 50%;
-  font-size: 16px;
-  margin-left: 4px;
-}
-.send-btn:disabled {
-  background: var(--border-strong);
-  cursor: not-allowed;
-}
-.send-btn.stop {
-  background: var(--vermilion);
 }
 </style>

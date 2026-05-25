@@ -12,6 +12,7 @@ export type ViewKey =
   | "graph"
   | "sandbox"
   | "claude_md"
+  | "skill_center"
   | "settings";
 
 export const useAppStore = defineStore("app", () => {
