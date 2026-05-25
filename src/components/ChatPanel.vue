@@ -823,34 +823,31 @@ textarea {
   color: var(--dim);
 }
 
-/* Skill 标签 */
+/* Skill 标签 — 蓝色链接样式 */
 .skill-tags {
   display: flex;
-  gap: 8px;
+  gap: 12px;
   margin-bottom: 8px;
   padding: 0 2px;
+  flex-wrap: wrap;
 }
 .skill-tag {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  background: var(--primary-soft);
+  gap: 4px;
+  font-size: 12.5px;
   color: var(--primary);
-  border: 1px solid rgba(44, 70, 97, 0.15);
-  border-radius: 16px;
-  font-size: 12px;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: opacity 0.15s;
 }
 .skill-tag:hover {
-  background: rgba(44, 70, 97, 0.12);
+  opacity: 0.7;
+  text-decoration: underline;
 }
 .tag-close {
-  opacity: 0.6;
-}
-.skill-tag:hover .tag-close {
-  opacity: 1;
+  opacity: 0.5;
+  width: 12px;
+  height: 12px;
 }
 
 .toolbar-right {

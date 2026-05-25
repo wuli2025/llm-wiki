@@ -1,17 +1,18 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
+import { Puzzle } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 import type { Conversation } from "../tauri";
 
 const app = useAppStore();
 
-const navItems: { key: typeof app.view; label: string; glyph: string }[] = [
+const navItems: { key: typeof app.view; label: string; glyph?: string; icon?: any }[] = [
   { key: "chat", label: "对话", glyph: "✎" },
   { key: "wiki", label: "知识库", glyph: "▥" },
   { key: "graph", label: "图谱", glyph: "◈" },
   { key: "sandbox", label: "沙箱", glyph: "⛨" },
   { key: "claude_md", label: "目录说明", glyph: "❡" },
-  { key: "skill_center", label: "技能中心", glyph: "🧩" },
+  { key: "skill_center", label: "技能中心", icon: Puzzle },
   { key: "settings", label: "设置", glyph: "⚙" },
 ];
 
@@ -79,7 +80,10 @@ async function confirmDelete(c: Conversation) {
         :title="it.label"
         @click="app.setView(it.key)"
       >
-        <span class="glyph">{{ it.glyph }}</span>
+        <span v-if="it.glyph" class="glyph">{{ it.glyph }}</span>
+        <span v-else-if="it.icon" class="glyph-icon"
+          ><component :is="it.icon" :size="15" :stroke-width="1.8"
+        /></span>
         <span v-if="!app.sidebarCollapsed" class="label">{{ it.label }}</span>
       </button>
     </nav>
@@ -263,7 +267,15 @@ async function confirmDelete(c: Conversation) {
   color: var(--muted);
   font-family: var(--serif);
 }
-.nav-item.active .glyph {
+.glyph-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  color: var(--muted);
+}
+.nav-item.active .glyph,
+.nav-item.active .glyph-icon {
   color: var(--ink);
 }
 .label {
