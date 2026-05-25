@@ -116,8 +116,8 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         .as_deref()
         .and_then(skills::find)
         .or_else(|| skills::default_skill_for_intent(&args.prompt));
-    if let Some(skill) = active_skill {
-        final_prompt.push_str(&skill.system_prompt);
+    if let Some((_, system_prompt)) = active_skill {
+        final_prompt.push_str(&system_prompt);
         final_prompt.push_str("\n\n---\n\n");
     }
 

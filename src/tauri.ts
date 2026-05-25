@@ -116,6 +116,9 @@ export interface Skill {
 export const skills = {
   list: () => invoke<Skill[]>("list_skills"),
   get: (id: string) => invoke<Skill>("get_skill", { id }),
+  create: (id: string, name: string, description: string, systemPrompt: string) =>
+    invoke<void>("create_skill", { id, name, description, systemPrompt }),
+  delete: (id: string) => invoke<void>("delete_skill", { id }),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -287,6 +290,9 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       ];
     case "get_skill":
       return { id: "deep-research", name: "深度搜索", description: "使用 LLM 大规模联网搜索相关内容", source: "third-party" };
+    case "create_skill":
+    case "delete_skill":
+      return undefined;
     case "conv_list_projects":
       return [
         {

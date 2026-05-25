@@ -330,6 +330,7 @@ async function newChat() {
             v-for="s in filteredSkills()"
             :key="s.id"
             class="skill-panel-item"
+            @click="toggleSkill(s.id)"
           >
             <component
               :is="skillIcon(s.id)"

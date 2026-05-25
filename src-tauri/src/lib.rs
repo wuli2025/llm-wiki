@@ -74,6 +74,8 @@ pub fn run() {
             // Skills
             skills::list_skills,
             skills::get_skill,
+            skills::create_skill,
+            skills::delete_skill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Polaris application");
