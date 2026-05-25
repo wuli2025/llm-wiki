@@ -11,7 +11,7 @@
 | ② 维基知识库 | ✅ v0.1 已实现 | 扫描 / 关键词加权评分搜索 / 双链图谱 / 简易 ingest |
 | ③ Skill 技能库 | ⏳ 规划中 | 见 [03-skill-PRD.md](./03-skill-PRD.md) |
 | ④ 统一调度中心 | ⏳ 规划中 | 见 [04-scheduling-PRD.md](./04-scheduling-PRD.md) |
-| ⑤ 安全沙箱层 | ✅ v0.1 已实现 | 轻量 alpine 镜像 + docker CLI 包装,build/start/stop/exec |
+| ⑤ 安全沙箱层 | ✅ v0.1 已实现 → **Phase 1 板块化提取完成** | 轻量 alpine 镜像 + docker CLI 包装,build/start/stop/exec。已抽离为独立 `polaris-sandbox` crate |
 | ⑥ 多模态输入 | ⏳ 规划中 | 见 [06-multimodal-PRD.md](./06-multimodal-PRD.md) |
 | ⑦ 设置中心 | ⏳ 规划中 | 见 [07-settings-PRD.md](./07-settings-PRD.md) |
 
