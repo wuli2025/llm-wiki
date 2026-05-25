@@ -23,7 +23,7 @@ const sending = ref(false);
 const currentReq = ref<string | null>(null);
 const showPermDropdown = ref(false);
 const permMode = ref<PermissionMode>("manual");
-const useSandbox = ref(false); // 默认关:很多人本机有 claude 但没启 Docker
+const deepSearchActive = ref(false); // 深度搜索开关
 const scrollEl = ref<HTMLDivElement | null>(null);
 
 let unlisten: (() => void) | null = null;
@@ -124,7 +124,7 @@ async function send() {
     const reqId = await chat.send({
       prompt: text,
       permissionMode: permMode.value,
-      useSandbox: useSandbox.value,
+      skillId: deepSearchActive.value ? "deep-research" : undefined,
       conversationId: convId ?? undefined,
     });
     currentReq.value = reqId;
@@ -228,11 +228,16 @@ async function newChat() {
         <div class="bottom">
           <button
             class="btn"
-            :class="{ active: useSandbox }"
-            @click="useSandbox = !useSandbox"
-            title="走 Docker 沙箱内的 claude;关闭则用宿主机 claude.exe"
+            :class="{ active: deepSearchActive }"
+            @click="deepSearchActive = !deepSearchActive"
           >
-            ⛨ 沙箱执行
+            <span class="tooltip-wrap">
+              🔍 深度搜索
+              <span class="tooltip">
+                使用 LLM 大规模联网搜索相关内容<br/>
+                <span class="tooltip-sub">激活后 Claude 会自动检索多来源信息并交叉验证</span>
+              </span>
+            </span>
           </button>
           <div class="spacer"></div>
           <div class="perm-wrap">
@@ -241,9 +246,13 @@ async function newChat() {
               :class="{ deny: permMode === 'deny' }"
               @click="showPermDropdown = !showPermDropdown"
             >
-              <span class="perm-ic">{{
-                permMode === "deny" ? "⊘" : "✋"
-              }}</span>
+              <img
+                v-if="permMode !== 'deny'"
+                src="../assets/perm-hand.png"
+                class="perm-ic-img"
+                alt="授权"
+              />
+              <span v-else class="perm-ic">⊘</span>
               {{ permLabel[permMode] }} ▾
             </button>
             <div v-if="showPermDropdown" class="dropdown">
@@ -491,6 +500,39 @@ textarea {
 }
 .btn.perm.deny .perm-ic {
   color: var(--vermilion);
+}
+.perm-ic-img {
+  width: 14px;
+  height: 14px;
+  vertical-align: middle;
+  margin-right: 2px;
+}
+.tooltip-wrap {
+  position: relative;
+  display: inline-block;
+}
+.tooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: #fafaf7;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  z-index: 20;
+}
+.tooltip-sub {
+  font-size: 11px;
+  color: var(--dim);
+}
+.tooltip-wrap:hover .tooltip {
+  opacity: 1;
 }
 .spacer {
   flex: 1;

@@ -107,7 +107,7 @@ pub fn sandbox_status() -> SandboxStatus {
         );
     } else if !image_built {
         notes.push(format!(
-            "镜像 {} 未构建。点击 \"构建镜像\" 拉取 alpine:3.20 + 安装 node + @anthropic-ai/claude-code。约需 2-5 分钟。",
+            "镜像 {} 未构建。点击 \"构建镜像\" 拉取 alpine:3.20 + apk 装 claude-code 原生包 (无 Node)。约需 1-3 分钟。",
             IMAGE_NAME
         ));
     } else if !container_running {

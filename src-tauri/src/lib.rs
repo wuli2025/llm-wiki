@@ -2,6 +2,7 @@ mod chat;
 mod claude_md;
 mod conv;
 mod kb;
+mod skills;
 
 use polaris_core::KbLocator;
 use std::sync::Arc;
@@ -70,6 +71,9 @@ pub fn run() {
             claude_md::claude_md_kb_info,
             claude_md::claude_md_read,
             claude_md::claude_md_write,
+            // Skills
+            skills::list_skills,
+            skills::get_skill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Polaris application");

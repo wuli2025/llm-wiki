@@ -71,8 +71,8 @@ async function runCmd() {
     <div class="head">
       <div class="title">安全沙箱层</div>
       <div class="sub">
-        基于 <code>alpine:3.20</code> 的轻量镜像 · 仅装
-        <code>node</code> + <code>@anthropic-ai/claude-code</code> · 镜像 &lt; 200MB
+        基于 <code>alpine:3.20</code> 的极简镜像 · 原生二进制
+        <code>claude-code</code> (apk 装, 无 Node) · 镜像 ~120MB
       </div>
     </div>
 

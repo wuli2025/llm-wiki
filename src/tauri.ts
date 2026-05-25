@@ -84,7 +84,8 @@ export type PermissionMode =
 export interface ChatSendArgs {
   prompt: string;
   permissionMode: PermissionMode;
-  useSandbox: boolean;
+  useSandbox?: boolean;
+  skillId?: string;
   conversationId?: string;
 }
 
@@ -100,6 +101,21 @@ export const chat = {
   send: (args: ChatSendArgs) =>
     invoke<string>("chat_send", { args: args as unknown as Record<string, unknown> }),
   cancel: (reqId: string) => invoke<void>("chat_cancel", { reqId }),
+};
+
+// ──────────────────────────────────────────────────────────────
+// Skills module
+// ──────────────────────────────────────────────────────────────
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  source: string;
+}
+
+export const skills = {
+  list: () => invoke<Skill[]>("list_skills"),
+  get: (id: string) => invoke<Skill>("get_skill", { id }),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -264,6 +280,13 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return "(browser stub)";
     case "chat_send":
       return "stub-req-id";
+    case "list_skills":
+      return [
+        { id: "deep-research", name: "深度搜索", description: "使用 LLM 大规模联网搜索相关内容，自动检索、汇总、交叉验证多来源信息", source: "third-party" },
+        { id: "skill-creator", name: "Skill 创建向导", description: "引导用户创建自定义 Skill，自动生成模板和配置文件", source: "official" },
+      ];
+    case "get_skill":
+      return { id: "deep-research", name: "深度搜索", description: "使用 LLM 大规模联网搜索相关内容", source: "third-party" };
     case "conv_list_projects":
       return [
         {

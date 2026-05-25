@@ -1,33 +1,36 @@
-# Polaris 安全沙箱镜像 — 轻量版 (PRD-v6 §11.3 缩水)
+# Polaris 安全沙箱镜像 — 极简版 (原生二进制, 无 Node)
 #
-# 基线: alpine:3.20  (~7MB)
-# + node 20 LTS    (~50MB)
-# + @anthropic-ai/claude-code (~30MB, 含依赖)
-# 期望成品镜像 < 200MB
+# 关键: Claude Code 现在是「原生二进制」, 运行时不需要 Node。
+# 官方为 Alpine 提供了 apk 仓库, 直接装原生包, 去掉 nodejs/npm 整层死重。
+# 体积下限被 claude 二进制本身卡住 (内嵌运行时, 单文件 ~100MB),
+# 整镜像估计 ~110-140MB (相比 node 版的 ~250-400MB 明显瘦身)。
 #
 # 安全策略 (容器运行时由 docker run 注入):
 #   --memory=4g --cpus=2
 #   --security-opt=no-new-privileges
-#   -v ~/Polaris:/workspace  (读写)
+#   -v ~/Polaris:/workspace        (读写)
 #   -v ~/Polaris/PolarisKB:/kb:ro  (只读)
 
 FROM alpine:3.20
 
-# 仅装 node + git + bash (claude CLI 偶尔调 git, 交互需要 bash)
-RUN apk add --no-cache nodejs npm git bash ca-certificates \
+# 原生二进制在 musl(Alpine) 上的运行依赖: libgcc / libstdc++ / 系统 ripgrep
+# (Claude Code 内置 ripgrep 不兼容 musl, 需系统版 + USE_BUILTIN_RIPGREP=0)
+RUN apk add --no-cache ca-certificates ripgrep libgcc libstdc++ \
     && update-ca-certificates
 
-# 创建非 root 用户
-RUN addgroup -g 1000 polaris \
-    && adduser -D -u 1000 -G polaris -s /bin/bash polaris
+# 添加官方 Claude Code apk 仓库 (stable 频道) 并安装原生包。
+# --no-cache 会刷新含新仓库的索引, 无需单独 apk update。
+RUN wget -O /etc/apk/keys/claude-code.rsa.pub \
+        https://downloads.claude.ai/keys/claude-code.rsa.pub \
+    && echo "https://downloads.claude.ai/claude-code/apk/stable" >> /etc/apk/repositories \
+    && apk add --no-cache claude-code
 
-# 安装 Claude Code CLI (用 npm; 也可以替换成 anthropic 官方 install.sh)
-RUN npm install -g @anthropic-ai/claude-code \
-    && npm cache clean --force
+ENV USE_BUILTIN_RIPGREP=0
 
-# 工作目录
+# 非 root 用户 (busybox adduser 会自动建同名组)
+RUN adduser -D -u 1000 polaris
+
 WORKDIR /workspace
-
 USER polaris
 
 # 默认指令由 docker run 覆盖 (sleep infinity)

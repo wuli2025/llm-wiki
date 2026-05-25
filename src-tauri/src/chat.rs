@@ -10,7 +10,7 @@
 use crate::claude_md;
 use crate::conv;
 use crate::kb;
-use polaris_sandbox as sandbox; // 板块⑤ 已抽离为独立 crate；别名保持 sandbox:: 调用不变
+use crate::skills;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,6 +56,8 @@ pub struct ChatSendArgs {
     #[serde(default)]
     pub use_sandbox: bool,
     #[serde(default)]
+    pub skill_id: Option<String>,
+    #[serde(default)]
     pub conversation_id: Option<String>,
 }
 
@@ -98,42 +100,40 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         let _ = conv::append_message(cid, "user", &args.prompt);
     }
 
-    // 沙箱模式预检
-    if args.use_sandbox {
-        let st = sandbox::sandbox_status();
-        if !st.container_running {
-            let hint = if !st.docker_running {
-                "Docker daemon 未运行。请启动 Docker Desktop, 或关闭「⛨ 沙箱执行」改用宿主机 claude。"
-            } else if !st.image_built {
-                "沙箱镜像未构建。请到「沙箱」页点「构建镜像」, 或关闭「⛨ 沙箱执行」。"
-            } else {
-                "沙箱容器未启动。请到「沙箱」页点「启动容器」, 或关闭「⛨ 沙箱执行」。"
-            };
-            return Err(hint.to_string());
-        }
-    }
-
-    // 一体注入: KB CLAUDE.md + kb_search 自动召回 + 当前项目 CLAUDE.md, 全部在 render_for_project 里完成
+    // 一体注入: Skill prompt → KB CLAUDE.md + kb_search 召回 → 用户问题
     let current_project_id = args
         .conversation_id
         .as_deref()
         .and_then(conv::project_id_of_conversation);
     let cm_ctx = claude_md::render_for_project(current_project_id.as_deref(), &args.prompt);
+
     let mut final_prompt = String::new();
+
+    // 1. Skill system prompt（显式激活或意图自动检测）
+    let active_skill = args
+        .skill_id
+        .as_deref()
+        .and_then(skills::find)
+        .or_else(|| skills::default_skill_for_intent(&args.prompt));
+    if let Some(skill) = active_skill {
+        final_prompt.push_str(&skill.system_prompt);
+        final_prompt.push_str("\n\n---\n\n");
+    }
+
+    // 2. CLAUDE.md 上下文
     if !cm_ctx.is_empty() {
         final_prompt.push_str(&cm_ctx);
         final_prompt.push_str("\n\n## 用户问题\n\n");
     }
+
+    // 3. 用户原始问题
     final_prompt.push_str(&args.prompt);
 
     let perm = args.permission_mode.cli_value();
     let conv_id_opt = args.conversation_id.clone();
 
-    let mut child = if args.use_sandbox {
-        spawn_in_sandbox(&final_prompt, perm)?
-    } else {
-        spawn_on_host(&final_prompt, perm)?
-    };
+    // 默认走宿主机执行（沙箱可选，但默认关闭）
+    let mut child = spawn_on_host(&final_prompt, perm)?;
 
     let stdout = child
         .stdout
@@ -382,7 +382,7 @@ fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
             "-i",
             "-w",
             "/workspace",
-            sandbox::CONTAINER_NAME,
+            polaris_sandbox::CONTAINER_NAME,
             "claude",
             "--print",
             "--output-format",
