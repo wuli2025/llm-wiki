@@ -27,13 +27,22 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
+    "active": true,
+    "targets": ["nsis"],
     "icon": [
       "icons/icon.ico"
     ],
     "category": "Productivity",
     "shortDescription": "本地优先 AI 工作台",
-    "longDescription": "Polaris 是一个本地优先的 AI 工作台,集成 Claude Code 对话、维基知识库和 Docker 安全沙箱。"
+    "longDescription": "Polaris 是一个本地优先的 AI 工作台,集成 Claude Code 对话、维基知识库和 Docker 安全沙箱。",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "both",
+        "compression": "lzma"
+      }
+    }
   }
 }

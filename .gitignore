@@ -14,3 +14,9 @@ src-tauri/Cargo.lock
 .dev.log
 output/
 PolarisKB/output/
+
+# Claude workspace / temp files
+.claude/
+*.html
+!index.html
+!src-tauri/**/*.html

@@ -2,7 +2,20 @@ mod chat;
 mod claude_md;
 mod conv;
 mod kb;
-mod sandbox;
+
+use polaris_core::KbLocator;
+use std::sync::Arc;
+use tauri::Manager;
+
+/// host 适配器：把板块② `kb` 的 `kb_root()` 适配成 core 的 [`KbLocator`] 契约，
+/// 在启动时注入给板块⑤ `polaris-sandbox`，从而打破 `sandbox → kb` 的直接依赖。
+/// （架构重构 Phase 1：依赖反转的落地点）
+struct HostKbLocator;
+impl KbLocator for HostKbLocator {
+    fn kb_root(&self) -> std::path::PathBuf {
+        std::path::PathBuf::from(kb::kb_root())
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -13,7 +26,9 @@ pub fn run() {
         .setup(|app| {
             let h = app.handle();
             kb::init(h).map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-            sandbox::init(h)
+            // 注入 KbLocator 给 sandbox 板块 (须在 kb::init 之后, 命令执行之前)
+            app.manage(Arc::new(HostKbLocator) as Arc<dyn KbLocator>);
+            polaris_sandbox::init()
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             conv::init(h).map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             chat::init(h).map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
@@ -32,12 +47,12 @@ pub fn run() {
             kb::kb_search,
             kb::kb_ingest,
             kb::kb_graph,
-            // Sandbox
-            sandbox::sandbox_status,
-            sandbox::sandbox_build_image,
-            sandbox::sandbox_start,
-            sandbox::sandbox_stop,
-            sandbox::sandbox_exec,
+            // Sandbox (板块⑤ 已抽离为 polaris-sandbox crate, 命令名不变)
+            polaris_sandbox::commands::sandbox_status,
+            polaris_sandbox::commands::sandbox_build_image,
+            polaris_sandbox::commands::sandbox_start,
+            polaris_sandbox::commands::sandbox_stop,
+            polaris_sandbox::commands::sandbox_exec,
             // Conv (项目 + 对话历史)
             conv::conv_list_projects,
             conv::conv_create_project,

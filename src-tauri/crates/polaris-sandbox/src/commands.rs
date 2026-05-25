@@ -6,24 +6,30 @@
 //! - 资源限制: memory=4g cpus=2
 //! - 用户家目录的 Polaris/ 整体挂载 /workspace (读写) + PolarisKB 挂载 /kb (只读)
 //!
+//! ## 板块边界 (架构重构 Phase 1)
+//! 本板块已抽离为独立 crate。它**不再** `use crate::kb` —— 挂载 KB 时所需的
+//! 根路径改由 host 通过 [`polaris_core::KbLocator`] 注入 (依赖反转)，故本 crate
+//! 只依赖 `polaris-core` 契约，可独立 `cargo test -p polaris-sandbox`。
+//!
 //! MVP 缩水:
 //! - 不用 bollard, 直接 std::process::Command 调 docker CLI (零运行时依赖)
 //! - 不实现完整 audit_stream, 状态查询走 docker ps/inspect
 //! - 网络保留默认 bridge (PRD 要求 --network=polaris-net 白名单, 留到 v0.2)
 
-use crate::kb;
 use anyhow::Result;
 use directories::UserDirs;
-use serde::Serialize;
+use polaris_core::{KbLocator, SandboxStatus};
 use std::path::PathBuf;
 use std::process::Command;
-use tauri::AppHandle;
+use std::sync::Arc;
+use tauri::Manager;
 
 pub const IMAGE_NAME: &str = "polaris-sandbox:alpine";
 pub const CONTAINER_NAME: &str = "polaris-sandbox";
 
-pub fn init(_app: &AppHandle) -> Result<()> {
-    // 把镜像构建材料(Dockerfile)拷贝到 PolarisData/sandbox/, 方便用户审计
+/// 把镜像构建材料(Dockerfile)拷贝到 ~/Polaris/sandbox/, 方便用户审计。
+/// 由 host 在 setup 阶段调用 (从前的 `sandbox::init(app)`)。
+pub fn init() -> Result<()> {
     let dir = data_dir()?.join("sandbox");
     std::fs::create_dir_all(&dir)?;
     let dockerfile = dir.join("Dockerfile");
@@ -44,17 +50,10 @@ fn dockerfile_path() -> Result<PathBuf> {
 
 // ───────────────────────── Status ────────────────────────
 
-#[derive(Serialize)]
-pub struct SandboxStatus {
-    pub docker_installed: bool,
-    pub docker_running: bool,
-    pub image_built: bool,
-    pub image_name: String,
-    pub container_running: bool,
-    pub container_name: String,
-    pub notes: Vec<String>,
-}
-
+/// 探测沙箱状态。
+///
+/// 同时是 `#[tauri::command]` 与普通 `pub fn`：板块① `chat` 在发送前会直接
+/// 调 `polaris_sandbox::sandbox_status()` 做容器预检，故保留可直接调用。
 #[tauri::command]
 pub fn sandbox_status() -> SandboxStatus {
     let mut notes = Vec::new();
@@ -92,9 +91,7 @@ pub fn sandbox_status() -> SandboxStatus {
             ])
             .output()
         {
-            Ok(o) => String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .eq(CONTAINER_NAME),
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().eq(CONTAINER_NAME),
             Err(_) => false,
         }
     } else {
@@ -136,10 +133,7 @@ pub fn sandbox_status() -> SandboxStatus {
 pub fn sandbox_build_image() -> Result<String, String> {
     let df = dockerfile_path().map_err(|e| e.to_string())?;
     if !df.exists() {
-        return Err(format!(
-            "Dockerfile 不存在: {}",
-            df.display()
-        ));
+        return Err(format!("Dockerfile 不存在: {}", df.display()));
     }
     let ctx = df.parent().unwrap();
     let out = Command::new("docker")
@@ -171,8 +165,13 @@ pub fn sandbox_build_image() -> Result<String, String> {
     }
 }
 
+/// 启动长驻沙箱容器。
+///
+/// 需要 KB 根路径来挂载 `/kb`。该路径不再 `use crate::kb` 直取，而是从 Tauri
+/// 托管状态里取出 host 注入的 [`polaris_core::KbLocator`] 实现 (依赖反转)。
+/// 仅作为命令被前端调用，故可安全接收注入的 `AppHandle`。
 #[tauri::command]
-pub fn sandbox_start() -> Result<String, String> {
+pub fn sandbox_start(app: tauri::AppHandle) -> Result<String, String> {
     // 如果已存在(无论 running)先尝试 start
     let exists = Command::new("docker")
         .args([
@@ -184,11 +183,7 @@ pub fn sandbox_start() -> Result<String, String> {
             "{{.Names}}",
         ])
         .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .eq(CONTAINER_NAME)
-        })
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().eq(CONTAINER_NAME))
         .unwrap_or(false);
 
     if exists {
@@ -204,10 +199,11 @@ pub fn sandbox_start() -> Result<String, String> {
     }
 
     let mount_workspace = data_dir().map_err(|e| e.to_string())?;
-    // KB 挂载点跟 kb::kb_root() 走 (可能已被用户改到 polaris-app 内或别处),
+    // KB 挂载点跟 host 注入的 KbLocator 走 (可能已被用户改到 polaris-app 内或别处),
     // 不再写死成 ~/Polaris/PolarisKB
     let mount_kb = {
-        let raw = PathBuf::from(kb::kb_root());
+        let locator = app.state::<Arc<dyn KbLocator>>();
+        let raw = locator.kb_root();
         if raw.as_os_str().is_empty() || !raw.exists() {
             mount_workspace.join("PolarisKB")
         } else {
@@ -227,10 +223,7 @@ pub fn sandbox_start() -> Result<String, String> {
             "--cpus=2",
             "--security-opt=no-new-privileges",
             "-v",
-            &format!(
-                "{}:/workspace",
-                path_for_docker(&mount_workspace)
-            ),
+            &format!("{}:/workspace", path_for_docker(&mount_workspace)),
             "-v",
             &format!("{}:/kb:ro", path_for_docker(&mount_kb)),
             IMAGE_NAME,
@@ -243,7 +236,11 @@ pub fn sandbox_start() -> Result<String, String> {
         Ok(format!(
             "[run ok] 容器 {} 已启动 (id={})",
             CONTAINER_NAME,
-            String::from_utf8_lossy(&out.stdout).trim().chars().take(12).collect::<String>()
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .chars()
+                .take(12)
+                .collect::<String>()
         ))
     } else {
         Err(format!(
@@ -312,11 +309,11 @@ fn tail(s: &str, n: usize) -> String {
     }
 }
 
-/// Windows 路径 -> Docker 兼容路径 (D:\polaris -> //d/polaris in Docker Desktop)
+/// Windows 路径 -> Docker 兼容路径 (D:\polaris -> D:/polaris in Docker Desktop)
 fn path_for_docker(p: &std::path::Path) -> String {
     let s = p.to_string_lossy().to_string();
     if cfg!(windows) {
-        // Docker Desktop 接受 D:\... 也接受 //d/...; 这里规范化反斜杠为正斜杠
+        // Docker Desktop 接受 D:\... 也接受 D:/...; 这里规范化反斜杠为正斜杠
         s.replace('\\', "/")
     } else {
         s
@@ -328,3 +325,30 @@ fn shell_split(s: &str) -> Vec<String> {
     s.split_whitespace().map(|w| w.to_string()).collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_split_basic() {
+        assert_eq!(shell_split("claude --version"), vec!["claude", "--version"]);
+        assert!(shell_split("   ").is_empty());
+    }
+
+    #[test]
+    fn tail_respects_char_boundary() {
+        // 不能在多字节字符中间切断
+        let s = "你好世界";
+        let t = tail(s, 5);
+        assert!(s.ends_with(&t));
+    }
+
+    #[test]
+    fn path_for_docker_normalizes_on_windows() {
+        let p = std::path::Path::new("D:\\polaris\\PolarisKB");
+        let out = path_for_docker(p);
+        if cfg!(windows) {
+            assert_eq!(out, "D:/polaris/PolarisKB");
+        }
+    }
+}

@@ -12,7 +12,7 @@ export const isTauri =
   // @ts-ignore tauri injects this
   typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri) {
     // Browser-only stubs so the UI is still navigable during pure-web dev.
     return browserStub(cmd, args) as T;
@@ -68,25 +68,9 @@ export const kb = {
 };
 
 // ──────────────────────────────────────────────────────────────
-// Sandbox module
+// Sandbox module → 已迁出至 features/sandbox/api.ts (架构重构 Phase 1)
+// 浏览器降级 stub 仍保留在本文件下方的 browserStub() 中。
 // ──────────────────────────────────────────────────────────────
-export interface SandboxStatus {
-  docker_installed: boolean;
-  docker_running: boolean;
-  image_built: boolean;
-  image_name: string;
-  container_running: boolean;
-  container_name: string;
-  notes: string[];
-}
-
-export const sandbox = {
-  status: () => invoke<SandboxStatus>("sandbox_status"),
-  build: () => invoke<string>("sandbox_build_image"),
-  start: () => invoke<string>("sandbox_start"),
-  stop: () => invoke<string>("sandbox_stop"),
-  exec: (cmd: string) => invoke<string>("sandbox_exec", { cmd }),
-};
 
 // ──────────────────────────────────────────────────────────────
 // Chat module

@@ -10,7 +10,7 @@
 use crate::claude_md;
 use crate::conv;
 use crate::kb;
-use crate::sandbox;
+use polaris_sandbox as sandbox; // 板块⑤ 已抽离为独立 crate；别名保持 sandbox:: 调用不变
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

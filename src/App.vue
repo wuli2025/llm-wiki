@@ -5,7 +5,7 @@ import RightDrawer from "./components/RightDrawer.vue";
 import ChatPanel from "./components/ChatPanel.vue";
 import WikiBrowse from "./components/WikiBrowse.vue";
 import KnowledgeGraph from "./components/KnowledgeGraph.vue";
-import SandboxStatus from "./components/SandboxStatus.vue";
+import SandboxStatus from "./features/sandbox/components/SandboxStatus.vue";
 import ClaudeMdPanel from "./components/ClaudeMdPanel.vue";
 import Settings from "./components/Settings.vue";
 import { useAppStore } from "./stores/app";

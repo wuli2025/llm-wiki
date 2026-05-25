@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
-import { sandbox, type SandboxStatus } from "../tauri";
+import { sandbox, type SandboxStatus } from "../api";
 
 const status = ref<SandboxStatus | null>(null);
 const log = ref<string[]>([]);
