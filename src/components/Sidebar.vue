@@ -14,6 +14,7 @@ const navItems: { key: typeof app.view; label: string; glyph?: string; icon?: an
   { key: "sandbox", label: "沙箱", glyph: "⛨" },
   { key: "claude_md", label: "目录说明", glyph: "❡" },
   { key: "skill_center", label: "技能中心", icon: Puzzle },
+  { key: "env_doctor", label: "环境", glyph: "✚" },
   { key: "settings", label: "设置", glyph: "⚙" },
 ];
 

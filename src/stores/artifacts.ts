@@ -56,6 +56,17 @@ export const useArtifactsStore = defineStore("artifacts", () => {
     }
   }
 
+  /** 在系统文件管理器中定位并选中当前预览的文件 */
+  async function revealInFolder() {
+    if (current.value) {
+      try {
+        await api.reveal(current.value.path);
+      } catch (_) {
+        /* 忽略：打开失败不影响预览 */
+      }
+    }
+  }
+
   return {
     current,
     payload,
@@ -67,5 +78,6 @@ export const useArtifactsStore = defineStore("artifacts", () => {
     close,
     toggleExpand,
     openExternal,
+    revealInFolder,
   };
 });

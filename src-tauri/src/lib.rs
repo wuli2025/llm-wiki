@@ -2,6 +2,7 @@ mod chat;
 mod claude_md;
 mod conv;
 mod convert;
+mod doctor;
 mod kb;
 mod provider;
 mod skills;
@@ -78,6 +79,7 @@ pub fn run() {
             chat::chat_attach_files,
             chat::artifact_read,
             chat::artifact_open_external,
+            chat::artifact_reveal,
             chat::artifact_list,
             chat::artifact_search,
             // CLAUDE.md
@@ -100,6 +102,12 @@ pub fn run() {
             provider::usage_summary,
             provider::codex_status,
             provider::codex_login,
+            // 环境医生 (环境监测 + 配置安装)
+            doctor::env_check,
+            doctor::env_fix_path,
+            doctor::env_install_claude,
+            doctor::env_install_pwsh,
+            doctor::env_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Polaris application");

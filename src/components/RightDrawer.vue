@@ -4,6 +4,7 @@ import { marked } from "marked";
 import {
   X,
   RefreshCw,
+  FolderOpen,
   ExternalLink,
   Globe,
   Maximize2,
@@ -120,8 +121,12 @@ function fmtSize(n: number): string {
           {{ fmtSize(artifacts.payload.size) }}
         </span>
         <div class="pv-actions">
-          <button class="pv-btn" title="刷新" @click="artifacts.refresh()">
-            <RefreshCw :size="14" :stroke-width="1.8" />
+          <button
+            class="pv-btn"
+            title="打开原文件夹位置"
+            @click="artifacts.revealInFolder()"
+          >
+            <FolderOpen :size="15" :stroke-width="1.8" />
           </button>
           <button
             class="pv-btn"

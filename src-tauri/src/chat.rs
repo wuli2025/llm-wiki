@@ -34,6 +34,26 @@ pub fn init(_app: &AppHandle) -> Result<(), anyhow::Error> {
 /// 深度搜索 / 联网搜索因此能真正联网检索, 而不是退回内置知识。
 const DEFAULT_WEB_TOOLS: &str = "WebSearch,WebFetch";
 
+/// 非「拒绝授权」档位下额外放行的本地工具。
+/// 缘由: headless (`--print`, stdin=null) 模式下没有人能逐个点「同意」, `acceptEdits`
+/// 只自动批准文件编辑而 **不含执行**, 于是 claude 能写出 `create_pptx.py` 却跑不了
+/// `python create_pptx.py` → .pptx / .xlsx / 图表这类「要执行脚本才能产出」的成品全部卡死
+/// (实测 permission_denials 五连拒, 工具名是 Windows 的 `PowerShell`)。
+/// 这里显式放行本地读写 + 执行 (Windows shell 工具叫 `PowerShell`, 跨平台再带上 `Bash`),
+/// 让成品能真正落地。危险兜底仍由「拒绝授权(plan, 只读)」档位提供。
+const LOCAL_WORK_TOOLS: &str = "Read,Write,Edit,Glob,Grep,Bash,PowerShell";
+
+/// 按权限档位 (cli_value: default | acceptEdits | plan) 组装 `--allowedTools`。
+/// - plan (拒绝授权 / 只读): 仅联网工具, 不放行任何本地执行;
+/// - default / acceptEdits (手动 / 自动): 联网 + 本地读写执行, 成品能真正产出。
+fn allowed_tools_for(perm: &str) -> String {
+    if perm == "plan" {
+        DEFAULT_WEB_TOOLS.to_string()
+    } else {
+        format!("{},{}", DEFAULT_WEB_TOOLS, LOCAL_WORK_TOOLS)
+    }
+}
+
 // ───────────────────────── Types ─────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +88,9 @@ pub struct ChatSendArgs {
     pub skill_ids: Option<Vec<String>>,
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// 目标模式：完成条件。设置后注入「持续推进直到达成」指令。
+    #[serde(default)]
+    pub goal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -155,6 +178,17 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     // 2. 输出文件约定 (Polaris) — 让成品文件落到产物目录, 侧边栏即可预览
     final_prompt.push_str(&output_convention(&art_dir));
     final_prompt.push_str("\n\n---\n\n");
+
+    // 2.5 目标模式: 用户设了完成条件时, 注入「持续推进直到达成」指令
+    if let Some(goal) = args
+        .goal
+        .as_deref()
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+    {
+        final_prompt.push_str(&goal_directive(goal));
+        final_prompt.push_str("\n\n---\n\n");
+    }
 
     // 3. CLAUDE.md 上下文
     if !cm_ctx.is_empty() {
@@ -486,6 +520,8 @@ fn emit_event(app: &AppHandle, ev: ChatStreamEvent) {
 
 fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
     let perm_flag = format!("--permission-mode={}", perm);
+    // 联网 + (非只读档位)本地读写执行, 让成品能真正产出
+    let allowed = allowed_tools_for(perm);
     // 沙箱内 KB 永远挂在 /kb (sandbox_start 时挂载),
     // 这里让 claude 把 /kb 也加进可读目录,并以 /workspace 为 cwd
     let child = Command::new("docker")
@@ -502,9 +538,8 @@ fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
             "--verbose",
             "--add-dir",
             "/kb",
-            // 联网搜索默认打开 (沙箱内同样预授权 WebSearch / WebFetch)
             "--allowedTools",
-            DEFAULT_WEB_TOOLS,
+            &allowed,
             &perm_flag,
             prompt,
         ])
@@ -544,10 +579,10 @@ fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path) -> Result<Child, Stri
         "--verbose".into(),
     ];
     args.extend(extra_dirs);
-    // 联网搜索默认打开: 把内置 WebSearch / WebFetch 预授权, 任何权限模式下都不再被拦,
-    // 这样深度搜索 / 联网搜索能真正联网, 不会退回内置知识。
+    // 联网工具默认放行; 非「拒绝授权」档位再叠加本地读写执行 (Bash/PowerShell/文件),
+    // 否则 headless 下连 `python xxx.py` 都被拒, .pptx/.xlsx 这类成品根本产不出来。
     args.push("--allowedTools".into());
-    args.push(DEFAULT_WEB_TOOLS.into());
+    args.push(allowed_tools_for(perm));
     args.push(perm_flag);
     args.push(prompt.to_string());
 
@@ -618,6 +653,22 @@ fn output_convention(art_dir: &Path) -> String {
 3. 在回答末尾用一句话点明你生成了哪些文件(文件名即可)。\n\n\
 普通问答无需创建文件。",
         dir = dir
+    )
+}
+
+/// 目标模式指令: 把用户设定的「完成条件」当作直接指令, 引导 claude 持续推进直到达成,
+/// 对应 Claude Code 的 goal 模式 —— 条件未满足前不收尾、不反问, 自行规划下一步。
+fn goal_directive(goal: &str) -> String {
+    format!(
+        "## 目标模式 (Goal Mode)\n\n\
+本轮已开启**目标模式**。用户设定的完成条件是:\n\n\
+> {goal}\n\n\
+把这个条件本身当作你的指令, 持续推进直到它真正达成:\n\
+1. 条件未满足时不要收尾, 也不要反问用户「接下来做什么」—— 自行规划并执行下一步。\n\
+2. 每完成一步, 对照条件自检是否已达成; 未达成就继续做, 直到满足为止。\n\
+3. 条件达成后, 明确说明它已达成, 并简述你是如何确认的。\n\
+4. 仅当遇到无法自行解决的硬阻塞(如缺少凭据 / 权限 / 外部依赖)时, 才停下来向用户说明原因。",
+        goal = goal
     )
 }
 
@@ -775,6 +826,41 @@ pub fn artifact_open_external(path: String) -> Result<(), String> {
     {
         Command::new("xdg-open")
             .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 在系统文件管理器中定位并选中该产物文件 (Windows 资源管理器 / macOS Finder)。
+/// Linux 无统一「选中文件」语义, 退化为打开其所在目录。
+#[tauri::command]
+pub fn artifact_reveal(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // explorer /select 需要反斜杠路径; 用 raw_arg 让路径被正确引号包裹
+        let win_path = path.replace('/', "\\");
+        Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", win_path))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let parent = std::path::Path::new(&path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+        Command::new("xdg-open")
+            .arg(&parent)
             .spawn()
             .map_err(|e| e.to_string())?;
     }

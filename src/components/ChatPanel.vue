@@ -21,6 +21,7 @@ import {
   ExternalLink,
   Paperclip,
   LoaderCircle,
+  Target,
 } from "@lucide/vue";
 import {
   chat,
@@ -77,6 +78,17 @@ const showSkillPanel = ref(false);
 const skillSearch = ref("");
 const skillsList = ref<Skill[]>([]);
 const scrollEl = ref<HTMLDivElement | null>(null);
+
+// ─────────── 目标模式 (Claude Code goal) ───────────
+// 开启后，主输入框里写的内容即「完成条件」：Claude 会持续推进直到达成，
+// 不中途收尾、不反问。开关随会话持续生效（贴近 session-scoped /goal），手动关闭。
+const goalMode = ref(false);
+const inputEl = ref<HTMLTextAreaElement | null>(null);
+
+function toggleGoal() {
+  goalMode.value = !goalMode.value;
+  if (goalMode.value) nextTick(() => inputEl.value?.focus());
+}
 
 // ─────────── 拖拽上传附件到当前对话 ───────────
 const attachments = ref<AttachedFile[]>([]);
@@ -267,6 +279,8 @@ async function send() {
   await chatStore.send(convId, prompt, text || "（仅附件）", attached, {
     permissionMode: permMode.value,
     skillIds: Array.from(skillsStore.enabledSkills),
+    // 目标模式下，本条输入框内容即完成条件
+    goal: goalMode.value && text ? text : undefined,
   });
 }
 
@@ -280,10 +294,13 @@ function pickPerm(m: PermissionMode) {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault();
-    send();
-  }
+  if (e.key !== "Enter") return;
+  // Shift+Enter 仍然换行
+  if (e.shiftKey) return;
+  // 中文/日文等输入法在组合（选词）中按回车是确认候选词，不应发送
+  if (e.isComposing || (e as any).keyCode === 229) return;
+  e.preventDefault();
+  send();
 }
 
 async function newChat() {
@@ -438,7 +455,7 @@ async function newChat() {
       </div>
 
       <!-- 输入卡片 -->
-      <div class="input-card">
+      <div class="input-card" :class="{ 'goal-on': goalMode }">
         <!-- Skill 标签 -->
         <div v-if="skillsStore.enabledSkills.size > 0" class="skill-tags">
           <div
@@ -481,8 +498,13 @@ async function newChat() {
           </div>
         </div>
         <textarea
+          ref="inputEl"
           v-model="input"
-          placeholder="请输入消息 (Ctrl + Enter 发送，可拖文件进来作为附件) …"
+          :placeholder="
+            goalMode
+              ? '目标模式：在此写下完成条件，Claude 会持续推进直到达成 (Enter 发送) …'
+              : '请输入消息 (Enter 发送 · Shift + Enter 换行，可拖文件进来作为附件) …'
+          "
           rows="3"
           @keydown="onKeydown"
         ></textarea>
@@ -512,6 +534,22 @@ async function newChat() {
                 </div>
               </div>
             </button>
+            <button
+              class="toolbar-btn"
+              :class="{ active: goalMode }"
+              @click="toggleGoal"
+            >
+              <Target :size="14" :stroke-width="1.8" />
+              <span>目标模式</span>
+              <div class="btn-tooltip">
+                <div class="btn-tooltip-inner">
+                  设定一个完成条件，Claude 会持续推进直到达成
+                  <div class="btn-tooltip-sub">
+                    条件满足前不中途收尾、不反问，自行规划下一步
+                  </div>
+                </div>
+              </div>
+            </button>
           </div>
           <div class="toolbar-right">
             <button
@@ -525,7 +563,7 @@ async function newChat() {
             <button
               v-else
               class="send-btn"
-              title="发送 (Ctrl+Enter)"
+              title="发送 (Enter)"
               :disabled="!input.trim()"
               @click="send"
             >
@@ -1014,6 +1052,12 @@ textarea {
   opacity: 0.5;
   width: 12px;
   height: 12px;
+}
+
+/* 目标模式激活时，输入卡片描边提示「这一框内容即完成条件」 */
+.input-card.goal-on {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary-soft), var(--shadow);
 }
 
 .toolbar-right {

@@ -13,6 +13,7 @@ export type ViewKey =
   | "sandbox"
   | "claude_md"
   | "skill_center"
+  | "env_doctor"
   | "settings";
 
 export const useAppStore = defineStore("app", () => {

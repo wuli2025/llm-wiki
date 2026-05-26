@@ -99,6 +99,8 @@ export interface ChatSendArgs {
   useSandbox?: boolean;
   skillIds?: string[];
   conversationId?: string;
+  /** 目标模式：完成条件。设置后 Claude 会持续推进直到达成，不中途收尾。 */
+  goal?: string;
 }
 
 export interface ChatStreamEvent {
@@ -171,6 +173,8 @@ export const artifacts = {
   read: (path: string) => invoke<ArtifactPayload>("artifact_read", { path }),
   openExternal: (path: string) =>
     invoke<void>("artifact_open_external", { path }),
+  /** 在系统文件管理器中定位并选中该文件（资源管理器 / 访达） */
+  reveal: (path: string) => invoke<void>("artifact_reveal", { path }),
   /** 列出某会话产物文件，按修改时间倒序 */
   list: (conversationId?: string) =>
     invoke<ArtifactEntry[]>("artifact_list", {
@@ -412,6 +416,53 @@ export const provider = {
 };
 
 // ──────────────────────────────────────────────────────────────
+// 环境医生 module — 新用户「环境监测 + 配置安装」(claude / pwsh / PATH)
+// ──────────────────────────────────────────────────────────────
+export interface ToolStatus {
+  key: "claude" | "pwsh" | "node" | "npm";
+  name: string;
+  found: boolean;
+  version: string | null;
+  path: string | null;
+  onPath: boolean;
+  required: boolean;
+  hint: string;
+}
+export interface EnvReport {
+  os: string;
+  claude: ToolStatus;
+  pwsh: ToolStatus;
+  node: ToolStatus;
+  npm: ToolStatus;
+  claudeDir: string | null;
+  claudeDirOnUserPath: boolean;
+  ready: boolean;
+}
+export interface PathFixResult {
+  ok: boolean;
+  dir: string | null;
+  status: string;
+  message: string;
+}
+export interface EnvStreamEvent {
+  reqId: string;
+  kind: "log" | "error" | "done";
+  line?: string;
+  ok?: boolean;
+  message?: string;
+}
+
+export const envDoctor = {
+  check: () => invoke<EnvReport>("env_check"),
+  fixPath: () => invoke<PathFixResult>("env_fix_path"),
+  /** 安装 Claude Code。method: "native"(irm install.ps1, 默认) | "npm" */
+  installClaude: (method: "native" | "npm" = "native") =>
+    invoke<string>("env_install_claude", { method }),
+  installPwsh: () => invoke<string>("env_install_pwsh"),
+  cancel: (reqId: string) => invoke<void>("env_cancel", { reqId }),
+};
+
+// ──────────────────────────────────────────────────────────────
 // Browser stubs (when running in plain `npm run dev` without Tauri)
 // ──────────────────────────────────────────────────────────────
 function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
@@ -595,6 +646,40 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
     case "codex_status":
       return { installed: false, loggedIn: false, authPath: "(browser-only)" };
     case "codex_login":
+      return undefined;
+    case "env_check": {
+      const tool = (key: string, name: string, found: boolean, required = false): ToolStatus => ({
+        key: key as ToolStatus["key"],
+        name,
+        found,
+        version: found ? "(browser stub) v0.0.0" : null,
+        path: found ? `/usr/local/bin/${key}` : null,
+        onPath: found,
+        required,
+        hint: found ? "(browser stub) 已安装" : "未安装 —— 浏览器预览无法真实检测",
+      });
+      return {
+        os: "browser",
+        claude: tool("claude", "Claude Code", false, true),
+        pwsh: tool("pwsh", "PowerShell 7", false),
+        node: tool("node", "Node.js", true),
+        npm: tool("npm", "npm", true),
+        claudeDir: null,
+        claudeDirOnUserPath: true,
+        ready: false,
+      };
+    }
+    case "env_fix_path":
+      return {
+        ok: false,
+        dir: null,
+        status: "skipped",
+        message: "浏览器预览模式无法修改环境变量。",
+      };
+    case "env_install_claude":
+    case "env_install_pwsh":
+      return "env-stub-req";
+    case "env_cancel":
       return undefined;
     case "usage_summary": {
       const daily = Array.from({ length: 14 }, (_, i) => {

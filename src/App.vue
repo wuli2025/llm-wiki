@@ -13,6 +13,7 @@ import AddProviderModal from "./components/AddProviderModal.vue";
 import UsageBoard from "./components/UsageBoard.vue";
 import SplashScreen from "./components/SplashScreen.vue";
 import Onboarding from "./components/Onboarding.vue";
+import EnvDoctor from "./components/EnvDoctor.vue";
 import { useAppStore } from "./stores/app";
 import { useArtifactsStore } from "./stores/artifacts";
 import { useProvidersStore } from "./stores/providers";
@@ -29,15 +30,18 @@ onMounted(() => {
   chatStore.init();
 });
 
-// 启动流程：splash(每次) → onboarding(仅首次) → ready
+// 启动流程：splash(每次) → onboarding(仅首次) → env(环境检测,健康则无感放行) → ready
 const ONBOARDED_KEY = "polaris.onboarded.v1";
-const phase = ref<"splash" | "onboarding" | "ready">("splash");
+const phase = ref<"splash" | "onboarding" | "env" | "ready">("splash");
 
 function onSplashDone() {
   const done = localStorage.getItem(ONBOARDED_KEY);
-  phase.value = done ? "ready" : "onboarding";
+  phase.value = done ? "env" : "onboarding";
 }
 function onOnboardingDone() {
+  phase.value = "env";
+}
+function onEnvDone() {
   phase.value = "ready";
 }
 
@@ -64,6 +68,7 @@ const layoutCols = computed(
       <SandboxStatus v-else-if="app.view === 'sandbox'" />
       <ClaudeMdPanel v-else-if="app.view === 'claude_md'" />
       <SkillCenter v-else-if="app.view === 'skill_center'" />
+      <EnvDoctor v-else-if="app.view === 'env_doctor'" />
       <Settings v-else-if="app.view === 'settings'" />
       <div v-else class="placeholder">—</div>
     </main>
@@ -78,6 +83,9 @@ const layoutCols = computed(
     </Transition>
     <Transition name="onboard-fade">
       <Onboarding v-if="phase === 'onboarding'" @done="onOnboardingDone" />
+    </Transition>
+    <Transition name="onboard-fade">
+      <EnvDoctor v-if="phase === 'env'" gate @done="onEnvDone" />
     </Transition>
   </div>
 </template>
