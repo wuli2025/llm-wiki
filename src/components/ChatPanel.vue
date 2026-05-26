@@ -259,12 +259,33 @@ async function loadHistory(convId: string | null) {
 watch(
   () => app.currentConvId,
   (cid) => {
+    // 切换对话：解绑当前前台流（后台任务进程仍在跑，其 done 按会话 id 收尾），
+    // 避免后台对话的 delta 渗进新打开的对话视图。已发起的任务不取消，继续多开。
+    currentReq.value = null;
+    inflightConvId = null;
+    sending.value = false;
     loadHistory(cid);
   }
 );
 
 onMounted(async () => {
   unlisten = await listen<ChatStreamEvent>("chat:stream", (ev) => {
+    // done 是唯一终态（即便失败也会在末尾 emit）。无论前台/后台，都按会话 id 收尾：
+    // 结束工位会话；若用户已切到别的对话，给该对话打墨蓝未读点（多开核心）。
+    if (ev.kind === "done") {
+      const cid = ev.conversationId ?? null;
+      if (cid) {
+        sessions.finish(cid);
+        app.markUnread(cid); // 正在查看该对话时内部自动 no-op
+      }
+      if (ev.reqId === currentReq.value) {
+        sending.value = false;
+        currentReq.value = null;
+        inflightConvId = null;
+      }
+      return;
+    }
+    // 其余事件（delta/tool/artifact/error）只更新「当前前台流」的可见气泡
     if (!currentReq.value || ev.reqId !== currentReq.value) return;
     const last = bubbles.value[bubbles.value.length - 1];
     if (ev.kind === "delta") {
@@ -298,26 +319,11 @@ onMounted(async () => {
         if (!target.artifacts.includes(path)) target.artifacts.push(path);
       }
     } else if (ev.kind === "error") {
+      // stderr 行 / 退出错误：仅展示，不作为终态（终态由 done 处理）
       bubbles.value.push({
         role: "assistant",
         text: `[错误] ${ev.text ?? ""}`,
       });
-      sending.value = false;
-      currentReq.value = null;
-      if (inflightConvId) {
-        sessions.finish(inflightConvId);
-        app.markUnread(inflightConvId);
-      }
-      inflightConvId = null;
-    } else if (ev.kind === "done") {
-      sending.value = false;
-      currentReq.value = null;
-      // 任务完成：结束工位会话；若用户已切走，给该对话打墨蓝未读点
-      if (inflightConvId) {
-        sessions.finish(inflightConvId);
-        app.markUnread(inflightConvId);
-      }
-      inflightConvId = null;
     }
     nextTick(() => {
       if (scrollEl.value)

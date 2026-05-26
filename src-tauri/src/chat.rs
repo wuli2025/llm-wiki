@@ -185,6 +185,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     // stderr 读线程: 任何 stderr 行都 emit 为 error 事件; 累积起来给 wait 用
     let app_err = app.clone();
     let req_err = req_id.clone();
+    let conv_id_err = conv_id_opt.clone();
     let stderr_buf = Arc::new(Mutex::new(String::new()));
     let stderr_buf_clone = stderr_buf.clone();
     std::thread::spawn(move || {
@@ -203,7 +204,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
                     kind: "error".into(),
                     text: Some(format!("[stderr] {}", line)),
                     tool: None,
-                    conversation_id: None,
+                    conversation_id: conv_id_err.clone(),
                 },
             );
         }
@@ -286,7 +287,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
                     kind: "error".into(),
                     text: Some(msg),
                     tool: None,
-                    conversation_id: None,
+                    conversation_id: conv_id_thread.clone(),
                 },
             );
         }
