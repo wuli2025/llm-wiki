@@ -141,6 +141,11 @@ async function confirmDelete(c: Conversation) {
             :class="{ active: app.currentConvId === c.id }"
             @click="app.selectConversation(c)"
           >
+            <span
+              v-if="app.unreadConvs.has(c.id)"
+              class="cv-dot"
+              title="有已完成的任务待查看"
+            ></span>
             <span class="cv-name" :title="c.title">{{ c.title }}</span>
             <button
               class="ca delete"
@@ -420,6 +425,19 @@ async function confirmDelete(c: Conversation) {
   background: var(--selection-bg);
   color: var(--text);
   font-weight: 500;
+}
+.cv-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
+  flex-shrink: 0;
+  animation: cvDotIn 0.3s ease;
+}
+@keyframes cvDotIn {
+  from { transform: scale(0); }
+  to { transform: scale(1); }
 }
 .cv-name {
   flex: 1;

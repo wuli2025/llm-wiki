@@ -20,6 +20,21 @@ export const useAppStore = defineStore("app", () => {
   const sidebarCollapsed = ref(false);
   const drawerCollapsed = ref(false);
 
+  // 任务完成但用户未查看的会话集合 → 侧栏显示墨蓝色未读点
+  const unreadConvs = ref<Set<string>>(new Set());
+  function markUnread(convId: string) {
+    if (!convId) return;
+    // 正在查看的对话不标记
+    if (convId === currentConvId.value) return;
+    unreadConvs.value = new Set(unreadConvs.value).add(convId);
+  }
+  function clearUnread(convId: string) {
+    if (!unreadConvs.value.has(convId)) return;
+    const s = new Set(unreadConvs.value);
+    s.delete(convId);
+    unreadConvs.value = s;
+  }
+
   // 项目 + 对话
   const projects = ref<Project[]>([]);
   const expandedProjects = ref<Set<string>>(new Set());
@@ -106,6 +121,7 @@ export const useAppStore = defineStore("app", () => {
   function selectConversation(conv: Conversation) {
     currentConvId.value = conv.id;
     currentProjectId.value = conv.projectId;
+    clearUnread(conv.id);
     setView("chat");
   }
 
@@ -119,6 +135,9 @@ export const useAppStore = defineStore("app", () => {
     setView,
     toggleSidebar,
     toggleDrawer,
+    unreadConvs,
+    markUnread,
+    clearUnread,
     // conv
     projects,
     expandedProjects,

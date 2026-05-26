@@ -104,6 +104,8 @@ const skillsList = ref<Skill[]>([]);
 const scrollEl = ref<HTMLDivElement | null>(null);
 
 let unlisten: (() => void) | null = null;
+// 当前在途请求所属的会话 id —— 完成时若用户已切走则标记墨蓝未读点
+let inflightConvId: string | null = null;
 
 // ─────────── 拖拽上传附件到当前对话 ───────────
 const attachments = ref<AttachedFile[]>([]);
@@ -301,6 +303,9 @@ onMounted(async () => {
     } else if (ev.kind === "done") {
       sending.value = false;
       currentReq.value = null;
+      // 任务完成：若用户已切到别的对话，给该对话打墨蓝未读点
+      if (inflightConvId) app.markUnread(inflightConvId);
+      inflightConvId = null;
     }
     nextTick(() => {
       if (scrollEl.value)
@@ -336,6 +341,7 @@ async function send() {
   if ((!text && !hasAttach) || sending.value) return;
 
   const convId = await ensureConversation();
+  inflightConvId = convId;
 
   // 把附件绝对路径拼进 prompt，让 claude 能用 Read 等工具读取
   let prompt = text || "请查看我上传的附件。";
