@@ -5,23 +5,32 @@
 
 ## 实现状态
 
-| 板块 | 状态 | MVP 范围 |
+| 板块 | 状态 | 范围 |
 |------|------|---------|
-| ① 对话核心 | ✅ v0.1 已实现 | 直接调 claude CLI(沙箱内/宿主),stream-json 渲染气泡 |
-| ② 维基知识库 | ✅ v0.1 已实现 | 扫描 / 关键词加权评分搜索 / 双链图谱 / 简易 ingest |
-| ③ Skill 技能库 | ⏳ 规划中 | 见 [03-skill-PRD.md](./03-skill-PRD.md) |
+| ① 对话核心 | ✅ 已实现 | 直接调 claude CLI(沙箱内/宿主),stream-json 渲染气泡 + 成品预览 |
+| ② 维基知识库 | ✅ 已实现 | 扫描 / 关键词加权评分搜索 / 双链星河图谱 / 拖拽入库 |
+| ③ Skill 技能库 | ✅ 已实现 | 技能中心：catalog 预置 + 用户自建 + 外部导入(git/url/zip)。见 [03-skill-PRD.md](./03-skill-PRD.md) |
 | ④ 统一调度中心 | ⏳ 规划中 | 见 [04-scheduling-PRD.md](./04-scheduling-PRD.md) |
-| ⑤ 安全沙箱层 | ✅ v0.1 已实现 → **Phase 1 板块化提取完成** | 轻量 alpine 镜像 + docker CLI 包装,build/start/stop/exec。已抽离为独立 `polaris-sandbox` crate |
-| ⑥ 多模态输入 | ⏳ 规划中 | 见 [06-multimodal-PRD.md](./06-multimodal-PRD.md) |
-| ⑦ 设置中心 | ⏳ 规划中 | 见 [07-settings-PRD.md](./07-settings-PRD.md) |
+| ⑤ 安全沙箱层 | ✅ 已实现 → **Phase 1 板块化提取完成** | 轻量 alpine 镜像 + docker CLI 包装,build/start/stop/exec。已抽离为独立 `polaris-sandbox` crate |
+| ⑥ 多模态输入 | 🔧 部分实现 | 任意格式拖拽 → 转 Markdown(`convert.rs`) 已落地；语音输入待做。见 [06-multimodal-PRD.md](./06-multimodal-PRD.md) |
+| ⑦ 设置中心 | 🔧 部分实现 | 工作文件夹配置 + 首次启动引导已落地；其余见 [07-settings-PRD.md](./07-settings-PRD.md) |
+
+### 框架外新增（不在原七板块）
+
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| API 供应商坞 + 用量看板 | ✅ 已实现 | 多供应商一键切换(写 `~/.claude/settings.json`) + 读 `~/.claude/projects` 统计用量 |
+| 启动体验 | ✅ 已实现 | 北极星启动页(SplashScreen) + 首次工作文件夹引导(Onboarding) |
+| 内置浏览器 | ⏳ 规划中 | CloakBrowser 隐身浏览器集成。见 [08-browser-PRD.md](./08-browser-PRD.md) |
 
 ## 演进路径
 
 ```
-v0.1 (现在)  →  ① + ② + ⑤  跑通核心闭环
-v0.2         →  ④ 调度中心 (权限策略 + 进程池) 替换 v0.1 直传参数
-v0.3         →  ③ Skill 库 + ⑥ 多模态 (文件转 MD)
-v0.4         →  ⑥ 语音输入 (豆包模式) + ⑦ 设置中心整合
+v0.1         →  ① + ② + ⑤  跑通核心闭环
+v0.x (现在)  →  ③ 技能中心 + ④ 供应商坞 + ⑥ 文件转换 + 启动引导 已落地
+下一步       →  ④ 调度中心 (权限策略 + 进程池) 替换直传参数
+             →  ⑥ 语音输入 (豆包模式) + ⑦ 设置中心整合
+             →  ⑧ 内置浏览器 (CloakBrowser)
 ```
 
 ## 板块边界铁律 (沿用 PRD §16)
