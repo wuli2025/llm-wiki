@@ -65,6 +65,14 @@ fn catalog() -> Vec<CatalogSkill> {
             system_prompt: include_str!("templates/skills/xlsx.md"),
         },
         CatalogSkill {
+            id: "pptx",
+            name: "PPT 演示文稿",
+            description: "把 PDF / 文档 / 数据转成有高级感的 PPT：母版配色、版式层级、图表，python-pptx 生成",
+            source: "official",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/pptx.md"),
+        },
+        CatalogSkill {
             id: "edge-tts",
             name: "语音合成 Edge-TTS",
             description: "把文本转成自然语音音频，多语言多音色，免费无需 key",

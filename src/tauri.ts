@@ -460,6 +460,7 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         { id: "skill-creator", name: "Skill 创建向导", description: "引导用户创建自定义 Skill，自动生成模板和配置文件", source: "official", installed: true, removable: false },
         { id: "pdf", name: "PDF 文档处理", description: "提取 / 生成 / 编辑 PDF：抽取文本表格、合并拆分、Markdown 转 PDF、表单与 OCR", source: "official", installed: false, removable: false },
         { id: "xlsx", name: "Excel 表格", description: "读取分析与生成 Excel：透视统计、公式、图表、多 sheet 报表", source: "official", installed: false, removable: false },
+        { id: "pptx", name: "PPT 演示文稿", description: "把 PDF / 文档 / 数据转成有高级感的 PPT：母版配色、版式层级、图表，python-pptx 生成", source: "official", installed: false, removable: false },
         { id: "edge-tts", name: "语音合成 Edge-TTS", description: "把文本转成自然语音音频，多语言多音色，免费无需 key", source: "third-party", installed: false, removable: false },
         { id: "hyperframes", name: "视频动画 Hyperframes", description: "用逐帧 / 分镜方式生成短视频与动画，ffmpeg 合成，可配 Edge-TTS 旁白", source: "third-party", installed: false, removable: false },
         { id: "web-search", name: "联网搜索", description: "实时联网检索，基于 Tavily / Brave 等真实来源回答并交叉验证", source: "third-party", installed: false, removable: false },

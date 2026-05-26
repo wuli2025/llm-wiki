@@ -22,6 +22,7 @@
 | API 供应商坞 + 用量看板 | ✅ 已实现 | 多供应商一键切换(写 `~/.claude/settings.json`) + 读 `~/.claude/projects` 统计用量 |
 | 启动体验 | ✅ 已实现 | 北极星启动页(SplashScreen) + 首次工作文件夹引导(Onboarding) |
 | 内置浏览器 | ⏳ 规划中 | CloakBrowser 隐身浏览器集成。见 [08-browser-PRD.md](./08-browser-PRD.md) |
+| **Coworker 升级** | 🔧 进行中 | PPT 能力 + 产物归属 + 参考资料文件夹 + CubeSandbox(E2B) + 多开 + 工位数字人 + 完成提醒。见 [09-coworker-upgrade-PRD.md](./09-coworker-upgrade-PRD.md) |
 
 ## 演进路径
 
