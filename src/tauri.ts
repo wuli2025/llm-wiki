@@ -156,10 +156,26 @@ export interface ArtifactPayload {
   size: number;
 }
 
+/** 「参考资料」文件夹视图的一条文件记录 */
+export interface ArtifactEntry {
+  path: string;
+  name: string;
+  ext: string;
+  kind: ArtifactKind;
+  size: number;
+  /** 修改时间 Unix 秒 */
+  modified: number;
+}
+
 export const artifacts = {
   read: (path: string) => invoke<ArtifactPayload>("artifact_read", { path }),
   openExternal: (path: string) =>
     invoke<void>("artifact_open_external", { path }),
+  /** 列出某会话产物文件，按修改时间倒序 */
+  list: (conversationId?: string) =>
+    invoke<ArtifactEntry[]>("artifact_list", {
+      conversationId: conversationId ?? null,
+    }),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -454,6 +470,8 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
     }
     case "artifact_open_external":
       return undefined;
+    case "artifact_list":
+      return [];
     case "list_skills":
       return [
         { id: "deep-research", name: "深度搜索", description: "使用 LLM 大规模联网搜索相关内容，自动检索、汇总、交叉验证多来源信息", source: "third-party", installed: true, removable: false },

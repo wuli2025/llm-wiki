@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { marked } from "marked";
 import {
   X,
@@ -16,10 +16,66 @@ import {
 } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 import { useArtifactsStore } from "../stores/artifacts";
+import { artifacts as artifactsApi, type ArtifactEntry } from "../tauri";
 
 const app = useAppStore();
 const artifacts = useArtifactsStore();
 const activeTab = ref<"artifacts" | "ref" | "audit">("artifacts");
+
+// ───── 参考资料：本对话产物文件夹（按时间倒序，点开即在本栏预览） ─────
+const refFiles = ref<ArtifactEntry[]>([]);
+const refLoading = ref(false);
+// 当前预览文件路径（避免在 v-else 分支里直接读 artifacts.current 被模板收窄成 never）
+const currentPath = computed(() => artifacts.current?.path ?? null);
+
+async function loadRefFiles() {
+  refLoading.value = true;
+  try {
+    refFiles.value = await artifactsApi.list(app.currentConvId ?? undefined);
+  } catch {
+    refFiles.value = [];
+  } finally {
+    refLoading.value = false;
+  }
+}
+
+// 切到「参考资料」tab 或换对话时刷新
+watch(
+  () => [activeTab.value, app.currentConvId] as const,
+  ([tab]) => {
+    if (tab === "ref") loadRefFiles();
+  },
+  { immediate: true }
+);
+// 预览关闭后回到抽屉时，若停在参考资料则刷新一次（可能刚生成新文件）
+watch(
+  () => artifacts.current,
+  (cur) => {
+    if (!cur && activeTab.value === "ref") loadRefFiles();
+  }
+);
+
+function iconFor(kind: string) {
+  if (kind === "html" || kind === "svg") return FileCode;
+  if (kind === "image") return ImageIcon;
+  if (kind === "markdown" || kind === "text") return FileText;
+  return FileIcon;
+}
+
+function fmtTime(unixSec: number): string {
+  if (!unixSec) return "";
+  const d = new Date(unixSec * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const today = new Date();
+  const sameDay =
+    d.getFullYear() === today.getFullYear() &&
+    d.getMonth() === today.getMonth() &&
+    d.getDate() === today.getDate();
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return sameDay
+    ? `今天 ${hm}`
+    : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+}
 
 const headIcon = computed(() => {
   const k = artifacts.payload?.kind;
@@ -186,14 +242,55 @@ function fmtSize(n: number): string {
           </button>
         </div>
         <div class="body">
-          <div class="empty">
+          <!-- 参考资料：本对话产物文件夹（时间倒序，点开即预览） -->
+          <template v-if="activeTab === 'ref'">
+            <div class="ref-head">
+              <span class="ref-count">本对话 · {{ refFiles.length }} 个文件</span>
+              <button class="dh-btn" title="刷新" @click="loadRefFiles">
+                <RefreshCw :size="13" :stroke-width="1.8" />
+              </button>
+            </div>
+            <div v-if="refLoading" class="ref-loading">
+              <Loader :size="18" :stroke-width="1.6" class="spin" />
+            </div>
+            <ul v-else-if="refFiles.length" class="ref-list">
+              <li
+                v-for="f in refFiles"
+                :key="f.path"
+                class="ref-item"
+                :class="{ active: currentPath === f.path }"
+                :title="f.path"
+                @click="artifacts.open(f.path)"
+              >
+                <component
+                  :is="iconFor(f.kind)"
+                  :size="16"
+                  :stroke-width="1.7"
+                  class="ref-ic"
+                />
+                <div class="ref-meta">
+                  <div class="ref-name">{{ f.name }}</div>
+                  <div class="ref-sub">
+                    {{ fmtTime(f.modified) }} · {{ fmtSize(f.size) }}
+                  </div>
+                </div>
+              </li>
+            </ul>
+            <div v-else class="empty">
+              <div class="empty-glyph">▦</div>
+              <div class="empty-text">
+                本对话还没有产出文件。<br />
+                生成 HTML / 报告 / PPT 等成品后,会按时间出现在这里,点开即预览。
+              </div>
+            </div>
+          </template>
+
+          <!-- 其它 tab 占位 -->
+          <div v-else class="empty">
             <div class="empty-glyph">▤</div>
             <div class="empty-text">
               <template v-if="activeTab === 'artifacts'">
                 生成 HTML / 报告 / 图片等成品后,会在对话里出现可点击的文件,点开即在此预览
-              </template>
-              <template v-else-if="activeTab === 'ref'">
-                本轮无 KB 召回引用
               </template>
               <template v-else> 沙箱待启动 / 暂无审计事件 </template>
             </div>
@@ -492,6 +589,68 @@ function fmtSize(n: number): string {
   font-size: 28px;
   color: var(--border-strong);
   margin-bottom: 12px;
+}
+
+/* ───────── 参考资料文件夹视图 ───────── */
+.ref-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.ref-count {
+  font-size: 11.5px;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+}
+.ref-loading {
+  display: flex;
+  justify-content: center;
+  padding: 30px;
+  color: var(--muted);
+}
+.ref-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+}
+.ref-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.ref-item:hover {
+  background: var(--bg-soft);
+}
+.ref-item.active {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+}
+.ref-ic {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+.ref-meta {
+  min-width: 0;
+  flex: 1;
+}
+.ref-name {
+  font-size: 12.5px;
+  color: var(--text);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ref-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 1px;
 }
 
 .rail-tabs {

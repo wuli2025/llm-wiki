@@ -565,12 +565,25 @@ fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path) -> Result<Child, Stri
 /// `<!--POLARIS_ARTIFACTS:["C:/a/b.html"]-->`, 重载历史时由前端解析并隐藏。
 pub const ARTIFACT_MARKER_PREFIX: &str = "<!--POLARIS_ARTIFACTS:";
 
-/// 每个会话一个产物目录: ~/Polaris/data/artifacts/<conversation_id>/
+/// 每个会话一个目录。优先落到「工作文件夹」(KB root) 下，让产物与用户的知识库
+/// 同处一地、可见可备份：`<kb_root>/conversations/<id>/`。
+/// KB root 不可用时回退到 `~/Polaris/data/artifacts/<id>`。
+fn conversation_dir(conv_id: Option<&str>) -> PathBuf {
+    let id = conv_id.unwrap_or("scratch");
+    let kb_root = PathBuf::from(kb::kb_root());
+    if !kb_root.as_os_str().is_empty() && kb_root.exists() {
+        kb_root.join("conversations").join(id)
+    } else {
+        UserDirs::new()
+            .map(|u| u.home_dir().join("Polaris").join("data").join("artifacts"))
+            .unwrap_or_else(|| PathBuf::from("artifacts"))
+            .join(id)
+    }
+}
+
+/// 产物(成品)目录: 会话目录下的 `outputs/`。claude 把成品写到这里 → 侧边栏可预览。
 fn artifacts_dir(conv_id: Option<&str>) -> PathBuf {
-    let base = UserDirs::new()
-        .map(|u| u.home_dir().join("Polaris").join("data").join("artifacts"))
-        .unwrap_or_else(|| PathBuf::from("artifacts"));
-    base.join(conv_id.unwrap_or("scratch"))
+    conversation_dir(conv_id).join("outputs")
 }
 
 /// 递归快照目录里的文件 → mtime, 用于前后 diff 找新增/改动文件
@@ -765,6 +778,70 @@ pub fn artifact_open_external(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 「参考资料」文件夹视图的一条文件记录。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactEntry {
+    /// 绝对路径 (正斜杠), 供 artifact_read / openExternal 用
+    pub path: String,
+    pub name: String,
+    pub ext: String,
+    /// html | svg | image | markdown | text | binary —— 前端选图标 / 预览方式
+    pub kind: String,
+    pub size: u64,
+    /// 修改时间 (Unix 秒), 前端按此倒序 + 显示
+    pub modified: u64,
+}
+
+/// 列出某会话产物目录下的全部成品文件, 按修改时间倒序 (最新在前)。
+/// 供右侧抽屉「参考资料」以文件夹视图按时间排列、点开即预览。
+#[tauri::command]
+pub fn artifact_list(conversation_id: Option<String>) -> Vec<ArtifactEntry> {
+    let dir = artifacts_dir(conversation_id.as_deref());
+    let mut entries: Vec<ArtifactEntry> = Vec::new();
+    if !dir.exists() {
+        return entries;
+    }
+    for w in WalkDir::new(&dir).into_iter().flatten() {
+        if !w.file_type().is_file() {
+            continue;
+        }
+        let p = w.path();
+        let meta = match w.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // 跳过隐藏 / 临时文件
+        if name.starts_with('.') {
+            continue;
+        }
+        let ext = p
+            .extension()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        entries.push(ArtifactEntry {
+            path: p.to_string_lossy().replace('\\', "/"),
+            name,
+            ext: ext.clone(),
+            kind: classify_ext(&ext).to_string(),
+            size: meta.len(),
+            modified,
+        });
+    }
+    entries.sort_by(|a, b| b.modified.cmp(&a.modified));
+    entries
+}
+
 // ───────────────────────── 对话附件 (拖拽上传) ─────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -790,7 +867,7 @@ pub fn chat_attach_files(
     paths: Vec<String>,
 ) -> Vec<AttachedFile> {
     const MAX: usize = 50;
-    let dir = artifacts_dir(conversation_id.as_deref()).join("uploads");
+    let dir = conversation_dir(conversation_id.as_deref()).join("uploads");
     let _ = std::fs::create_dir_all(&dir);
 
     let mut out = Vec::new();
