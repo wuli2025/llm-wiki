@@ -231,6 +231,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
                 Ok(v) => handle_stream_event(
                     &app_out,
                     &req_out,
+                    conv_id_thread.as_deref(),
                     &v,
                     &mut assistant_text,
                     &mut artifacts,
@@ -246,7 +247,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
                             kind: "delta".into(),
                             text: Some(line),
                             tool: None,
-                            conversation_id: None,
+                            conversation_id: conv_id_thread.clone(),
                         },
                     );
                 }
@@ -312,7 +313,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
                         kind: "artifact".into(),
                         text: Some(s),
                         tool: None,
-                        conversation_id: None,
+                        conversation_id: conv_id_thread.clone(),
                     },
                 );
             }
@@ -359,6 +360,7 @@ pub fn chat_cancel(req_id: String) -> Result<(), String> {
 fn handle_stream_event(
     app: &AppHandle,
     req_id: &str,
+    conv_id: Option<&str>,
     v: &Value,
     accum: &mut String,
     artifacts: &mut Vec<String>,
@@ -384,7 +386,7 @@ fn handle_stream_event(
                                         kind: "delta".into(),
                                         text: Some(txt.to_string()),
                                         tool: None,
-                                        conversation_id: None,
+                                        conversation_id: conv_id.map(|s| s.to_string()),
                                     },
                                 );
                             }
@@ -401,7 +403,7 @@ fn handle_stream_event(
                                     kind: "tool".into(),
                                     text: None,
                                     tool: Some(name.to_string()),
-                                    conversation_id: None,
+                                    conversation_id: conv_id.map(|s| s.to_string()),
                                 },
                             );
                             // 写文件类工具 → 记一个成品文件 (实时反馈)
@@ -423,7 +425,7 @@ fn handle_stream_event(
                                                 kind: "artifact".into(),
                                                 text: Some(norm),
                                                 tool: None,
-                                                conversation_id: None,
+                                                conversation_id: conv_id.map(|s| s.to_string()),
                                             },
                                         );
                                     }
@@ -448,7 +450,7 @@ fn handle_stream_event(
                             kind: "delta".into(),
                             text: Some(txt.to_string()),
                             tool: None,
-                            conversation_id: None,
+                            conversation_id: conv_id.map(|s| s.to_string()),
                         },
                     );
                 }
@@ -468,7 +470,7 @@ fn handle_stream_event(
                             kind: "error".into(),
                             text: Some(format!("[result error: {}] {}", subtype, msg)),
                             tool: None,
-                            conversation_id: None,
+                            conversation_id: conv_id.map(|s| s.to_string()),
                         },
                     );
                 }

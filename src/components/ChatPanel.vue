@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, watch } from "vue";
+import { ref, computed, onMounted, nextTick, watch } from "vue";
 import {
   Puzzle,
   Search,
@@ -24,43 +24,16 @@ import {
 } from "@lucide/vue";
 import {
   chat,
-  convApi,
-  listen,
   skills as skillsApi,
   type PermissionMode,
-  type ChatStreamEvent,
   type Skill,
   type AttachedFile,
 } from "../tauri";
 import { useAppStore } from "../stores/app";
 import { useSkillsStore } from "../stores/skills";
-import { useSessionsStore } from "../features/coworker/stores/sessions";
 import { useArtifactsStore } from "../stores/artifacts";
+import { useChatStore } from "../stores/chat";
 import { useFileDrop } from "../composables/useFileDrop";
-
-interface Bubble {
-  role: "user" | "assistant" | "tool";
-  text: string;
-  tool?: string;
-  /** 本条 assistant 消息生成的成品文件（绝对路径，正斜杠） */
-  artifacts?: string[];
-  /** 本条 user 消息携带的上传附件 */
-  files?: AttachedFile[];
-}
-
-/** 解析正文里夹带的产物清单 marker，返回剥离 marker 后的纯文本 + 路径数组 */
-function parseArtifacts(content: string): { text: string; artifacts: string[] } {
-  const m = content.match(/<!--POLARIS_ARTIFACTS:(\[[\s\S]*?\])-->/);
-  if (!m) return { text: content, artifacts: [] };
-  let arr: string[] = [];
-  try {
-    arr = JSON.parse(m[1]);
-  } catch {
-    arr = [];
-  }
-  const text = content.replace(m[0], "").trimEnd();
-  return { text, artifacts: arr };
-}
 
 function fileName(path: string): string {
   return path.split("/").pop() || path;
@@ -85,8 +58,8 @@ function artifactIcon(path: string) {
 
 const app = useAppStore();
 const skillsStore = useSkillsStore();
-const sessions = useSessionsStore();
 const artifactsStore = useArtifactsStore();
+const chatStore = useChatStore();
 
 /** 点击成品文件 chip → 展开右侧抽屉并预览 */
 function openArtifact(path: string) {
@@ -95,19 +68,15 @@ function openArtifact(path: string) {
 }
 
 const input = ref("");
-const bubbles = ref<Bubble[]>([]);
-const sending = ref(false);
-const currentReq = ref<string | null>(null);
+// 多开：当前对话的气泡 / 运行态来自 chat store（按对话 id 维护，切走不丢、后台续流）
+const bubbles = computed(() => chatStore.bubblesFor(app.currentConvId));
+const sending = computed(() => chatStore.isSending(app.currentConvId));
 const showPermDropdown = ref(false);
 const permMode = ref<PermissionMode>("manual");
 const showSkillPanel = ref(false);
 const skillSearch = ref("");
 const skillsList = ref<Skill[]>([]);
 const scrollEl = ref<HTMLDivElement | null>(null);
-
-let unlisten: (() => void) | null = null;
-// 当前在途请求所属的会话 id —— 完成时若用户已切走则标记墨蓝未读点
-let inflightConvId: string | null = null;
 
 // ─────────── 拖拽上传附件到当前对话 ───────────
 const attachments = ref<AttachedFile[]>([]);
@@ -138,17 +107,18 @@ async function onDropFiles(paths: string[]) {
     const res = await chat.attachFiles(convId ?? undefined, paths);
     for (const r of res) {
       if (r.ok) attachments.value.push(r);
-      else
-        bubbles.value.push({
+      else if (convId)
+        chatStore.pushBubble(convId, {
           role: "assistant",
           text: `[附件失败] ${r.name}:${r.error ?? ""}`,
         });
     }
   } catch (e: any) {
-    bubbles.value.push({
-      role: "assistant",
-      text: `[附件失败] ${e?.message ?? e}`,
-    });
+    if (convId)
+      chatStore.pushBubble(convId, {
+        role: "assistant",
+        text: `[附件失败] ${e?.message ?? e}`,
+      });
   } finally {
     for (const ph of placeholders) {
       const idx = pendingAttach.value.indexOf(ph);
@@ -235,106 +205,28 @@ function clearActiveSkill(id: string) {
   skillsStore.remove(id);
 }
 
-async function loadHistory(convId: string | null) {
-  if (!convId) {
-    bubbles.value = [];
-    return;
-  }
-  try {
-    const msgs = await convApi.getMessages(convId);
-    bubbles.value = msgs.map((m) => {
-      if (m.role === "assistant") {
-        const { text, artifacts } = parseArtifacts(m.content);
-        return { role: m.role, text, artifacts };
-      }
-      return { role: m.role, text: m.content };
-    });
-    await nextTick();
+function scrollToBottom() {
+  nextTick(() => {
     if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
-  } catch (e: any) {
-    bubbles.value = [];
-  }
+  });
 }
 
+// 切换对话：加载该对话历史（运行中的对话不会被历史覆盖），滚到底
 watch(
   () => app.currentConvId,
   (cid) => {
-    // 切换对话：解绑当前前台流（后台任务进程仍在跑，其 done 按会话 id 收尾），
-    // 避免后台对话的 delta 渗进新打开的对话视图。已发起的任务不取消，继续多开。
-    currentReq.value = null;
-    inflightConvId = null;
-    sending.value = false;
-    loadHistory(cid);
+    chatStore.loadHistory(cid).then(scrollToBottom);
   }
 );
 
+// 当前对话气泡变化（含后台流式增量推进）时自动滚到底
+watch(bubbles, scrollToBottom, { deep: true });
+
 onMounted(async () => {
-  unlisten = await listen<ChatStreamEvent>("chat:stream", (ev) => {
-    // done 是唯一终态（即便失败也会在末尾 emit）。无论前台/后台，都按会话 id 收尾：
-    // 结束工位会话；若用户已切到别的对话，给该对话打墨蓝未读点（多开核心）。
-    if (ev.kind === "done") {
-      const cid = ev.conversationId ?? null;
-      if (cid) {
-        sessions.finish(cid);
-        app.markUnread(cid); // 正在查看该对话时内部自动 no-op
-      }
-      if (ev.reqId === currentReq.value) {
-        sending.value = false;
-        currentReq.value = null;
-        inflightConvId = null;
-      }
-      return;
-    }
-    // 其余事件（delta/tool/artifact/error）只更新「当前前台流」的可见气泡
-    if (!currentReq.value || ev.reqId !== currentReq.value) return;
-    const last = bubbles.value[bubbles.value.length - 1];
-    if (ev.kind === "delta") {
-      if (last && last.role === "assistant") {
-        last.text += ev.text ?? "";
-      } else {
-        bubbles.value.push({ role: "assistant", text: ev.text ?? "" });
-      }
-    } else if (ev.kind === "tool") {
-      bubbles.value.push({
-        role: "tool",
-        text: `调用工具:${ev.tool ?? "(unknown)"}`,
-        tool: ev.tool,
-      });
-    } else if (ev.kind === "artifact") {
-      const path = ev.text;
-      if (path) {
-        // 挂到最近一个 assistant 气泡上（tool 气泡可能夹在中间）
-        let target: Bubble | undefined;
-        for (let i = bubbles.value.length - 1; i >= 0; i--) {
-          if (bubbles.value[i].role === "assistant") {
-            target = bubbles.value[i];
-            break;
-          }
-        }
-        if (!target) {
-          target = { role: "assistant", text: "", artifacts: [] };
-          bubbles.value.push(target);
-        }
-        if (!target.artifacts) target.artifacts = [];
-        if (!target.artifacts.includes(path)) target.artifacts.push(path);
-      }
-    } else if (ev.kind === "error") {
-      // stderr 行 / 退出错误：仅展示，不作为终态（终态由 done 处理）
-      bubbles.value.push({
-        role: "assistant",
-        text: `[错误] ${ev.text ?? ""}`,
-      });
-    }
-    nextTick(() => {
-      if (scrollEl.value)
-        scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
-    });
-  });
-  await loadHistory(app.currentConvId);
+  await chatStore.init(); // app 级流式监听只注册一次，按 conversationId 路由
+  await chatStore.loadHistory(app.currentConvId);
   await loadSkills();
-});
-onUnmounted(() => {
-  if (unlisten) unlisten();
+  scrollToBottom();
 });
 
 async function ensureConversation(): Promise<string | null> {
@@ -356,11 +248,11 @@ async function send() {
   const text = input.value.trim();
   const attached = attachments.value.slice();
   const hasAttach = attached.length > 0;
+  // 多开：只拦「当前对话」正在发送，不阻止在别的对话并行发起
   if ((!text && !hasAttach) || sending.value) return;
 
   const convId = await ensureConversation();
-  inflightConvId = convId;
-  if (convId) sessions.start(convId, text.slice(0, 18));
+  if (!convId) return;
 
   // 把附件绝对路径拼进 prompt，让 claude 能用 Read 等工具读取
   let prompt = text || "请查看我上传的附件。";
@@ -369,40 +261,17 @@ async function send() {
     prompt += `\n\n---\n[附件]（用户拖拽上传，可用 Read 等工具读取）：\n${lines}`;
   }
 
-  bubbles.value.push({
-    role: "user",
-    text: text || "（仅附件）",
-    files: hasAttach ? attached : undefined,
-  });
   input.value = "";
   attachments.value = [];
-  sending.value = true;
-  try {
-    const reqId = await chat.send({
-      prompt,
-      permissionMode: permMode.value,
-      skillIds: Array.from(skillsStore.enabledSkills),
-      conversationId: convId ?? undefined,
-    });
-    currentReq.value = reqId;
-  } catch (e: any) {
-    bubbles.value.push({
-      role: "assistant",
-      text: `[发送失败] ${e?.message ?? e}`,
-    });
-    sending.value = false;
-    if (inflightConvId) sessions.finish(inflightConvId);
-    inflightConvId = null;
-  }
+  // 交给 chat store：推 user 气泡 + 调后端 + 记录 reqId/sending（按对话 id，多开）
+  await chatStore.send(convId, prompt, text || "（仅附件）", attached, {
+    permissionMode: permMode.value,
+    skillIds: Array.from(skillsStore.enabledSkills),
+  });
 }
 
 async function cancel() {
-  if (currentReq.value) {
-    try {
-      await chat.cancel(currentReq.value);
-    } catch (_) {}
-  }
-  sending.value = false;
+  await chatStore.cancel(app.currentConvId);
 }
 
 function pickPerm(m: PermissionMode) {

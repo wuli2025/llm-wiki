@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, onMounted } from "vue";
 import Sidebar from "./components/Sidebar.vue";
 import RightDrawer from "./components/RightDrawer.vue";
 import ChatPanel from "./components/ChatPanel.vue";
@@ -16,10 +16,18 @@ import Onboarding from "./components/Onboarding.vue";
 import { useAppStore } from "./stores/app";
 import { useArtifactsStore } from "./stores/artifacts";
 import { useProvidersStore } from "./stores/providers";
+import { useChatStore } from "./stores/chat";
 
 const app = useAppStore();
 const artifacts = useArtifactsStore();
 const providers = useProvidersStore();
+const chatStore = useChatStore();
+
+// 多开核心：app 级注册一次流式监听，任意对话的事件都按 conversationId 路由进各自缓冲，
+// 这样切走/未挂载 ChatPanel 时后台任务仍持续流式推进、完成有提醒。
+onMounted(() => {
+  chatStore.init();
+});
 
 // 启动流程：splash(每次) → onboarding(仅首次) → ready
 const ONBOARDED_KEY = "polaris.onboarded.v1";
