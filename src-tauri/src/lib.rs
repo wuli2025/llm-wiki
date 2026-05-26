@@ -1,7 +1,9 @@
 mod chat;
 mod claude_md;
 mod conv;
+mod convert;
 mod kb;
+mod provider;
 mod skills;
 
 use polaris_core::KbLocator;
@@ -35,6 +37,8 @@ pub fn run() {
             chat::init(h).map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             claude_md::init(h)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            provider::init(h)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -47,6 +51,7 @@ pub fn run() {
             kb::kb_read,
             kb::kb_search,
             kb::kb_ingest,
+            kb::kb_upload_files,
             kb::kb_graph,
             // Sandbox (板块⑤ 已抽离为 polaris-sandbox crate, 命令名不变)
             polaris_sandbox::commands::sandbox_status,
@@ -66,6 +71,9 @@ pub fn run() {
             // Chat
             chat::chat_send,
             chat::chat_cancel,
+            chat::chat_attach_files,
+            chat::artifact_read,
+            chat::artifact_open_external,
             // CLAUDE.md
             claude_md::claude_md_list_projects,
             claude_md::claude_md_kb_info,
@@ -75,7 +83,17 @@ pub fn run() {
             skills::list_skills,
             skills::get_skill,
             skills::create_skill,
+            skills::install_skill,
+            skills::import_skill,
             skills::delete_skill,
+            // API 供应商坞 + 用量看板
+            provider::provider_list,
+            provider::provider_switch,
+            provider::provider_save,
+            provider::provider_delete,
+            provider::usage_summary,
+            provider::codex_status,
+            provider::codex_login,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Polaris application");

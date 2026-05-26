@@ -8,14 +8,26 @@ import {
   Globe,
   Wrench,
   Trash2,
+  Download,
+  FileText,
+  Table,
+  AudioLines,
+  Clapperboard,
+  Image as ImageIcon,
+  Ghost,
+  FolderOpen,
   X,
 } from "@lucide/vue";
-import { skills as skillsApi, type Skill } from "../tauri";
+import { skills as skillsApi, isTauri, type Skill } from "../tauri";
+import { useSkillsStore } from "../stores/skills";
 
+const skillsStore = useSkillsStore();
 const activeTab = ref<"market" | "mine">("market");
 const skillList = ref<Skill[]>([]);
 const searchQuery = ref("");
 const loading = ref(false);
+// 正在安装的 skill id（用于按钮 loading 态）
+const installing = ref<Set<string>>(new Set());
 
 // 创建弹窗
 const showCreateModal = ref(false);
@@ -26,6 +38,12 @@ const createForm = ref({
   systemPrompt: "",
 });
 const createError = ref("");
+
+// 导入/下载弹窗
+const showImportModal = ref(false);
+const importSource = ref("");
+const importing = ref(false);
+const importError = ref("");
 
 onMounted(loadSkills);
 
@@ -47,8 +65,9 @@ const marketSkills = computed(() =>
   skillList.value.filter((s) => s.source !== "user")
 );
 
+// 「我的技能」= 已安装 / 已创建（物理存在于用户目录，removable）。预装内置只在市场展示。
 const mySkills = computed(() =>
-  skillList.value.filter((s) => s.source === "user")
+  skillList.value.filter((s) => s.removable)
 );
 
 const currentSkills = computed(() => {
@@ -63,9 +82,18 @@ const currentSkills = computed(() => {
 });
 
 function iconForSkill(skill: Skill) {
-  if (skill.id === "deep-research") return Globe;
-  if (skill.id === "skill-creator") return Wrench;
-  return Sparkles;
+  const map: Record<string, any> = {
+    "deep-research": Globe,
+    "skill-creator": Wrench,
+    pdf: FileText,
+    xlsx: Table,
+    "edge-tts": AudioLines,
+    hyperframes: Clapperboard,
+    "web-search": Search,
+    "image-gen": ImageIcon,
+    "cloak-browser": Ghost,
+  };
+  return map[skill.id] ?? Sparkles;
 }
 
 function sourceLabel(source: string) {
@@ -74,13 +102,74 @@ function sourceLabel(source: string) {
   return "我的";
 }
 
+// 从市场安装 → 复制到用户目录 → 重新加载 → 自动激活（立即可用，无需手动确认）
+async function onInstall(skill: Skill) {
+  if (installing.value.has(skill.id) || skill.installed) return;
+  installing.value = new Set(installing.value).add(skill.id);
+  try {
+    await skillsApi.install(skill.id);
+    await loadSkills();
+    skillsStore.enable(skill.id); // 安装即激活
+  } catch (e: any) {
+    alert(`安装失败: ${e?.message ?? e}`);
+  } finally {
+    const next = new Set(installing.value);
+    next.delete(skill.id);
+    installing.value = next;
+  }
+}
+
+// ── 导入 / 下载（外部来源） ──
+function openImportModal() {
+  importSource.value = "";
+  importError.value = "";
+  showImportModal.value = true;
+}
+function closeImportModal() {
+  showImportModal.value = false;
+}
+async function browseFile() {
+  if (!isTauri) return;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const sel = await open({
+      multiple: false,
+      filters: [{ name: "Skill", extensions: ["md", "zip"] }],
+    });
+    if (typeof sel === "string") importSource.value = sel;
+  } catch {
+    /* 用户取消或无 dialog */
+  }
+}
+async function submitImport() {
+  const src = importSource.value.trim();
+  if (!src) {
+    importError.value = "请填写来源：URL / git 仓库 / 本地文件路径";
+    return;
+  }
+  importing.value = true;
+  importError.value = "";
+  try {
+    const ids = await skillsApi.import(src);
+    await loadSkills();
+    ids.forEach((id) => skillsStore.enable(id)); // 导入即激活
+    closeImportModal();
+    activeTab.value = "mine";
+  } catch (e: any) {
+    importError.value = e?.message ?? String(e);
+  } finally {
+    importing.value = false;
+  }
+}
+
 async function onDelete(skill: Skill) {
-  if (!confirm(`确定删除技能「${skill.name}」?`)) return;
+  if (!confirm(`确定移除技能「${skill.name}」?`)) return;
   try {
     await skillsApi.delete(skill.id);
+    skillsStore.remove(skill.id);
     await loadSkills();
   } catch (e: any) {
-    alert(`删除失败: ${e?.message ?? e}`);
+    alert(`移除失败: ${e?.message ?? e}`);
   }
 }
 
@@ -119,6 +208,7 @@ async function submitCreate() {
   try {
     await skillsApi.create(id.trim(), name.trim(), description.trim(), systemPrompt.trim());
     await loadSkills();
+    skillsStore.enable(id.trim()); // 创建即激活
     closeCreateModal();
     activeTab.value = "mine";
   } catch (e: any) {
@@ -135,10 +225,16 @@ async function submitCreate() {
         <Puzzle :size="20" :stroke-width="1.8" class="sc-title-icon" />
         <span>技能中心</span>
       </div>
-      <button class="sc-new-btn" @click="openCreateModal">
-        <Plus :size="14" :stroke-width="2" />
-        <span>新技能</span>
-      </button>
+      <div class="sc-header-actions">
+        <button class="sc-import-btn" @click="openImportModal" title="从外部 URL / git 仓库 / 本地文件导入">
+          <Download :size="14" :stroke-width="2" />
+          <span>导入/下载</span>
+        </button>
+        <button class="sc-new-btn" @click="openCreateModal">
+          <Plus :size="14" :stroke-width="2" />
+          <span>新技能</span>
+        </button>
+      </div>
     </div>
 
     <!-- Search + Tabs -->
@@ -180,12 +276,36 @@ async function submitCreate() {
         </div>
         <div class="sc-card-desc">{{ skill.description }}</div>
         <div class="sc-card-foot">
-          <button v-if="skill.source === 'user'" class="sc-card-delete" @click="onDelete(skill)"
-            title="删除"
+          <!-- 未安装 → 安装按钮 -->
+          <button
+            v-if="!skill.installed"
+            class="sc-card-install"
+            :disabled="installing.has(skill.id)"
+            @click="onInstall(skill)"
           >
-            <Trash2 :size="13" :stroke-width="1.8" />
+            <Download :size="13" :stroke-width="1.9" />
+            <span>{{ installing.has(skill.id) ? "安装中…" : "安装" }}</span>
           </button>
-          <button class="sc-card-use">使用</button>
+          <!-- 已安装 → 状态 + 卸载 + 开关 -->
+          <template v-else>
+            <span class="sc-installed-badge">已安装</span>
+            <button
+              v-if="skill.removable"
+              class="sc-card-delete"
+              @click="onDelete(skill)"
+              title="卸载 / 删除"
+            >
+              <Trash2 :size="13" :stroke-width="1.8" />
+            </button>
+            <label class="switch" title="开启/关闭">
+              <input
+                type="checkbox"
+                :checked="skillsStore.has(skill.id)"
+                @change="skillsStore.toggle(skill.id)"
+              />
+              <span class="slider round" />
+            </label>
+          </template>
         </div>
       </div>
     </div>
@@ -193,12 +313,53 @@ async function submitCreate() {
     <!-- Empty state -->
     <div v-if="currentSkills.length === 0 && !loading" class="sc-empty">
       <template v-if="activeTab === 'mine'">
-        <div>还没有创建技能</div>
+        <div>还没有安装或创建技能 — 去「市场精选」安装，或自己创建一个</div>
         <button class="sc-empty-btn" @click="openCreateModal">+ 创建第一个技能</button>
       </template>
       <template v-else>
         暂无技能
       </template>
+    </div>
+
+    <!-- 导入/下载弹窗 -->
+    <div v-if="showImportModal" class="modal-overlay" @click.self="closeImportModal">
+      <div class="modal">
+        <div class="modal-head">
+          <span class="modal-title">导入 / 下载技能</span>
+          <button class="modal-close" @click="closeImportModal">
+            <X :size="16" :stroke-width="2" />
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="form-row">
+            <label>来源（不限来源，鼓励从外面拿）</label>
+            <input
+              v-model="importSource"
+              placeholder="git 仓库 / 远程 .md / .zip / 本地路径"
+              @keydown.enter="submitImport"
+            />
+          </div>
+          <div class="import-hint">
+            <div>支持任意来源：</div>
+            <ul>
+              <li><strong>git 仓库</strong>：如 <code>https://github.com/obra/superpowers</code>（整套合集自动逐个装）</li>
+              <li><strong>远程文件</strong>：<code>https://…/skill.md</code> 或 <code>https://…/pack.zip</code></li>
+              <li><strong>本地</strong>：<code>.md</code> 文件 / <code>.zip</code> 压缩包 / 技能目录</li>
+            </ul>
+          </div>
+          <button v-if="isTauri" class="import-browse" @click="browseFile">
+            <FolderOpen :size="14" :stroke-width="1.8" />
+            <span>选择本地 .md / .zip 文件…</span>
+          </button>
+          <div v-if="importError" class="form-error">{{ importError }}</div>
+        </div>
+        <div class="modal-foot">
+          <button class="modal-btn secondary" @click="closeImportModal">取消</button>
+          <button class="modal-btn primary" :disabled="importing" @click="submitImport">
+            {{ importing ? "导入中…" : "导入" }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- 创建弹窗 -->
@@ -268,6 +429,11 @@ async function submitCreate() {
 .sc-title-icon {
   color: var(--primary);
 }
+.sc-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .sc-new-btn {
   display: inline-flex;
   align-items: center;
@@ -282,6 +448,60 @@ async function submitCreate() {
 }
 .sc-new-btn:hover {
   background: var(--primary);
+}
+.sc-import-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: transparent;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.sc-import-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* 导入弹窗内的提示 */
+.import-hint {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+  background: var(--bg-soft);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.import-hint ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.import-hint code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--panel);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.import-browse {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--primary);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.import-browse:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
 }
 
 .sc-toolbar {
@@ -445,6 +665,78 @@ async function submitCreate() {
 }
 .sc-card-use:hover {
   background: var(--primary);
+}
+
+/* 安装按钮 */
+.sc-card-install {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 14px;
+  background: var(--ink);
+  color: #fafaf7;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sc-card-install:hover {
+  background: var(--primary);
+}
+.sc-card-install:disabled {
+  background: var(--border);
+  color: var(--muted);
+  cursor: default;
+}
+/* 已安装徽标 */
+.sc-installed-badge {
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: rgba(16, 185, 129, 0.1);
+  color: #0f9d6b;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ─── 绿键 Toggle Switch ─── */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: #ccc;
+  border-radius: 20px;
+  transition: 0.2s;
+}
+.slider::before {
+  content: "";
+  position: absolute;
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  bottom: 2px;
+  background: white;
+  border-radius: 50%;
+  transition: 0.2s;
+}
+input:checked + .slider {
+  background: #10b981;
+}
+input:checked + .slider::before {
+  transform: translateX(16px);
 }
 
 .sc-empty {

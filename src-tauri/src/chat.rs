@@ -14,17 +14,25 @@ use crate::skills;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use directories::UserDirs;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
+use walkdir::WalkDir;
 
 pub fn init(_app: &AppHandle) -> Result<(), anyhow::Error> {
     Ok(())
 }
+
+/// 默认预授权的联网工具 (逗号分隔, 传给 `--allowedTools`)。
+/// 把内置 WebSearch / WebFetch 设为「联网搜索默认打开」: 任何权限模式都不再拦截,
+/// 深度搜索 / 联网搜索因此能真正联网检索, 而不是退回内置知识。
+const DEFAULT_WEB_TOOLS: &str = "WebSearch,WebFetch";
 
 // ───────────────────────── Types ─────────────────────────
 
@@ -57,7 +65,7 @@ pub struct ChatSendArgs {
     #[serde(default)]
     pub use_sandbox: bool,
     #[serde(default)]
-    pub skill_id: Option<String>,
+    pub skill_ids: Option<Vec<String>>,
     #[serde(default)]
     pub conversation_id: Option<String>,
 }
@@ -101,6 +109,11 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         let _ = conv::append_message(cid, "user", &args.prompt);
     }
 
+    // 产物目录 (每个会话一份): claude 把成品文件写到这里 → 侧边栏可预览
+    let art_dir = artifacts_dir(args.conversation_id.as_deref());
+    let _ = std::fs::create_dir_all(&art_dir);
+    let art_before = dir_snapshot(&art_dir);
+
     // 一体注入: Skill prompt → KB CLAUDE.md + kb_search 召回 → 用户问题
     let current_project_id = args
         .conversation_id
@@ -110,31 +123,53 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
 
     let mut final_prompt = String::new();
 
-    // 1. Skill system prompt（显式激活或意图自动检测）
-    let active_skill = args
-        .skill_id
-        .as_deref()
-        .and_then(skills::find)
-        .or_else(|| skills::default_skill_for_intent(&args.prompt));
-    if let Some((_, system_prompt)) = active_skill {
+    // 1. Skill system prompts —— 显式点选 + 按任务意图自动激活（去重）
+    let mut injected: Vec<String> = Vec::new();
+    // 1a. 用户在对话框显式激活的 skill
+    if let Some(ids) = &args.skill_ids {
+        for id in ids {
+            if injected.iter().any(|x| x == id) {
+                continue;
+            }
+            if let Some((meta, system_prompt)) = skills::find(id) {
+                final_prompt.push_str(&system_prompt);
+                final_prompt.push('\n');
+                injected.push(meta.id);
+            }
+        }
+    }
+    // 1b. 按任务意图自动激活（即使对话框没点选）：
+    //     创建技能 → skill-creator；网页/浏览器自动化 → cloak-browser
+    for (meta, system_prompt) in skills::auto_skills_for_intent(&args.prompt) {
+        if injected.iter().any(|x| *x == meta.id) {
+            continue;
+        }
         final_prompt.push_str(&system_prompt);
-        final_prompt.push_str("\n\n---\n\n");
+        final_prompt.push('\n');
+        injected.push(meta.id);
+    }
+    if !final_prompt.is_empty() {
+        final_prompt.push_str("\n---\n\n");
     }
 
-    // 2. CLAUDE.md 上下文
+    // 2. 输出文件约定 (Polaris) — 让成品文件落到产物目录, 侧边栏即可预览
+    final_prompt.push_str(&output_convention(&art_dir));
+    final_prompt.push_str("\n\n---\n\n");
+
+    // 3. CLAUDE.md 上下文
     if !cm_ctx.is_empty() {
         final_prompt.push_str(&cm_ctx);
         final_prompt.push_str("\n\n## 用户问题\n\n");
     }
 
-    // 3. 用户原始问题
+    // 4. 用户原始问题
     final_prompt.push_str(&args.prompt);
 
     let perm = args.permission_mode.cli_value();
     let conv_id_opt = args.conversation_id.clone();
 
     // 默认走宿主机执行（沙箱可选，但默认关闭）
-    let mut child = spawn_on_host(&final_prompt, perm)?;
+    let mut child = spawn_on_host(&final_prompt, perm, &art_dir)?;
 
     let stdout = child
         .stdout
@@ -174,21 +209,31 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         }
     });
 
-    // stdout 读线程: stream-json -> 事件; 累积 assistant 文本
+    // stdout 读线程: stream-json -> 事件; 累积 assistant 文本 + 产物路径
     let app_out = app.clone();
     let req_out = req_id.clone();
     let conv_id_thread = conv_id_opt.clone();
     let stderr_buf_for_done = stderr_buf.clone();
+    let art_dir_thread = art_dir.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut assistant_text = String::new();
+        // 本轮生成的成品文件 (绝对路径, 正斜杠), 既来自 Write/Edit 工具调用,
+        // 也来自产物目录的前后快照 diff (覆盖 Bash/脚本生成的文件)
+        let mut artifacts: Vec<String> = Vec::new();
         for line in reader.lines() {
             let Ok(line) = line else { continue };
             if line.trim().is_empty() {
                 continue;
             }
             match serde_json::from_str::<Value>(&line) {
-                Ok(v) => handle_stream_event(&app_out, &req_out, &v, &mut assistant_text),
+                Ok(v) => handle_stream_event(
+                    &app_out,
+                    &req_out,
+                    &v,
+                    &mut assistant_text,
+                    &mut artifacts,
+                ),
                 Err(_) => {
                     // 非 JSON 行: 当作 delta 直接显示 (调试友好)
                     assistant_text.push_str(&line);
@@ -246,10 +291,42 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
             );
         }
 
-        // 持久化 assistant 消息
+        // 产物目录前后快照 diff: 捕获 Bash / 脚本 / Skill 生成的新增或改动文件
+        let art_after = dir_snapshot(&art_dir_thread);
+        for (path, mtime) in art_after.iter() {
+            let changed = match art_before.get(path) {
+                None => true,
+                Some(old) => mtime > old,
+            };
+            if !changed {
+                continue;
+            }
+            let s = path.to_string_lossy().replace('\\', "/");
+            if !artifacts.contains(&s) {
+                artifacts.push(s.clone());
+                emit_event(
+                    &app_out,
+                    ChatStreamEvent {
+                        req_id: req_out.clone(),
+                        kind: "artifact".into(),
+                        text: Some(s),
+                        tool: None,
+                        conversation_id: None,
+                    },
+                );
+            }
+        }
+
+        // 持久化 assistant 消息 (产物清单以注释 marker 形式存入正文, 重载历史时解析)
         if let Some(cid) = &conv_id_thread {
-            if !assistant_text.trim().is_empty() {
-                let _ = conv::append_message(cid, "assistant", assistant_text.trim());
+            let mut content = assistant_text.trim().to_string();
+            if !artifacts.is_empty() {
+                if let Ok(json) = serde_json::to_string(&artifacts) {
+                    content.push_str(&format!("\n\n{}{}-->", ARTIFACT_MARKER_PREFIX, json));
+                }
+            }
+            if !content.trim().is_empty() {
+                let _ = conv::append_message(cid, "assistant", &content);
             }
         }
 
@@ -278,7 +355,13 @@ pub fn chat_cancel(req_id: String) -> Result<(), String> {
 
 // ───────────────────────── Internals ─────────────────────
 
-fn handle_stream_event(app: &AppHandle, req_id: &str, v: &Value, accum: &mut String) {
+fn handle_stream_event(
+    app: &AppHandle,
+    req_id: &str,
+    v: &Value,
+    accum: &mut String,
+    artifacts: &mut Vec<String>,
+) {
     let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
     match t {
         "assistant" => {
@@ -320,6 +403,31 @@ fn handle_stream_event(app: &AppHandle, req_id: &str, v: &Value, accum: &mut Str
                                     conversation_id: None,
                                 },
                             );
+                            // 写文件类工具 → 记一个成品文件 (实时反馈)
+                            if matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit") {
+                                let fp = block
+                                    .get("input")
+                                    .and_then(|i| {
+                                        i.get("file_path").or_else(|| i.get("notebook_path"))
+                                    })
+                                    .and_then(|x| x.as_str());
+                                if let Some(fp) = fp {
+                                    let norm = fp.replace('\\', "/");
+                                    if !artifacts.contains(&norm) {
+                                        artifacts.push(norm.clone());
+                                        emit_event(
+                                            app,
+                                            ChatStreamEvent {
+                                                req_id: req_id.into(),
+                                                kind: "artifact".into(),
+                                                text: Some(norm),
+                                                tool: None,
+                                                conversation_id: None,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -391,6 +499,9 @@ fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
             "--verbose",
             "--add-dir",
             "/kb",
+            // 联网搜索默认打开 (沙箱内同样预授权 WebSearch / WebFetch)
+            "--allowedTools",
+            DEFAULT_WEB_TOOLS,
             &perm_flag,
             prompt,
         ])
@@ -402,7 +513,7 @@ fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
     Ok(child)
 }
 
-fn spawn_on_host(prompt: &str, perm: &str) -> Result<Child, String> {
+fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path) -> Result<Child, String> {
     let perm_flag = format!("--permission-mode={}", perm);
     // cwd = polaris-app 根 (env!("CARGO_MANIFEST_DIR") 的父级),
     // 这样 claude CLI 自动信任整棵 polaris-app/ 子树, 包括 PolarisKB/
@@ -417,6 +528,11 @@ fn spawn_on_host(prompt: &str, perm: &str) -> Result<Child, String> {
         extra_dirs.push("--add-dir".into());
         extra_dirs.push(kb_root.to_string_lossy().to_string());
     }
+    // 产物目录在 ~/Polaris 下, 不在 cwd 子树, 显式放行 claude 可写入
+    if art_dir.exists() && !art_dir.starts_with(&cwd) {
+        extra_dirs.push("--add-dir".into());
+        extra_dirs.push(art_dir.to_string_lossy().to_string());
+    }
 
     let mut args: Vec<String> = vec![
         "--print".into(),
@@ -425,6 +541,10 @@ fn spawn_on_host(prompt: &str, perm: &str) -> Result<Child, String> {
         "--verbose".into(),
     ];
     args.extend(extra_dirs);
+    // 联网搜索默认打开: 把内置 WebSearch / WebFetch 预授权, 任何权限模式下都不再被拦,
+    // 这样深度搜索 / 联网搜索能真正联网, 不会退回内置知识。
+    args.push("--allowedTools".into());
+    args.push(DEFAULT_WEB_TOOLS.into());
     args.push(perm_flag);
     args.push(prompt.to_string());
 
@@ -437,4 +557,334 @@ fn spawn_on_host(prompt: &str, perm: &str) -> Result<Child, String> {
         .spawn()
         .map_err(|e| format!("调起宿主机 claude CLI 失败: {}", e))?;
     Ok(child)
+}
+
+// ───────────────────────── Artifacts (产物预览) ─────────────────────────
+
+/// assistant 正文里夹带的产物清单 marker 前缀; 完整形如
+/// `<!--POLARIS_ARTIFACTS:["C:/a/b.html"]-->`, 重载历史时由前端解析并隐藏。
+pub const ARTIFACT_MARKER_PREFIX: &str = "<!--POLARIS_ARTIFACTS:";
+
+/// 每个会话一个产物目录: ~/Polaris/data/artifacts/<conversation_id>/
+fn artifacts_dir(conv_id: Option<&str>) -> PathBuf {
+    let base = UserDirs::new()
+        .map(|u| u.home_dir().join("Polaris").join("data").join("artifacts"))
+        .unwrap_or_else(|| PathBuf::from("artifacts"));
+    base.join(conv_id.unwrap_or("scratch"))
+}
+
+/// 递归快照目录里的文件 → mtime, 用于前后 diff 找新增/改动文件
+fn dir_snapshot(dir: &Path) -> HashMap<PathBuf, SystemTime> {
+    let mut m = HashMap::new();
+    if !dir.exists() {
+        return m;
+    }
+    for entry in WalkDir::new(dir).into_iter().flatten() {
+        if entry.file_type().is_file() {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(mt) = meta.modified() {
+                    m.insert(entry.path().to_path_buf(), mt);
+                }
+            }
+        }
+    }
+    m
+}
+
+/// 注入给 claude 的「输出文件约定」, 引导成品落到产物目录
+fn output_convention(art_dir: &Path) -> String {
+    let dir = art_dir.to_string_lossy().replace('\\', "/");
+    format!(
+        "## 输出文件约定 (Polaris)\n\n\
+当你生成任何可供用户**查看或下载的成品文件**(HTML 网页 / 数据可视化 / 报告 / Markdown / 图片 / CSV / PDF 等)时,请遵守:\n\n\
+1. 把成品文件保存到这个已授权可写的目录(用绝对路径):\n   `{dir}`\n\
+2. 网页类成品请优先生成**单文件、自包含的 HTML**(把 CSS/JS 内联进去),以便在侧边栏直接预览。\n\
+3. 在回答末尾用一句话点明你生成了哪些文件(文件名即可)。\n\n\
+普通问答无需创建文件。",
+        dir = dir
+    )
+}
+
+/// 标准 Base64 编码 (无外部依赖) — 给图片产物拼 data URL 用
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn classify_ext(ext: &str) -> &'static str {
+    match ext {
+        "html" | "htm" => "html",
+        "svg" => "svg",
+        "md" | "markdown" => "markdown",
+        "png" | "apng" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif" => "image",
+        "txt" | "json" | "csv" | "tsv" | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "css"
+        | "scss" | "less" | "py" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "toml"
+        | "yaml" | "yml" | "xml" | "log" | "sh" | "bat" | "ps1" | "sql" | "ini" | "conf"
+        | "env" | "vue" | "php" | "rb" | "kt" | "swift" | "" => "text",
+        _ => "binary",
+    }
+}
+
+fn mime_for(ext: &str) -> &'static str {
+    match ext {
+        "png" | "apng" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactPayload {
+    pub path: String,
+    pub name: String,
+    pub ext: String,
+    /// html | svg | image | markdown | text | binary
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_url: Option<String>,
+    pub size: u64,
+}
+
+#[tauri::command]
+pub fn artifact_read(path: String) -> Result<ArtifactPayload, String> {
+    let p = PathBuf::from(&path);
+    let meta = std::fs::metadata(&p).map_err(|_| format!("文件不存在或无法访问: {}", path))?;
+    if !meta.is_file() {
+        return Err("目标不是文件".into());
+    }
+    let size = meta.len();
+    let name = p
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    let ext = p
+        .extension()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let kind = classify_ext(&ext);
+
+    match kind {
+        "image" => {
+            const MAX: u64 = 25 * 1024 * 1024;
+            if size > MAX {
+                return Err("图片过大, 无法预览 (>25MB)".into());
+            }
+            let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+            let data_url = format!("data:{};base64,{}", mime_for(&ext), base64_encode(&bytes));
+            Ok(ArtifactPayload {
+                path,
+                name,
+                ext,
+                kind: kind.into(),
+                text: None,
+                data_url: Some(data_url),
+                size,
+            })
+        }
+        "binary" => Ok(ArtifactPayload {
+            path,
+            name,
+            ext,
+            kind: kind.into(),
+            text: None,
+            data_url: None,
+            size,
+        }),
+        _ => {
+            // html / svg / markdown / text
+            const MAX: u64 = 8 * 1024 * 1024;
+            if size > MAX {
+                return Err("文件过大, 无法预览 (>8MB)".into());
+            }
+            let text = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+            Ok(ArtifactPayload {
+                path,
+                name,
+                ext,
+                kind: kind.into(),
+                text: Some(text),
+                data_url: None,
+                size,
+            })
+        }
+    }
+}
+
+/// 用系统默认程序打开产物文件 (浏览器开 HTML / 看图器开图片等)
+#[tauri::command]
+pub fn artifact_open_external(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ───────────────────────── 对话附件 (拖拽上传) ─────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachedFile {
+    pub name: String,
+    /// 复制后在会话 uploads 目录里的绝对路径 (正斜杠)
+    pub path: String,
+    /// text | image | pdf | office | binary —— 前端选图标用
+    pub kind: String,
+    pub size: u64,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// 对话拖拽上传:把文件复制进「会话 uploads 目录」,返回附件清单。
+/// 与「知识库上传」是两条不同的路径 —— 这里只把文件挂到当前对话,
+/// 前端发送时把这些绝对路径写进 prompt,claude 用 Read 工具按需读取。
+#[tauri::command]
+pub fn chat_attach_files(
+    conversation_id: Option<String>,
+    paths: Vec<String>,
+) -> Vec<AttachedFile> {
+    const MAX: usize = 50;
+    let dir = artifacts_dir(conversation_id.as_deref()).join("uploads");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let mut out = Vec::new();
+    for p in paths.iter().take(MAX) {
+        let src = PathBuf::from(p);
+        if src.is_dir() {
+            // 目录:浅层展开其中的文件
+            if let Ok(rd) = std::fs::read_dir(&src) {
+                for e in rd.flatten() {
+                    let ep = e.path();
+                    if ep.is_file() && out.len() < MAX {
+                        push_attach(&dir, &ep, &mut out);
+                    }
+                }
+            }
+            continue;
+        }
+        if !src.is_file() {
+            out.push(AttachedFile {
+                name: file_name_of(&src),
+                path: String::new(),
+                kind: "binary".into(),
+                size: 0,
+                ok: false,
+                error: Some("文件不存在".into()),
+            });
+            continue;
+        }
+        push_attach(&dir, &src, &mut out);
+    }
+    out
+}
+
+fn file_name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| p.to_string_lossy().to_string())
+}
+
+fn push_attach(dir: &Path, src: &Path, out: &mut Vec<AttachedFile>) {
+    let name = file_name_of(src);
+    let size = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+    let dst = unique_upload_path(dir, &name);
+    match std::fs::copy(src, &dst) {
+        Ok(_) => out.push(AttachedFile {
+            name,
+            path: dst.to_string_lossy().replace('\\', "/"),
+            kind: attach_kind(src).into(),
+            size,
+            ok: true,
+            error: None,
+        }),
+        Err(e) => out.push(AttachedFile {
+            name,
+            path: String::new(),
+            kind: "binary".into(),
+            size,
+            ok: false,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+fn unique_upload_path(dir: &Path, fname: &str) -> PathBuf {
+    let first = dir.join(fname);
+    if !first.exists() {
+        return first;
+    }
+    let (stem, ext) = match fname.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (fname.to_string(), String::new()),
+    };
+    for n in 2..10_000 {
+        let cand = dir.join(format!("{stem} ({n}){ext}"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    first
+}
+
+fn attach_kind(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif" | "svg" => "image",
+        "pdf" => "pdf",
+        "docx" | "doc" | "pptx" | "ppt" | "xlsx" | "xls" | "ods" | "odt" | "odp" => "office",
+        "txt" | "md" | "markdown" | "csv" | "tsv" | "json" | "yaml" | "yml" | "xml" | "html"
+        | "htm" | "log" | "rs" | "js" | "ts" | "py" | "go" | "java" | "c" | "cpp" | "css"
+        | "vue" | "sh" | "toml" | "ini" => "text",
+        _ => "binary",
+    }
 }

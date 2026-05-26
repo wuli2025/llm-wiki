@@ -38,6 +38,11 @@ regex = "1"
 # 板块 crate (架构重构 Phase 0–1)
 polaris-core = { path = "crates/polaris-core" }
 polaris-sandbox = { path = "crates/polaris-sandbox" }
+# 文件转换 (板块② 上传/入库) — 纯 Rust，无需 pdfium.dll 等原生绑定
+# clean-room 自写转换逻辑，仅这些底层解析库为第三方
+zip = "8.6.0"          # docx/pptx/xlsx 本质是 zip+xml，解压取 XML
+calamine = "0.35.0"    # xlsx/xls/ods 表格 → markdown
+pdf-extract = "0.10.0" # pdf 文本抽取（纯 Rust，panic 由 convert::guard 兜住）
 
 [features]
 default = ["custom-protocol"]
@@ -50,7 +55,9 @@ custom-protocol = ["tauri/custom-protocol"]
 opt-level = 3          # 最高优化级别
 lto = true             # 链接时优化，合并所有 crate
 codegen-units = 1      # 单 codegen unit，最大化优化
-panic = "abort"        # panic 直接终止，不展开栈
+# 用 unwind（非 abort）：第三方解析库（pdf-extract/calamine…）遇坏文件可能 panic，
+# convert::guard 用 catch_unwind 在命令边界兜成 Err，避免单个坏文件崩掉整个 app。
+panic = "unwind"
 strip = true           # 自动剥离符号表
 
 # 进一步缩减：移除断言和溢出检查（仅 release）

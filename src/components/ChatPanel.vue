@@ -10,6 +10,17 @@ import {
   Sparkles,
   Globe,
   Wrench,
+  FileText,
+  Table,
+  AudioLines,
+  Clapperboard,
+  Image as ImageIcon,
+  Ghost,
+  FileCode,
+  File as FileIcon,
+  ExternalLink,
+  Paperclip,
+  LoaderCircle,
 } from "@lucide/vue";
 import {
   chat,
@@ -19,16 +30,67 @@ import {
   type PermissionMode,
   type ChatStreamEvent,
   type Skill,
+  type AttachedFile,
 } from "../tauri";
 import { useAppStore } from "../stores/app";
+import { useSkillsStore } from "../stores/skills";
+import { useArtifactsStore } from "../stores/artifacts";
+import { useFileDrop } from "../composables/useFileDrop";
 
 interface Bubble {
   role: "user" | "assistant" | "tool";
   text: string;
   tool?: string;
+  /** 本条 assistant 消息生成的成品文件（绝对路径，正斜杠） */
+  artifacts?: string[];
+  /** 本条 user 消息携带的上传附件 */
+  files?: AttachedFile[];
+}
+
+/** 解析正文里夹带的产物清单 marker，返回剥离 marker 后的纯文本 + 路径数组 */
+function parseArtifacts(content: string): { text: string; artifacts: string[] } {
+  const m = content.match(/<!--POLARIS_ARTIFACTS:(\[[\s\S]*?\])-->/);
+  if (!m) return { text: content, artifacts: [] };
+  let arr: string[] = [];
+  try {
+    arr = JSON.parse(m[1]);
+  } catch {
+    arr = [];
+  }
+  const text = content.replace(m[0], "").trimEnd();
+  return { text, artifacts: arr };
+}
+
+function fileName(path: string): string {
+  return path.split("/").pop() || path;
+}
+
+function fileExt(path: string): string {
+  const n = fileName(path);
+  const i = n.lastIndexOf(".");
+  return i >= 0 ? n.slice(i + 1).toLowerCase() : "";
+}
+
+function artifactIcon(path: string) {
+  const ext = fileExt(path);
+  if (["html", "htm", "svg", "js", "ts", "css", "json", "xml"].includes(ext))
+    return FileCode;
+  if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"].includes(ext))
+    return ImageIcon;
+  if (["csv", "tsv", "xlsx", "xls"].includes(ext)) return Table;
+  if (["md", "markdown", "txt", "pdf"].includes(ext)) return FileText;
+  return FileIcon;
 }
 
 const app = useAppStore();
+const skillsStore = useSkillsStore();
+const artifactsStore = useArtifactsStore();
+
+/** 点击成品文件 chip → 展开右侧抽屉并预览 */
+function openArtifact(path: string) {
+  app.drawerCollapsed = false;
+  artifactsStore.open(path);
+}
 
 const input = ref("");
 const bubbles = ref<Bubble[]>([]);
@@ -36,13 +98,69 @@ const sending = ref(false);
 const currentReq = ref<string | null>(null);
 const showPermDropdown = ref(false);
 const permMode = ref<PermissionMode>("manual");
-const activeSkillId = ref<string | null>(null); // 当前激活的 skill（单选）
 const showSkillPanel = ref(false);
 const skillSearch = ref("");
 const skillsList = ref<Skill[]>([]);
 const scrollEl = ref<HTMLDivElement | null>(null);
 
 let unlisten: (() => void) | null = null;
+
+// ─────────── 拖拽上传附件到当前对话 ───────────
+const attachments = ref<AttachedFile[]>([]);
+/** 上传中的占位（大文件复制需要时间，显示转圈） */
+const pendingAttach = ref<{ name: string }[]>([]);
+
+function attachIcon(kind: string) {
+  if (kind === "image") return ImageIcon;
+  if (kind === "pdf") return FileText;
+  if (kind === "office") return Table;
+  if (kind === "text") return FileCode;
+  return FileIcon;
+}
+
+function humanSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function onDropFiles(paths: string[]) {
+  const convId = await ensureConversation();
+  const placeholders = paths.map((p) => ({
+    name: p.split(/[\\/]/).pop() || p,
+  }));
+  pendingAttach.value.push(...placeholders);
+  try {
+    const res = await chat.attachFiles(convId ?? undefined, paths);
+    for (const r of res) {
+      if (r.ok) attachments.value.push(r);
+      else
+        bubbles.value.push({
+          role: "assistant",
+          text: `[附件失败] ${r.name}:${r.error ?? ""}`,
+        });
+    }
+  } catch (e: any) {
+    bubbles.value.push({
+      role: "assistant",
+      text: `[附件失败] ${e?.message ?? e}`,
+    });
+  } finally {
+    for (const ph of placeholders) {
+      const idx = pendingAttach.value.indexOf(ph);
+      if (idx >= 0) pendingAttach.value.splice(idx, 1);
+    }
+  }
+}
+
+function removeAttachment(i: number) {
+  attachments.value.splice(i, 1);
+}
+
+const { isOver: dropOver } = useFileDrop({
+  active: () => app.view === "chat",
+  onDrop: onDropFiles,
+});
 
 const permLabel: Record<PermissionMode, string> = {
   manual: "手动授权",
@@ -85,9 +203,18 @@ function filteredSkills() {
 }
 
 function skillIcon(id: string) {
-  if (id === "deep-research") return Globe;
-  if (id === "skill-creator") return Wrench;
-  return Sparkles;
+  const map: Record<string, any> = {
+    "deep-research": Globe,
+    "skill-creator": Wrench,
+    pdf: FileText,
+    xlsx: Table,
+    "edge-tts": AudioLines,
+    hyperframes: Clapperboard,
+    "web-search": Search,
+    "image-gen": ImageIcon,
+    "cloak-browser": Ghost,
+  };
+  return map[id] ?? Sparkles;
 }
 
 function goToSkillCenter() {
@@ -95,28 +222,13 @@ function goToSkillCenter() {
   app.setView("skill_center");
 }
 
-function activeSkillName(): string {
-  if (activeSkillId.value === "deep-research") return "深度搜索";
-  const s = skillsList.value.find((x) => x.id === activeSkillId.value);
-  return s?.name || "";
-}
-
-function activeSkillIcon() {
-  if (activeSkillId.value === "deep-research") return Search;
-  return skillIcon(activeSkillId.value || "");
-}
-
 function toggleSkill(id: string) {
-  if (activeSkillId.value === id) {
-    activeSkillId.value = null;
-  } else {
-    activeSkillId.value = id;
-  }
+  skillsStore.toggle(id);
   showSkillPanel.value = false;
 }
 
-function clearActiveSkill() {
-  activeSkillId.value = null;
+function clearActiveSkill(id: string) {
+  skillsStore.remove(id);
 }
 
 async function loadHistory(convId: string | null) {
@@ -126,10 +238,13 @@ async function loadHistory(convId: string | null) {
   }
   try {
     const msgs = await convApi.getMessages(convId);
-    bubbles.value = msgs.map((m) => ({
-      role: m.role,
-      text: m.content,
-    }));
+    bubbles.value = msgs.map((m) => {
+      if (m.role === "assistant") {
+        const { text, artifacts } = parseArtifacts(m.content);
+        return { role: m.role, text, artifacts };
+      }
+      return { role: m.role, text: m.content };
+    });
     await nextTick();
     if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
   } catch (e: any) {
@@ -160,6 +275,24 @@ onMounted(async () => {
         text: `调用工具:${ev.tool ?? "(unknown)"}`,
         tool: ev.tool,
       });
+    } else if (ev.kind === "artifact") {
+      const path = ev.text;
+      if (path) {
+        // 挂到最近一个 assistant 气泡上（tool 气泡可能夹在中间）
+        let target: Bubble | undefined;
+        for (let i = bubbles.value.length - 1; i >= 0; i--) {
+          if (bubbles.value[i].role === "assistant") {
+            target = bubbles.value[i];
+            break;
+          }
+        }
+        if (!target) {
+          target = { role: "assistant", text: "", artifacts: [] };
+          bubbles.value.push(target);
+        }
+        if (!target.artifacts) target.artifacts = [];
+        if (!target.artifacts.includes(path)) target.artifacts.push(path);
+      }
     } else if (ev.kind === "error") {
       bubbles.value.push({
         role: "assistant",
@@ -198,18 +331,32 @@ async function ensureConversation(): Promise<string | null> {
 
 async function send() {
   const text = input.value.trim();
-  if (!text || sending.value) return;
+  const attached = attachments.value.slice();
+  const hasAttach = attached.length > 0;
+  if ((!text && !hasAttach) || sending.value) return;
 
   const convId = await ensureConversation();
 
-  bubbles.value.push({ role: "user", text });
+  // 把附件绝对路径拼进 prompt，让 claude 能用 Read 等工具读取
+  let prompt = text || "请查看我上传的附件。";
+  if (hasAttach) {
+    const lines = attached.map((a) => `- ${a.path}`).join("\n");
+    prompt += `\n\n---\n[附件]（用户拖拽上传，可用 Read 等工具读取）：\n${lines}`;
+  }
+
+  bubbles.value.push({
+    role: "user",
+    text: text || "（仅附件）",
+    files: hasAttach ? attached : undefined,
+  });
   input.value = "";
+  attachments.value = [];
   sending.value = true;
   try {
     const reqId = await chat.send({
-      prompt: text,
+      prompt,
       permissionMode: permMode.value,
-      skillId: activeSkillId.value || undefined,
+      skillIds: Array.from(skillsStore.enabledSkills),
       conversationId: convId ?? undefined,
     });
     currentReq.value = reqId;
@@ -258,7 +405,15 @@ async function newChat() {
 </script>
 
 <template>
-  <div class="chat">
+  <div class="chat" :class="{ 'drag-active': dropOver }">
+    <!-- 拖拽上传覆盖层 -->
+    <div v-if="dropOver" class="drop-overlay">
+      <div class="drop-card">
+        <Paperclip :size="30" :stroke-width="1.4" />
+        <div class="drop-title">松开以上传到当前对话</div>
+        <div class="drop-sub">文件作为附件，发送时供 Claude 读取</div>
+      </div>
+    </div>
     <div class="chat-top">
       <div class="chat-title">
         <template v-if="app.currentConvId">
@@ -307,7 +462,40 @@ async function newChat() {
           <template v-else-if="b.role === 'tool'">⚙ 工具</template>
           <template v-else>北极星</template>
         </div>
-        <div class="text">{{ b.text }}</div>
+        <div v-if="b.text" class="text">{{ b.text }}</div>
+        <!-- 用户上传的附件 -->
+        <div
+          v-if="b.role === 'user' && b.files && b.files.length"
+          class="attach-chips in-bubble"
+        >
+          <div
+            v-for="f in b.files"
+            :key="f.path"
+            class="attach-chip readonly"
+            :title="f.path"
+          >
+            <component :is="attachIcon(f.kind)" :size="14" :stroke-width="1.7" />
+            <span class="ac-name">{{ f.name }}</span>
+          </div>
+        </div>
+        <!-- 成品文件：点击在右侧抽屉预览 -->
+        <div
+          v-if="b.role === 'assistant' && b.artifacts && b.artifacts.length"
+          class="artifacts"
+        >
+          <button
+            v-for="a in b.artifacts"
+            :key="a"
+            class="artifact-chip"
+            :class="{ active: artifactsStore.current?.path === a }"
+            :title="a"
+            @click="openArtifact(a)"
+          >
+            <component :is="artifactIcon(a)" :size="15" :stroke-width="1.7" />
+            <span class="af-name">{{ fileName(a) }}</span>
+            <ExternalLink :size="12" :stroke-width="1.8" class="af-open" />
+          </button>
+        </div>
       </div>
     </div>
 
@@ -330,6 +518,7 @@ async function newChat() {
             v-for="s in filteredSkills()"
             :key="s.id"
             class="skill-panel-item"
+            :class="{ active: skillsStore.has(s.id) }"
             @click="toggleSkill(s.id)"
           >
             <component
@@ -355,16 +544,49 @@ async function newChat() {
       <!-- 输入卡片 -->
       <div class="input-card">
         <!-- Skill 标签 -->
-        <div v-if="activeSkillId" class="skill-tags">
-          <div class="skill-tag" @click="clearActiveSkill">
-            <component :is="activeSkillIcon()" :size="12" :stroke-width="1.8" />
-            <span>{{ activeSkillName() }}</span>
+        <div v-if="skillsStore.enabledSkills.size > 0" class="skill-tags">
+          <div
+            v-for="s in skillsList.filter((x) => skillsStore.has(x.id))"
+            :key="s.id"
+            class="skill-tag"
+            @click="clearActiveSkill(s.id)"
+          >
+            <component :is="skillIcon(s.id)" :size="12" :stroke-width="1.8" />
+            <span>{{ s.name }}</span>
             <X :size="10" :stroke-width="2" class="tag-close" />
+          </div>
+        </div>
+        <!-- 待发送附件 -->
+        <div
+          v-if="attachments.length || pendingAttach.length"
+          class="attach-chips"
+        >
+          <div
+            v-for="(f, i) in attachments"
+            :key="f.path"
+            class="attach-chip"
+            :title="f.path"
+          >
+            <component :is="attachIcon(f.kind)" :size="14" :stroke-width="1.7" />
+            <span class="ac-name">{{ f.name }}</span>
+            <span class="ac-size">{{ humanSize(f.size) }}</span>
+            <button class="ac-remove" title="移除" @click="removeAttachment(i)">
+              <X :size="11" :stroke-width="2" />
+            </button>
+          </div>
+          <div
+            v-for="(p, i) in pendingAttach"
+            :key="'pending-' + i"
+            class="attach-chip pending"
+            :title="p.name"
+          >
+            <LoaderCircle :size="14" :stroke-width="2" class="spin" />
+            <span class="ac-name">{{ p.name }}</span>
           </div>
         </div>
         <textarea
           v-model="input"
-          placeholder="请输入消息 (Ctrl + Enter 发送) …"
+          placeholder="请输入消息 (Ctrl + Enter 发送，可拖文件进来作为附件) …"
           rows="3"
           @keydown="onKeydown"
         ></textarea>
@@ -380,7 +602,7 @@ async function newChat() {
             </button>
             <button
               class="toolbar-btn"
-              :class="{ active: activeSkillId === 'deep-research' }"
+              :class="{ active: skillsStore.has('deep-research') }"
               @click="toggleSkill('deep-research')"
             >
               <Search :size="14" :stroke-width="1.8" />
@@ -478,6 +700,7 @@ async function newChat() {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  position: relative;
 }
 .chat-top {
   padding: 12px 24px;
@@ -598,6 +821,49 @@ async function newChat() {
   line-height: 1.6;
 }
 
+/* 成品文件 chips —— 回答末尾的可点击文件 */
+.artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 320px;
+  padding: 6px 10px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--primary);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.artifact-chip:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.artifact-chip.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.artifact-chip .af-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.artifact-chip .af-open {
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+.artifact-chip:hover .af-open {
+  opacity: 0.9;
+}
+
 /* ─────────── 输入区域 ─────────── */
 .input-area {
   padding: 12px 32px 16px;
@@ -692,6 +958,9 @@ async function newChat() {
 }
 .skill-panel-item:hover {
   background: var(--bg-soft);
+}
+.skill-panel-item.active {
+  background: var(--primary-soft);
 }
 .sp-item-icon {
   color: var(--primary);
@@ -958,5 +1227,105 @@ textarea {
   color: var(--muted);
   margin-top: 2px;
   line-height: 1.5;
+}
+
+/* ─────────── 拖拽上传覆盖层 ─────────── */
+.drop-overlay {
+  position: absolute;
+  inset: 10px;
+  z-index: 50;
+  background: rgba(44, 70, 97, 0.06);
+  border: 2px dashed var(--primary);
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(1px);
+  pointer-events: none;
+}
+.drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--primary);
+}
+.drop-title {
+  font-family: var(--serif);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+.drop-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ─────────── 附件 chips ─────────── */
+.attach-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.attach-chips.in-bubble {
+  margin-top: 8px;
+  margin-bottom: 0;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 4px 8px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.attach-chip .ac-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: var(--text);
+}
+.attach-chip .ac-size {
+  color: var(--dim);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.attach-chip.readonly {
+  background: transparent;
+  color: var(--primary-deep);
+}
+.attach-chip.pending {
+  color: var(--muted);
+}
+.ac-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ac-remove:hover {
+  background: var(--border);
+  color: var(--text);
+}
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>

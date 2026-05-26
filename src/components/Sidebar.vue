@@ -2,6 +2,7 @@
 import { onMounted, ref } from "vue";
 import { Puzzle } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
+import ProviderDock from "./ProviderDock.vue";
 import type { Conversation } from "../tauri";
 
 const app = useAppStore();
@@ -160,9 +161,7 @@ async function confirmDelete(c: Conversation) {
     </div>
 
     <div class="footer">
-      <div v-if="!app.sidebarCollapsed" class="footer-text">
-        v0.2 · 墨蓝水墨
-      </div>
+      <ProviderDock :collapsed="app.sidebarCollapsed" />
     </div>
   </aside>
 </template>

@@ -68,3 +68,29 @@ pub fn resolve(name: &str) -> Result<PromptText>;  // 给 ① 用
 - v0.2: SKILL.md 解析 + 本地 CRUD + 列表 UI
 - v0.3: 接入 ① 对话(skill pill)
 - v0.4: 远程市场 / 签名校验
+- **v0.5（已实现）**: 外部导入 / 下载，不限来源（见 §七）
+
+## 七、外部导入 / 下载（v0.5，已实现）
+
+> 设计原则：**鼓励从外面拿任意技能，不设来源限制**。导入即激活（前端自动 `enable`），无需额外授权步骤。
+
+### 命令
+```rust
+// 返回成功导入的 skill id 列表；前端逐个 enable
+pub fn import_skill(source: String) -> Result<Vec<String>, String>;
+```
+
+### 支持来源（自动识别）
+| 来源 | 处理 |
+|------|------|
+| 本地 `.md` | 解析 frontmatter（无则整篇即正文）→ 规范化写盘 |
+| 本地 `.zip` / 目录 | 递归扫描所有 `SKILL.md` / `skill.md` 逐个导入 |
+| 远程 `https://….md` | `curl` 下载 → 同本地 .md |
+| 远程 `https://….zip` | `curl` 下载 → `tar` 解压 → 同目录 |
+| git 仓库 URL（如 `github.com/obra/superpowers`） | `git clone --depth 1` → 扫描整套技能合集逐个装 |
+
+### 实现取舍
+- 用系统自带 `git` / `curl` / `tar`（Win11/macOS/Linux 均内置），**不新增 Rust 依赖**。
+- 无 frontmatter 的 `SKILL.md` 降级处理：目录名作 id、全文作正文 → 兼容 Anthropic/obra 风格技能。
+- 当前只注入 Markdown 正文作为 prompt；技能携带的脚本/资源为后续增强项。
+- 前端入口：技能中心右上「导入/下载」按钮（URL/git/路径 输入框 + 本地文件选择）。

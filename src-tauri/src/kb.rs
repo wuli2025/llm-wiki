@@ -11,6 +11,7 @@
 //! - 不做 SimHash 去重 (留 §8.6, 后续接入)
 //! - 索引常驻内存, 进程重启时重扫 (后续走 SQLite)
 
+use crate::convert;
 use anyhow::Result;
 use directories::{ProjectDirs, UserDirs};
 use once_cell::sync::Lazy;
@@ -134,6 +135,9 @@ static RE_FRONTMATTER: Lazy<Regex> =
 static RE_TITLE_H1: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^#\s+(.+)$").unwrap());
 static RE_WIKILINK: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\[\[([^\]\|#]+)(?:[#\|][^\]]*)?\]\]").unwrap());
+/// 标准 Markdown 链接 [文字](目标) — 用于从 README/目录页派生边
+static RE_MDLINK: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\[[^\]]*\]\(([^)]+)\)").unwrap());
 static RE_YAML_KV: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?m)^(\w+)\s*:\s*(.+)$").unwrap());
 
@@ -335,35 +339,164 @@ fn clamp_char_boundary(s: &str, mut idx: usize) -> usize {
     idx.min(s.len())
 }
 
-/// MVP ingest: 把外部文件复制到 raw/<filename> 并刷新索引
+/// Ingest 单文件:任意格式 → 转 markdown 写入 raw/(不可转的原样复制),刷新索引。
 #[tauri::command]
 pub fn kb_ingest(source_path: String) -> Result<String, String> {
-    let src = PathBuf::from(&source_path);
-    if !src.exists() {
-        return Err(format!("source not found: {}", source_path));
-    }
-    let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("");
-    if ext != "md" && ext != "markdown" && ext != "txt" {
-        return Err(format!(
-            "MVP 仅支持 .md/.markdown/.txt,当前: .{}",
-            ext
-        ));
-    }
     let root = KB_ROOT.read().clone();
-    let dst_dir = root.join("raw");
-    fs::create_dir_all(&dst_dir).map_err(|e| e.to_string())?;
-    let fname = src
-        .file_name()
-        .ok_or_else(|| "no file name".to_string())?
-        .to_owned();
-    let dst = dst_dir.join(&fname);
-    fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+    let rel = ingest_one(&root, &PathBuf::from(&source_path))?;
+    let docs = scan_all(&root);
+    *INDEX.write() = docs;
+    Ok(rel)
+}
 
-    // 刷新索引
+/// 知识库拖拽上传:批量(可含目录,自动展开)。每个文件转 markdown 入 raw/,
+/// 全部处理完只重扫一次索引。返回逐文件结果(失败不影响其余)。
+#[tauri::command]
+pub fn kb_upload_files(paths: Vec<String>) -> Vec<KbUploadResult> {
+    const MAX_FILES: usize = 500;
+    let root = KB_ROOT.read().clone();
+    let files = expand_to_files(&paths, MAX_FILES);
+
+    let mut results = Vec::with_capacity(files.len());
+    for f in &files {
+        let name = f
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| f.to_string_lossy().to_string());
+        match ingest_one(&root, f) {
+            Ok(rel) => results.push(KbUploadResult {
+                name,
+                rel_path: rel,
+                ok: true,
+                message: String::new(),
+            }),
+            Err(e) => results.push(KbUploadResult {
+                name,
+                rel_path: String::new(),
+                ok: false,
+                message: e,
+            }),
+        }
+    }
+
+    // 整批结束后重扫一次
     let docs = scan_all(&root);
     *INDEX.write() = docs;
 
-    Ok(format!("raw/{}", fname.to_string_lossy()))
+    results
+}
+
+#[derive(Serialize)]
+pub struct KbUploadResult {
+    pub name: String,
+    pub rel_path: String,
+    pub ok: bool,
+    pub message: String,
+}
+
+/// 把一个源文件落到 KB 的 raw/:
+/// - 可抽文本 → 写 `raw/<stem>.md`
+/// - 不可抽(图片/二进制) → 原样复制 `raw/<filename>`
+/// 返回写入的相对路径(正斜杠)。
+fn ingest_one(root: &Path, src: &Path) -> Result<String, String> {
+    if !src.is_file() {
+        return Err(format!("不是文件: {}", src.to_string_lossy()));
+    }
+    let raw_dir = root.join("raw");
+    fs::create_dir_all(&raw_dir).map_err(|e| e.to_string())?;
+
+    match convert::convert_to_markdown(src)? {
+        Some(md) => {
+            let stem = src
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "untitled".into());
+            let dst = unique_path(&raw_dir, &stem, "md");
+            // 顶部补一个标题,便于 KB 索引与预览
+            let titled = format!("# {stem}\n\n{md}");
+            fs::write(&dst, titled).map_err(|e| e.to_string())?;
+            Ok(rel_of(root, &dst))
+        }
+        None => {
+            let fname = src
+                .file_name()
+                .ok_or_else(|| "无文件名".to_string())?
+                .to_string_lossy()
+                .to_string();
+            let (stem, ext) = split_name(&fname);
+            let dst = unique_path(&raw_dir, &stem, &ext);
+            fs::copy(src, &dst).map_err(|e| e.to_string())?;
+            Ok(rel_of(root, &dst))
+        }
+    }
+}
+
+/// 展开输入路径:目录递归取文件,文件直接收,去重并限量。
+fn expand_to_files(paths: &[String], cap: usize) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        if out.len() >= cap {
+            break;
+        }
+        let pb = PathBuf::from(p);
+        if pb.is_dir() {
+            for e in WalkDir::new(&pb).into_iter().flatten() {
+                if e.path().is_file() {
+                    out.push(e.path().to_path_buf());
+                    if out.len() >= cap {
+                        break;
+                    }
+                }
+            }
+        } else if pb.is_file() {
+            out.push(pb);
+        }
+    }
+    out
+}
+
+/// 在 dir 下生成不冲突的路径 `<stem>.<ext>`,冲突则追加 ` (2)` ` (3)` …
+fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    let safe = sanitize_stem(stem);
+    let first = dir.join(format!("{safe}.{ext}"));
+    if !first.exists() {
+        return first;
+    }
+    for n in 2..10_000 {
+        let cand = dir.join(format!("{safe} ({n}).{ext}"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    first
+}
+
+/// 去掉文件名里对 Windows 非法的字符
+fn sanitize_stem(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c })
+        .collect();
+    let t = cleaned.trim().trim_matches('.').trim();
+    if t.is_empty() {
+        "untitled".into()
+    } else {
+        t.to_string()
+    }
+}
+
+fn split_name(fname: &str) -> (String, String) {
+    match fname.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), e.to_string()),
+        _ => (fname.to_string(), "bin".to_string()),
+    }
+}
+
+fn rel_of(root: &Path, full: &Path) -> String {
+    full.strip_prefix(root)
+        .unwrap_or(full)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 // ───────────────────────── Graph ─────────────────────────
@@ -373,6 +506,8 @@ pub struct KbNode {
     pub id: String,
     pub title: String,
     pub category: String,
+    /// 节点类型: "doc" 文档 | "folder" 目录中枢 | "root" 知识库根
+    pub kind: String,
 }
 
 #[derive(Serialize)]
@@ -387,10 +522,54 @@ pub struct KbGraph {
     pub edges: Vec<KbEdge>,
 }
 
+/// 知识库根中枢节点 id (合成节点, 不对应真实文件)
+const ROOT_ID: &str = "__kb_root__";
+
+/// 目录中枢节点 id 前缀。Windows/真实文件名不含冒号, 故不会与 rel_path 冲突。
+fn folder_id(rel: &str) -> String {
+    format!("dir:{rel}")
+}
+
+/// 把 Markdown 链接目标 (可能含 ./ ../) 解析回知识库内的 rel_path。
+/// base_dir 为发出链接的文档所在目录 (rel)。返回规范化的正斜杠 rel_path。
+fn resolve_rel(base_dir: Option<&Path>, link: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(b) = base_dir {
+        for s in b.to_string_lossy().replace('\\', "/").split('/') {
+            if !s.is_empty() {
+                parts.push(s.to_string());
+            }
+        }
+    }
+    for seg in link.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other.to_string()),
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+/// 知识图谱: 文档节点 + 目录层级派生的中枢结构 + 双链/Markdown 链接关系边。
+///
+/// 散点根因 (PRD §8 设计回顾): 原实现只认 `[[wikilink]]`, 未链接的文档=孤点。
+/// 现按真实目录层级 (raw/X/卷/篇) 自动生成"目录中枢节点"和树状边, 使任意
+/// 知识库无需手工双链即可呈现连通图谱; 双链与 Markdown 链接作为额外关系叠加。
 #[tauri::command]
 pub fn kb_graph() -> KbGraph {
+    use std::collections::HashSet;
     let idx = INDEX.read();
+
+    // 标题/文件名 -> rel_path (用于 [[wikilink]] 解析)
     let mut title_to_path: HashMap<String, String> = HashMap::new();
+    let mut path_set: HashSet<String> = HashSet::new();
     for d in idx.iter() {
         title_to_path.insert(d.title.to_lowercase(), d.rel_path.clone());
         let stem = Path::new(&d.rel_path)
@@ -399,29 +578,116 @@ pub fn kb_graph() -> KbGraph {
             .unwrap_or("")
             .to_lowercase();
         title_to_path.entry(stem).or_insert_with(|| d.rel_path.clone());
+        path_set.insert(d.rel_path.clone());
     }
-    let nodes: Vec<KbNode> = idx
-        .iter()
-        .map(|d| KbNode {
+
+    let mut nodes: Vec<KbNode> = Vec::new();
+    let mut edge_set: HashSet<(String, String)> = HashSet::new();
+    let mut folder_set: HashSet<String> = HashSet::new();
+
+    // ① 文档节点
+    for d in idx.iter() {
+        nodes.push(KbNode {
             id: d.rel_path.clone(),
             title: d.title.clone(),
             category: d.category.clone(),
-        })
-        .collect();
-    let mut edges: Vec<KbEdge> = Vec::new();
+            kind: "doc".into(),
+        });
+    }
+
+    // ② 目录层级 -> 中枢节点 + 树状边
+    for d in idx.iter() {
+        let segs: Vec<&str> = d.rel_path.split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() < 2 {
+            // 根目录下的散文件: 直接挂到知识库根
+            edge_set.insert((d.rel_path.clone(), ROOT_ID.to_string()));
+            continue;
+        }
+        // 累积每一层文件夹路径 (不含文件名)
+        let mut acc = String::new();
+        let mut folders: Vec<String> = Vec::new();
+        for s in &segs[..segs.len() - 1] {
+            if acc.is_empty() {
+                acc = (*s).to_string();
+            } else {
+                acc = format!("{acc}/{s}");
+            }
+            folders.push(acc.clone());
+        }
+        // 文档 -> 最深一层目录
+        edge_set.insert((d.rel_path.clone(), folder_id(folders.last().unwrap())));
+        // 目录 -> 上级目录 逐层
+        for w in folders.windows(2) {
+            edge_set.insert((folder_id(&w[1]), folder_id(&w[0])));
+        }
+        // 顶层目录 -> 知识库根
+        edge_set.insert((folder_id(&folders[0]), ROOT_ID.to_string()));
+        for f in folders {
+            folder_set.insert(f);
+        }
+    }
+
+    // ③ 目录中枢节点
+    for f in &folder_set {
+        let title = f.rsplit('/').next().unwrap_or(f).to_string();
+        nodes.push(KbNode {
+            id: folder_id(f),
+            title,
+            category: String::new(),
+            kind: "folder".into(),
+        });
+    }
+    // ④ 知识库根节点 (有内容时)
+    if !nodes.is_empty() {
+        nodes.push(KbNode {
+            id: ROOT_ID.to_string(),
+            title: "知识库".into(),
+            category: String::new(),
+            kind: "root".into(),
+        });
+    }
+
+    // ⑤ [[wikilink]] 关系边
     for d in idx.iter() {
         for link in &d.wikilinks {
             let key = link.to_lowercase();
             if let Some(target) = title_to_path.get(&key) {
                 if target != &d.rel_path {
-                    edges.push(KbEdge {
-                        source: d.rel_path.clone(),
-                        target: target.clone(),
-                    });
+                    edge_set.insert((d.rel_path.clone(), target.clone()));
                 }
             }
         }
     }
+
+    // ⑥ Markdown 链接 [文](relpath.md) 关系边
+    for d in idx.iter() {
+        let base_dir = Path::new(&d.rel_path).parent();
+        for cap in RE_MDLINK.captures_iter(&d.body) {
+            let raw = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+            if raw.is_empty()
+                || raw.starts_with("http")
+                || raw.starts_with('#')
+                || raw.starts_with("mailto:")
+            {
+                continue;
+            }
+            let target_raw = raw.split(['#', '?']).next().unwrap_or(raw);
+            if !(target_raw.ends_with(".md") || target_raw.ends_with(".markdown")) {
+                continue;
+            }
+            if let Some(t) = resolve_rel(base_dir, target_raw) {
+                if t != d.rel_path && path_set.contains(&t) {
+                    edge_set.insert((d.rel_path.clone(), t));
+                }
+            }
+        }
+    }
+
+    let edges = edge_set
+        .into_iter()
+        .map(|(source, target)| KbEdge { source, target })
+        .collect();
+
     KbGraph { nodes, edges }
 }
 

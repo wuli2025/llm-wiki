@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from "vue";
 import { marked } from "marked";
+import { Upload, LoaderCircle, CheckCircle2, XCircle } from "@lucide/vue";
 import { kb, type KbHit } from "../tauri";
+import { useAppStore } from "../stores/app";
+import { useFileDrop } from "../composables/useFileDrop";
+
+const app = useAppStore();
 
 type Tab = "overview" | "browse" | "manage";
 const tab = ref<Tab>("browse");
@@ -61,10 +66,79 @@ async function doIngest() {
     ingestMsg.value = `失败:${e?.message ?? e}`;
   }
 }
+
+// ─────────── 拖拽上传到知识库 ───────────
+interface UploadItem {
+  name: string;
+  status: "loading" | "ok" | "err";
+  detail: string;
+}
+const uploading = ref<UploadItem[]>([]);
+
+async function onDropFiles(paths: string[]) {
+  // 乐观占位（大文件转换 / 复制需要时间，逐个显示进度）
+  uploading.value = paths.map((p) => ({
+    name: p.split(/[\\/]/).pop() || p,
+    status: "loading",
+    detail: "",
+  }));
+  try {
+    const res = await kb.uploadFiles(paths);
+    uploading.value = res.map((r) => ({
+      name: r.name,
+      status: r.ok ? "ok" : "err",
+      detail: r.ok ? r.relPath : r.message,
+    }));
+    await refreshList();
+  } catch (e: any) {
+    uploading.value = uploading.value.map((u) => ({
+      ...u,
+      status: "err",
+      detail: e?.message ?? String(e),
+    }));
+  }
+  // 成功项几秒后淡出，失败项保留以便查看
+  window.setTimeout(() => {
+    uploading.value = uploading.value.filter((u) => u.status === "err");
+  }, 5000);
+}
+
+const { isOver: dropOver } = useFileDrop({
+  active: () => app.view === "wiki",
+  onDrop: onDropFiles,
+});
 </script>
 
 <template>
-  <div class="wiki">
+  <div class="wiki" :class="{ 'drag-active': dropOver }">
+    <!-- 拖拽上传覆盖层 -->
+    <div v-if="dropOver" class="kb-drop-overlay">
+      <div class="kb-drop-card">
+        <Upload :size="34" :stroke-width="1.4" />
+        <div class="kb-drop-title">松开以加入知识库</div>
+        <div class="kb-drop-sub">
+          自动转 Markdown 入库并索引 · 支持 PDF / Word / Excel / PPT / 文本 / 代码
+        </div>
+      </div>
+    </div>
+
+    <!-- 上传进度（逐文件） -->
+    <div v-if="uploading.length" class="upload-panel">
+      <div class="upload-head">上传到知识库</div>
+      <div
+        v-for="(u, i) in uploading"
+        :key="i"
+        class="upload-row"
+        :class="u.status"
+      >
+        <LoaderCircle v-if="u.status === 'loading'" :size="15" class="spin" />
+        <CheckCircle2 v-else-if="u.status === 'ok'" :size="15" />
+        <XCircle v-else :size="15" />
+        <span class="up-name" :title="u.name">{{ u.name }}</span>
+        <span class="up-detail" :title="u.detail">{{ u.detail }}</span>
+      </div>
+    </div>
+
     <div class="head">
       <div class="title">维基知识库</div>
       <div class="tabs">
@@ -150,7 +224,7 @@ async function doIngest() {
           {{ f }}
         </div>
         <div v-if="files.length === 0" class="muted empty">
-          KB 为空,可在「管理」tab ingest 文件,或访问根目录手动放 .md
+          KB 为空 —— 把文件直接拖到本页面即可入库,或在「管理」tab 手动 ingest
         </div>
       </div>
       <div class="right">
@@ -166,10 +240,12 @@ async function doIngest() {
       <div class="card">
         <div class="card-title">Ingest 文件 → KB</div>
         <div class="card-body">
-          填入本机文件绝对路径,自动复制到 <code>raw/</code> 并建立索引(MVP:仅支持 .md / .txt)
+          直接把文件<strong>拖到本页面</strong>即可入库;也可填本机绝对路径手动 ingest。
+          自动转 Markdown 入 <code>raw/</code> 并索引 —— 支持 PDF / Word(docx) /
+          Excel(xlsx) / PPT(pptx) / 文本 / 代码;图片等不可转的原样保存。
         </div>
         <div class="ingest-row">
-          <input v-model="ingestPath" placeholder="例:D:\polaris\案例文件夹\01_xxx.md" />
+          <input v-model="ingestPath" placeholder="例:D:\案例文件夹\01_xxx.pdf" />
           <button class="primary-btn" @click="doIngest">Ingest</button>
         </div>
         <div v-if="ingestMsg" class="ingest-msg">{{ ingestMsg }}</div>
@@ -190,6 +266,7 @@ async function doIngest() {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  position: relative;
 }
 .head {
   padding: 18px 28px 0;
@@ -480,5 +557,101 @@ async function doIngest() {
 .empty {
   padding: 20px 8px;
   font-style: italic;
+}
+
+/* ─────────── 拖拽上传覆盖层 ─────────── */
+.kb-drop-overlay {
+  position: absolute;
+  inset: 10px;
+  z-index: 50;
+  background: rgba(44, 70, 97, 0.07);
+  border: 2px dashed var(--primary);
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(1px);
+  pointer-events: none;
+}
+.kb-drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--primary);
+  text-align: center;
+  padding: 0 24px;
+}
+.kb-drop-title {
+  font-family: var(--serif);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+.kb-drop-sub {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* ─────────── 上传进度面板 ─────────── */
+.upload-panel {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 40;
+  width: 320px;
+  max-height: 50vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  padding: 10px 12px;
+}
+.upload-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.upload-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.upload-row.loading {
+  color: var(--muted);
+}
+.upload-row.ok {
+  color: #2f9e44;
+}
+.upload-row.err {
+  color: var(--vermilion);
+}
+.up-name {
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+.up-detail {
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>

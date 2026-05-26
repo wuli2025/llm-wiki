@@ -41,6 +41,8 @@ export interface KbNode {
   id: string;
   title: string;
   category: string;
+  /** "doc" 文档 | "folder" 目录中枢 | "root" 知识库根 */
+  kind: "doc" | "folder" | "root";
 }
 export interface KbEdge {
   source: string;
@@ -49,6 +51,13 @@ export interface KbEdge {
 export interface KbGraph {
   nodes: KbNode[];
   edges: KbEdge[];
+}
+/** 知识库拖拽上传的逐文件结果 */
+export interface KbUploadResult {
+  name: string;
+  relPath: string;
+  ok: boolean;
+  message: string;
 }
 
 export const kb = {
@@ -60,6 +69,9 @@ export const kb = {
   read: (relPath: string) => invoke<string>("kb_read", { relPath }),
   ingest: (sourcePath: string) =>
     invoke<string>("kb_ingest", { sourcePath }),
+  /** 拖拽上传：任意格式 → 转 markdown 入 raw/，返回逐文件结果 */
+  uploadFiles: (paths: string[]) =>
+    invoke<KbUploadResult[]>("kb_upload_files", { paths }),
   graph: () => invoke<KbGraph>("kb_graph"),
   root: () => invoke<string>("kb_root"),
   defaultRoot: () => invoke<string>("kb_default_root"),
@@ -85,22 +97,69 @@ export interface ChatSendArgs {
   prompt: string;
   permissionMode: PermissionMode;
   useSandbox?: boolean;
-  skillId?: string;
+  skillIds?: string[];
   conversationId?: string;
 }
 
 export interface ChatStreamEvent {
   reqId: string;
-  kind: "delta" | "tool" | "error" | "done";
+  kind: "delta" | "tool" | "error" | "done" | "artifact";
   text?: string;
   tool?: string;
   conversationId?: string;
+}
+
+/** 对话拖拽上传的附件（复制进会话 uploads 目录） */
+export interface AttachedFile {
+  name: string;
+  /** uploads 目录里的绝对路径（正斜杠） */
+  path: string;
+  /** text | image | pdf | office | binary */
+  kind: "text" | "image" | "pdf" | "office" | "binary";
+  size: number;
+  ok: boolean;
+  error?: string;
 }
 
 export const chat = {
   send: (args: ChatSendArgs) =>
     invoke<string>("chat_send", { args: args as unknown as Record<string, unknown> }),
   cancel: (reqId: string) => invoke<void>("chat_cancel", { reqId }),
+  /** 拖拽上传：把文件复制进当前会话，返回附件清单 */
+  attachFiles: (conversationId: string | undefined, paths: string[]) =>
+    invoke<AttachedFile[]>("chat_attach_files", {
+      conversationId: conversationId ?? null,
+      paths,
+    }),
+};
+
+// ──────────────────────────────────────────────────────────────
+// Artifacts module — 对话生成的成品文件，右侧抽屉预览
+// ──────────────────────────────────────────────────────────────
+export type ArtifactKind =
+  | "html"
+  | "svg"
+  | "image"
+  | "markdown"
+  | "text"
+  | "binary";
+
+export interface ArtifactPayload {
+  path: string;
+  name: string;
+  ext: string;
+  kind: ArtifactKind;
+  /** 文本类(html/svg/markdown/text)内容 */
+  text?: string;
+  /** 图片类的 data URL */
+  dataUrl?: string;
+  size: number;
+}
+
+export const artifacts = {
+  read: (path: string) => invoke<ArtifactPayload>("artifact_read", { path }),
+  openExternal: (path: string) =>
+    invoke<void>("artifact_open_external", { path }),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -111,6 +170,10 @@ export interface Skill {
   name: string;
   description: string;
   source: string;
+  /** 是否已拥有可用（预装 / 已安装 / 用户自建） */
+  installed?: boolean;
+  /** 是否可删除（物理存在于用户目录，可卸载） */
+  removable?: boolean;
 }
 
 export const skills = {
@@ -118,6 +181,9 @@ export const skills = {
   get: (id: string) => invoke<Skill>("get_skill", { id }),
   create: (id: string, name: string, description: string, systemPrompt: string) =>
     invoke<void>("create_skill", { id, name, description, systemPrompt }),
+  install: (id: string) => invoke<void>("install_skill", { id }),
+  /** 从外部来源导入：本地 .md/.zip/目录 · 远程 .md/.zip · git 仓库 URL（返回导入的 id 列表） */
+  import: (source: string) => invoke<string[]>("import_skill", { source }),
   delete: (id: string) => invoke<void>("delete_skill", { id }),
 };
 
@@ -244,6 +310,78 @@ export const convApi = {
 };
 
 // ──────────────────────────────────────────────────────────────
+// API 供应商坞 + 用量看板 module
+// ──────────────────────────────────────────────────────────────
+export interface ProviderView {
+  id: string;
+  name: string;
+  note: string;
+  baseUrl: string;
+  tokenField: string;
+  category: string; // official | cn_official | aggregator | third_party | cloud_provider | custom
+  websiteUrl: string;
+  color: string;
+  kind: string; // official | key | codex | copilot | custom
+  isPreset: boolean;
+  hasKey: boolean;
+  authToken: string;
+  /** 完整 settings_config（env + includeCoAuthoredBy/attribution 等） */
+  settingsConfig: any;
+}
+export interface ProviderListResult {
+  providers: ProviderView[];
+  currentId: string;
+}
+export interface ProviderSaveInput {
+  id?: string;
+  name: string;
+  note?: string;
+  websiteUrl?: string;
+  tokenField?: string;
+  /** 完整 settings_config（env 含 base_url + token + 开关） */
+  settingsConfig: any;
+}
+export interface TokenBucket {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  total: number;
+  requests: number;
+  cost: number;
+}
+export interface DailyUsage {
+  date: string;
+  label: string;
+  total: number;
+  cost: number;
+}
+export interface UsageSummary {
+  available: boolean;
+  today: TokenBucket;
+  week: TokenBucket;
+  month: TokenBucket;
+  year: TokenBucket;
+  daily: DailyUsage[];
+}
+export interface CodexStatus {
+  installed: boolean;
+  loggedIn: boolean;
+  authPath: string;
+}
+
+export const provider = {
+  list: () => invoke<ProviderListResult>("provider_list"),
+  switch: (id: string) => invoke<string>("provider_switch", { id }),
+  save: (input: ProviderSaveInput) =>
+    invoke<string>("provider_save", { input }),
+  delete: (id: string) => invoke<void>("provider_delete", { id }),
+  usage: () => invoke<UsageSummary>("usage_summary"),
+  codexStatus: () => invoke<CodexStatus>("codex_status"),
+  codexLogin: () => invoke<void>("codex_login"),
+};
+
+// ──────────────────────────────────────────────────────────────
 // Browser stubs (when running in plain `npm run dev` without Tauri)
 // ──────────────────────────────────────────────────────────────
 function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
@@ -258,6 +396,25 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return "_(browser stub)_  本文件需要 Tauri 后端读取。";
     case "kb_ingest":
       return "browser-stub";
+    case "kb_upload_files": {
+      const paths = (_args?.paths as string[]) ?? [];
+      return paths.map((p) => ({
+        name: p.split(/[\\/]/).pop() || p,
+        relPath: `raw/${p.split(/[\\/]/).pop() || p}`,
+        ok: true,
+        message: "(browser stub)",
+      }));
+    }
+    case "chat_attach_files": {
+      const paths = (_args?.paths as string[]) ?? [];
+      return paths.map((p) => ({
+        name: p.split(/[\\/]/).pop() || p,
+        path: p,
+        kind: "binary",
+        size: 0,
+        ok: true,
+      }));
+    }
     case "kb_graph":
       return { nodes: [], edges: [] };
     case "kb_root":
@@ -283,14 +440,38 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return "(browser stub)";
     case "chat_send":
       return "stub-req-id";
+    case "artifact_read": {
+      const path = String(_args?.path ?? "demo.html");
+      return {
+        path,
+        name: path.split("/").pop() || path,
+        ext: "html",
+        kind: "html",
+        text:
+          "<!doctype html><html><body style='font-family:sans-serif;padding:40px;text-align:center'><h1>预览占位</h1><p>浏览器模式无后端，无法读取真实文件。</p></body></html>",
+        size: 0,
+      };
+    }
+    case "artifact_open_external":
+      return undefined;
     case "list_skills":
       return [
-        { id: "deep-research", name: "深度搜索", description: "使用 LLM 大规模联网搜索相关内容，自动检索、汇总、交叉验证多来源信息", source: "third-party" },
-        { id: "skill-creator", name: "Skill 创建向导", description: "引导用户创建自定义 Skill，自动生成模板和配置文件", source: "official" },
+        { id: "deep-research", name: "深度搜索", description: "使用 LLM 大规模联网搜索相关内容，自动检索、汇总、交叉验证多来源信息", source: "third-party", installed: true, removable: false },
+        { id: "skill-creator", name: "Skill 创建向导", description: "引导用户创建自定义 Skill，自动生成模板和配置文件", source: "official", installed: true, removable: false },
+        { id: "pdf", name: "PDF 文档处理", description: "提取 / 生成 / 编辑 PDF：抽取文本表格、合并拆分、Markdown 转 PDF、表单与 OCR", source: "official", installed: false, removable: false },
+        { id: "xlsx", name: "Excel 表格", description: "读取分析与生成 Excel：透视统计、公式、图表、多 sheet 报表", source: "official", installed: false, removable: false },
+        { id: "edge-tts", name: "语音合成 Edge-TTS", description: "把文本转成自然语音音频，多语言多音色，免费无需 key", source: "third-party", installed: false, removable: false },
+        { id: "hyperframes", name: "视频动画 Hyperframes", description: "用逐帧 / 分镜方式生成短视频与动画，ffmpeg 合成，可配 Edge-TTS 旁白", source: "third-party", installed: false, removable: false },
+        { id: "web-search", name: "联网搜索", description: "实时联网检索，基于 Tavily / Brave 等真实来源回答并交叉验证", source: "third-party", installed: false, removable: false },
+        { id: "image-gen", name: "AI 生图 gpt-image-2", description: "用 OpenAI gpt-image-2 模型按描述生成图片，自动扩写提示词，支持多候选与改图", source: "third-party", installed: false, removable: false },
+        { id: "cloak-browser", name: "CloakBrowser 浏览器", description: "Agent 默认浏览器：源码级隐身 Chromium，drop-in 替换 Playwright，过 Cloudflare / 反爬。可随时关闭移除", source: "third-party", installed: true, removable: false },
       ];
     case "get_skill":
-      return { id: "deep-research", name: "深度搜索", description: "使用 LLM 大规模联网搜索相关内容", source: "third-party" };
+      return { id: "deep-research", name: "深度搜索", description: "使用 LLM 大规模联网搜索相关内容", source: "third-party", installed: true, removable: false };
+    case "import_skill":
+      return ["browser-stub-skill"];
     case "create_skill":
+    case "install_skill":
     case "delete_skill":
       return undefined;
     case "conv_list_projects":
@@ -338,6 +519,51 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return "_(browser stub)_  本文件需要 Tauri 后端读取。";
     case "claude_md_write":
       return undefined;
+    case "provider_list": {
+      const mk = (id: string, name: string, baseUrl: string, category: string, color: string, kind: string, hasKey: boolean, authToken = "") => ({
+        id, name, note: "", baseUrl, tokenField: "ANTHROPIC_AUTH_TOKEN", category, websiteUrl: baseUrl, color, kind, isPreset: true, hasKey, authToken,
+        settingsConfig: { env: baseUrl ? { ANTHROPIC_BASE_URL: baseUrl, ...(authToken ? { ANTHROPIC_AUTH_TOKEN: authToken } : {}) } : {} },
+      });
+      return {
+        providers: [
+          mk("claude-official", "Claude 官方", "", "official", "#D97757", "official", true),
+          mk("zhipu-glm", "智谱 GLM", "https://open.bigmodel.cn/api/anthropic", "cn_official", "#2c6fff", "key", false),
+          mk("kimi", "Kimi 月之暗面", "https://api.moonshot.cn/anthropic", "cn_official", "#2c6fff", "key", true, "sk-demo"),
+          mk("deepseek", "DeepSeek 深度求索", "https://api.deepseek.com/anthropic", "cn_official", "#2c6fff", "key", false),
+          mk("openrouter", "OpenRouter", "https://openrouter.ai/api", "aggregator", "#7c5cff", "key", false),
+          mk("aihubmix", "AiHubMix", "https://aihubmix.com", "aggregator", "#7c5cff", "key", false),
+          mk("packycode", "PackyCode", "https://www.packyapi.com", "third_party", "#e8833a", "key", false),
+          mk("github-copilot", "GitHub Copilot", "https://api.githubcopilot.com", "third_party", "#e8833a", "copilot", false),
+          mk("codex", "Codex (ChatGPT)", "https://chatgpt.com/backend-api/codex", "third_party", "#e8833a", "codex", false),
+        ],
+        currentId: "kimi",
+      };
+    }
+    case "provider_switch":
+      return String(_args?.id ?? "claude-official");
+    case "provider_save":
+      return "custom-stub";
+    case "provider_delete":
+      return undefined;
+    case "codex_status":
+      return { installed: false, loggedIn: false, authPath: "(browser-only)" };
+    case "codex_login":
+      return undefined;
+    case "usage_summary": {
+      const daily = Array.from({ length: 14 }, (_, i) => {
+        const d = new Date(Date.now() - (13 - i) * 86400000);
+        const label = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        return { date: label, label, total: Math.round(300000 + Math.random() * 1600000), cost: +(Math.random() * 6).toFixed(4) };
+      });
+      return {
+        available: true,
+        today: { input: 75600, output: 644800, cacheRead: 45506800, cacheCreation: 1637200, total: 720483 + 47144001, requests: 411, cost: 49.107 },
+        week: { input: 280000, output: 64000, cacheRead: 6100000, cacheCreation: 410000, total: 6854000, requests: 248, cost: 112.4 },
+        month: { input: 980000, output: 240000, cacheRead: 22000000, cacheCreation: 1400000, total: 24620000, requests: 940, cost: 421.8 },
+        year: { input: 1900000, output: 520000, cacheRead: 44000000, cacheCreation: 2800000, total: 49220000, requests: 1894, cost: 980.5 },
+        daily,
+      };
+    }
     default:
       return null;
   }

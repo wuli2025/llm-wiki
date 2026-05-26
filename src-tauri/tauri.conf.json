@@ -41,7 +41,8 @@
       },
       "nsis": {
         "installMode": "both",
-        "compression": "lzma"
+        "compression": "lzma",
+        "installerIcon": "icons/icon.ico"
       }
     }
   }
