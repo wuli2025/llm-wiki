@@ -40,11 +40,29 @@ Polaris 是一个**跑在你自己电脑上**的 AI 工作台。它把 Claude Co
 
 <p align="center"><img src="docs/screenshots/03-chat-artifact.png" width="780"></p>
 
+### AI 协作伙伴 · WorkBuddy 实战
+
+把一个真实任务交给它——比如「盘点各种文件格式的转化方案」——它会自己检索、整理、交叉验证，并产出一份可直接打开的报告。这才是工作台的意义：不止聊天，而是把活干完。
+
+<p align="center"><img src="docs/screenshots/09-chat-workbuddy.png" width="780"></p>
+
 ### API 供应商坞 · 点选即切换
 
 Claude 官方、智谱、DeepSeek、火山方舟、Gemini、聚合站……点一下即写入 `~/.claude/settings.json` 完成切换，底部实时显示当日用量。
 
 <p align="center"><img src="docs/screenshots/04-provider-dock.png" width="380"></p>
+
+### 知识库 · 浏览与阅读
+
+知识库里的文档原样渲染阅读，标题、章节、排版一应俱全。搜索走关键词加权评分，标题命中权重最高。
+
+<p align="center"><img src="docs/screenshots/07-kb-browse.png" width="780"></p>
+
+### 知识库 · 拖拽入库
+
+任意格式直接拖进来——Markdown、Word / Excel / PPT、PDF、网页、图片——自动转成 Markdown 归档到知识库，无需手动转换。
+
+<p align="center"><img src="docs/screenshots/08-kb-ingest.png" width="780"></p>
 
 ### 知识图谱 · 星河
 
