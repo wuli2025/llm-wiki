@@ -14,6 +14,9 @@ src-tauri/Cargo.lock
 .dev.log
 output/
 PolarisKB/output/
+# 对话产物（运行时生成，落在工作文件夹/KB 根下的 conversations/，不该进仓库）
+PolarisKB/conversations/
+conversations/
 
 # Claude workspace / temp files
 .claude/
