@@ -176,7 +176,21 @@ export const artifacts = {
     invoke<ArtifactEntry[]>("artifact_list", {
       conversationId: conversationId ?? null,
     }),
+  /** 跨所有对话检索历史产物文件（文件名 + 正文） */
+  search: (query: string) =>
+    invoke<ArtifactSearchHit[]>("artifact_search", { query }),
 };
+
+/** 跨对话产物搜索命中 */
+export interface ArtifactSearchHit {
+  path: string;
+  name: string;
+  kind: ArtifactKind;
+  conversationId: string;
+  snippet: string;
+  modified: number;
+  score: number;
+}
 
 // ──────────────────────────────────────────────────────────────
 // Skills module
@@ -471,6 +485,8 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
     case "artifact_open_external":
       return undefined;
     case "artifact_list":
+      return [];
+    case "artifact_search":
       return [];
     case "list_skills":
       return [

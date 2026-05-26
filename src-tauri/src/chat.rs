@@ -842,6 +842,126 @@ pub fn artifact_list(conversation_id: Option<String>) -> Vec<ArtifactEntry> {
     entries
 }
 
+/// 跨「所有对话」产物的搜索命中。供历史对话记忆检索把过往输出文件也算入。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactSearchHit {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub conversation_id: String,
+    pub snippet: String,
+    pub modified: u64,
+    pub score: i32,
+}
+
+/// 所有「会话根目录」候选: 工作文件夹(KB root)/conversations 与回退目录。
+fn conversation_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let kb_root = PathBuf::from(kb::kb_root());
+    if !kb_root.as_os_str().is_empty() && kb_root.exists() {
+        roots.push(kb_root.join("conversations"));
+    }
+    if let Some(u) = UserDirs::new() {
+        roots.push(u.home_dir().join("Polaris").join("data").join("artifacts"));
+    }
+    roots
+}
+
+/// 在所有对话的 outputs 里检索: 文件名命中 +10, 正文命中 +2/次(上限), 按分数+时间排序。
+/// 让「搜索以前的对话记忆」把之前输出的文件也算入。
+#[tauri::command]
+pub fn artifact_search(query: String) -> Vec<ArtifactSearchHit> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<ArtifactSearchHit> = Vec::new();
+    for root in conversation_roots() {
+        if !root.exists() {
+            continue;
+        }
+        for w in WalkDir::new(&root).into_iter().flatten() {
+            if !w.file_type().is_file() {
+                continue;
+            }
+            let p = w.path();
+            // 仅 conversations/<id>/outputs/** 下的文件
+            let rel = match p.strip_prefix(&root) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let comps: Vec<String> = rel
+                .components()
+                .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
+                .collect();
+            // 期望 [<id>, "outputs", ...]
+            if comps.len() < 3 || comps[1] != "outputs" {
+                continue;
+            }
+            let conversation_id = comps[0].clone();
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if name.starts_with('.') {
+                continue;
+            }
+            let ext = p
+                .extension()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let kind = classify_ext(&ext);
+            let meta = match w.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            let mut score = 0;
+            let mut snippet = String::new();
+            if name.to_lowercase().contains(&q) {
+                score += 10;
+            }
+            // 文本类才读正文匹配 (限大小, 防卡)
+            if matches!(kind, "text" | "markdown" | "html" | "svg") && meta.len() < 512 * 1024 {
+                if let Ok(body) = std::fs::read_to_string(p) {
+                    let lower = body.to_lowercase();
+                    if let Some(pos) = lower.find(&q) {
+                        score += 2;
+                        let start = body[..pos].char_indices().rev().take(40).last().map(|(i, _)| i).unwrap_or(0);
+                        let end = (pos + q.len() + 60).min(body.len());
+                        let mut e = end;
+                        while e < body.len() && !body.is_char_boundary(e) {
+                            e += 1;
+                        }
+                        snippet = body[start..e].replace('\n', " ").trim().to_string();
+                    }
+                }
+            }
+            if score > 0 {
+                hits.push(ArtifactSearchHit {
+                    path: p.to_string_lossy().replace('\\', "/"),
+                    name,
+                    kind: kind.to_string(),
+                    conversation_id,
+                    snippet,
+                    modified,
+                    score,
+                });
+            }
+        }
+    }
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then(b.modified.cmp(&a.modified)));
+    hits.truncate(50);
+    hits
+}
+
 // ───────────────────────── 对话附件 (拖拽上传) ─────────────────────────
 
 #[derive(Debug, Clone, Serialize)]

@@ -75,6 +75,7 @@ pub fn run() {
             chat::artifact_read,
             chat::artifact_open_external,
             chat::artifact_list,
+            chat::artifact_search,
             // CLAUDE.md
             claude_md::claude_md_list_projects,
             claude_md::claude_md_kb_info,

@@ -2,11 +2,18 @@
 import { ref, onMounted, computed } from "vue";
 import { marked } from "marked";
 import { Upload, LoaderCircle, CheckCircle2, XCircle } from "@lucide/vue";
-import { kb, type KbHit } from "../tauri";
+import {
+  kb,
+  type KbHit,
+  artifacts as artifactsApi,
+  type ArtifactSearchHit,
+} from "../tauri";
 import { useAppStore } from "../stores/app";
+import { useArtifactsStore } from "../stores/artifacts";
 import { useFileDrop } from "../composables/useFileDrop";
 
 const app = useAppStore();
+const artifactsStore = useArtifactsStore();
 
 type Tab = "overview" | "browse" | "manage";
 const tab = ref<Tab>("browse");
@@ -16,6 +23,8 @@ const markdown = ref("");
 const rendered = computed(() => (markdown.value ? marked.parse(markdown.value) : ""));
 const query = ref("");
 const hits = ref<KbHit[]>([]);
+// 历史对话产物命中（搜索记忆把过往输出文件也算入）
+const artHits = ref<ArtifactSearchHit[]>([]);
 const rootPath = ref("");
 const scanned = ref<number | null>(null);
 const ingestPath = ref("");
@@ -49,11 +58,21 @@ async function doScan() {
 }
 
 async function doSearch() {
-  if (!query.value.trim()) {
+  const q = query.value.trim();
+  if (!q) {
     hits.value = [];
+    artHits.value = [];
     return;
   }
-  hits.value = await kb.search(query.value.trim());
+  [hits.value, artHits.value] = await Promise.all([
+    kb.search(q),
+    artifactsApi.search(q),
+  ]);
+}
+
+// 点开历史产物 → 右侧抽屉预览
+function openArtifact(path: string) {
+  artifactsStore.open(path);
 }
 
 async function doIngest() {
@@ -211,6 +230,19 @@ const { isOver: dropOver } = useFileDrop({
             <div class="hit-title">{{ h.title }}</div>
             <div class="hit-snip">{{ h.snippet }}</div>
             <div class="hit-meta">score {{ h.score.toFixed(1) }} · {{ h.path }}</div>
+          </div>
+        </div>
+        <div v-if="artHits.length" class="hit-list">
+          <div class="section-title">历史对话产物</div>
+          <div
+            v-for="a in artHits"
+            :key="a.path"
+            class="hit"
+            @click="openArtifact(a.path)"
+          >
+            <div class="hit-title">{{ a.name }}</div>
+            <div v-if="a.snippet" class="hit-snip">{{ a.snippet }}</div>
+            <div class="hit-meta">产物 · {{ a.kind }} · 点开右栏预览</div>
           </div>
         </div>
         <div class="section-title">所有文件</div>

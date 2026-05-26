@@ -122,6 +122,16 @@ fn scan_all(root: &Path) -> Vec<KbDoc> {
             continue;
         }
         if let Ok(rel) = p.strip_prefix(root) {
+            // 对话产物目录 conversations/ 不纳入知识库索引/图谱 (保护板块②不被对话产物污染);
+            // 这些文件改由 chat::artifact_search 单独检索。
+            if rel
+                .components()
+                .next()
+                .and_then(|c| c.as_os_str().to_str())
+                == Some("conversations")
+            {
+                continue;
+            }
             if let Some(d) = parse_doc(p, rel) {
                 docs.push(d);
             }
