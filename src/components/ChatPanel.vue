@@ -34,6 +34,7 @@ import {
 } from "../tauri";
 import { useAppStore } from "../stores/app";
 import { useSkillsStore } from "../stores/skills";
+import { useSessionsStore } from "../features/coworker/stores/sessions";
 import { useArtifactsStore } from "../stores/artifacts";
 import { useFileDrop } from "../composables/useFileDrop";
 
@@ -84,6 +85,7 @@ function artifactIcon(path: string) {
 
 const app = useAppStore();
 const skillsStore = useSkillsStore();
+const sessions = useSessionsStore();
 const artifactsStore = useArtifactsStore();
 
 /** 点击成品文件 chip → 展开右侧抽屉并预览 */
@@ -300,11 +302,21 @@ onMounted(async () => {
         role: "assistant",
         text: `[错误] ${ev.text ?? ""}`,
       });
+      sending.value = false;
+      currentReq.value = null;
+      if (inflightConvId) {
+        sessions.finish(inflightConvId);
+        app.markUnread(inflightConvId);
+      }
+      inflightConvId = null;
     } else if (ev.kind === "done") {
       sending.value = false;
       currentReq.value = null;
-      // 任务完成：若用户已切到别的对话，给该对话打墨蓝未读点
-      if (inflightConvId) app.markUnread(inflightConvId);
+      // 任务完成：结束工位会话；若用户已切走，给该对话打墨蓝未读点
+      if (inflightConvId) {
+        sessions.finish(inflightConvId);
+        app.markUnread(inflightConvId);
+      }
       inflightConvId = null;
     }
     nextTick(() => {
@@ -342,6 +354,7 @@ async function send() {
 
   const convId = await ensureConversation();
   inflightConvId = convId;
+  if (convId) sessions.start(convId, text.slice(0, 18));
 
   // 把附件绝对路径拼进 prompt，让 claude 能用 Read 等工具读取
   let prompt = text || "请查看我上传的附件。";
@@ -372,6 +385,8 @@ async function send() {
       text: `[发送失败] ${e?.message ?? e}`,
     });
     sending.value = false;
+    if (inflightConvId) sessions.finish(inflightConvId);
+    inflightConvId = null;
   }
 }
 

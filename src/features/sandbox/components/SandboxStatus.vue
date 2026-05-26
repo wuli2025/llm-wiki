@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { sandbox, type SandboxStatus } from "../api";
+import Workstations from "../../coworker/components/Workstations.vue";
 
 const status = ref<SandboxStatus | null>(null);
 const log = ref<string[]>([]);
@@ -75,6 +76,9 @@ async function runCmd() {
         <code>claude-code</code> (apk 装, 无 Node) · 镜像 ~120MB
       </div>
     </div>
+
+    <!-- 协作工位：9 个古风数字人，有任务执笔工作，无任务摸鱼 -->
+    <Workstations />
 
     <div class="status-grid">
       <div class="stat-card" :class="{ ok: status?.docker_installed }">
