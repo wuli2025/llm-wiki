@@ -59,6 +59,10 @@ pub fn run() {
             polaris_sandbox::commands::sandbox_start,
             polaris_sandbox::commands::sandbox_stop,
             polaris_sandbox::commands::sandbox_exec,
+            // CubeSandbox (E2B) 后端 — 「替换 Docker」可选后端
+            polaris_sandbox::e2b::cube_config_get,
+            polaris_sandbox::e2b::cube_config_set,
+            polaris_sandbox::e2b::cube_status,
             // Conv (项目 + 对话历史)
             conv::conv_list_projects,
             conv::conv_create_project,

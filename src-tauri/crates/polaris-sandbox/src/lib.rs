@@ -14,8 +14,11 @@
 //! host 端用 `polaris_sandbox::commands::<cmd>` 注册命令 (宏需按定义模块路径解析)。
 
 pub mod commands;
+/// CubeSandbox (E2B 兼容) 后端 —— 「替换 Docker」的可选后端 (additive)。
+pub mod e2b;
 
 // 把「可直接调用的函数」与常量再导出到 crate 根：
 // 供板块① `chat` 以 `polaris_sandbox::sandbox_status()` / `::CONTAINER_NAME` 调用，
 // 以及 host 在 setup 阶段调 `polaris_sandbox::init()`。
 pub use commands::{init, sandbox_status, CONTAINER_NAME, IMAGE_NAME};
+pub use e2b::{load_config as cube_config, CubeConfig};

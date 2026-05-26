@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
-import { sandbox, type SandboxStatus } from "../api";
+import {
+  sandbox,
+  cube,
+  type SandboxStatus,
+  type CubeConfig,
+  type CubeStatus,
+} from "../api";
 import Workstations from "../../coworker/components/Workstations.vue";
 
 const status = ref<SandboxStatus | null>(null);
@@ -9,6 +15,11 @@ const busy = ref(false);
 const execCmd = ref("claude --version");
 const execOut = ref("");
 
+// CubeSandbox (E2B) 后端配置
+const cubeCfg = ref<CubeConfig>({ backend: "docker", endpoint: "", apiKey: "" });
+const cubeStat = ref<CubeStatus | null>(null);
+const cubeBusy = ref(false);
+
 async function refresh() {
   try {
     status.value = await sandbox.status();
@@ -16,7 +27,38 @@ async function refresh() {
     log.value.unshift(`[refresh] ${e?.message ?? e}`);
   }
 }
-onMounted(refresh);
+async function loadCube() {
+  try {
+    cubeCfg.value = await cube.configGet();
+    cubeStat.value = await cube.status();
+  } catch (e: any) {
+    log.value.unshift(`[cube] ${e?.message ?? e}`);
+  }
+}
+async function saveCube() {
+  cubeBusy.value = true;
+  try {
+    cubeCfg.value = await cube.configSet(cubeCfg.value);
+    cubeStat.value = await cube.status();
+    log.value.unshift(`[cube] 已保存 · backend=${cubeCfg.value.backend}`);
+  } catch (e: any) {
+    log.value.unshift(`[cube error] ${e?.message ?? e}`);
+  } finally {
+    cubeBusy.value = false;
+  }
+}
+async function testCube() {
+  cubeBusy.value = true;
+  try {
+    cubeStat.value = await cube.status();
+  } finally {
+    cubeBusy.value = false;
+  }
+}
+onMounted(() => {
+  refresh();
+  loadCube();
+});
 
 async function build() {
   busy.value = true;
@@ -79,6 +121,60 @@ async function runCmd() {
 
     <!-- 协作工位：9 个古风数字人，有任务执笔工作，无任务摸鱼 -->
     <Workstations />
+
+    <!-- CubeSandbox (E2B) 后端：替换 Docker 方案的可选后端 -->
+    <div class="cube">
+      <div class="cube-head">
+        <span class="cube-title">沙箱后端 · CubeSandbox (E2B)</span>
+        <span
+          class="cube-badge"
+          :class="{
+            on: cubeStat?.reachable,
+            warn: cubeStat?.configured && !cubeStat?.reachable,
+          }"
+        >
+          {{
+            !cubeStat?.configured
+              ? "未配置"
+              : cubeStat?.reachable
+              ? "已连通"
+              : "不可达"
+          }}
+        </span>
+      </div>
+      <div class="cube-desc">
+        CubeSandbox 是腾讯云基于 RustVMM+KVM 的微虚机沙箱，兼容 E2B。它需运行在
+        <strong>Linux/KVM</strong>（远程主机 / WSL2 / 云），把端点 URL 填到这里即可把执行从
+        Docker 切到 CubeSandbox。
+      </div>
+      <div class="cube-row">
+        <label>后端</label>
+        <select v-model="cubeCfg.backend">
+          <option value="docker">Docker（本机，默认）</option>
+          <option value="e2b">CubeSandbox / E2B（端点）</option>
+        </select>
+      </div>
+      <div class="cube-row">
+        <label>端点 URL</label>
+        <input
+          v-model="cubeCfg.endpoint"
+          placeholder="https://your-cubesandbox-host:port"
+        />
+      </div>
+      <div class="cube-row">
+        <label>API Key</label>
+        <input v-model="cubeCfg.apiKey" placeholder="可空（E2B_API_KEY）" />
+      </div>
+      <div class="cube-actions">
+        <button class="primary-btn" :disabled="cubeBusy" @click="saveCube">
+          保存
+        </button>
+        <button class="secondary-btn" :disabled="cubeBusy" @click="testCube">
+          测试连接
+        </button>
+      </div>
+      <div v-if="cubeStat?.note" class="cube-note">▸ {{ cubeStat.note }}</div>
+    </div>
 
     <div class="status-grid">
       <div class="stat-card" :class="{ ok: status?.docker_installed }">
@@ -171,6 +267,95 @@ async function runCmd() {
   border-radius: 2px;
   font-family: var(--mono);
   font-size: 11px;
+}
+
+.cube {
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-left: 2px solid var(--primary);
+  border-radius: 6px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+}
+.cube-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.cube-title {
+  font-family: var(--serif);
+  font-size: 14px;
+  letter-spacing: 1px;
+  color: var(--ink);
+}
+.cube-badge {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  background: var(--bg-soft);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+.cube-badge.on {
+  background: #e7f3ec;
+  color: #2e7d52;
+  border-color: #bfe0cc;
+}
+.cube-badge.warn {
+  background: var(--vermilion-soft);
+  color: var(--vermilion);
+  border-color: #f0c8c2;
+}
+.cube-desc {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.8;
+  margin-bottom: 12px;
+}
+.cube-desc strong {
+  color: var(--primary-deep);
+}
+.cube-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.cube-row label {
+  width: 64px;
+  font-size: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.cube-row input,
+.cube-row select {
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12.5px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+}
+.cube-row input:focus,
+.cube-row select:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+.cube-actions {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 6px;
+}
+.cube-note {
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: var(--bg-soft);
+  border-radius: 4px;
+  padding: 8px 10px;
+  line-height: 1.6;
 }
 
 .status-grid {

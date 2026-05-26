@@ -24,3 +24,23 @@ export const sandbox = {
   stop: () => invoke<string>("sandbox_stop"),
   exec: (cmd: string) => invoke<string>("sandbox_exec", { cmd }),
 };
+
+// ───────────── CubeSandbox (E2B 兼容) 后端 ─────────────
+export interface CubeConfig {
+  backend: string; // "docker" | "e2b"
+  endpoint: string;
+  apiKey: string;
+}
+export interface CubeStatus {
+  backend: string;
+  endpoint: string;
+  configured: boolean;
+  reachable: boolean;
+  note: string;
+}
+export const cube = {
+  configGet: () => invoke<CubeConfig>("cube_config_get"),
+  configSet: (config: CubeConfig) =>
+    invoke<CubeConfig>("cube_config_set", { config }),
+  status: () => invoke<CubeStatus>("cube_status"),
+};

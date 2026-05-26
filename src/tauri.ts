@@ -468,6 +468,18 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
     case "sandbox_stop":
     case "sandbox_exec":
       return "(browser stub)";
+    case "cube_config_get":
+      return { backend: "docker", endpoint: "", apiKey: "" };
+    case "cube_config_set":
+      return (_args?.config as unknown) ?? { backend: "docker", endpoint: "", apiKey: "" };
+    case "cube_status":
+      return {
+        backend: "docker",
+        endpoint: "",
+        configured: false,
+        reachable: false,
+        note: "浏览器模式 - 无后端探测",
+      };
     case "chat_send":
       return "stub-req-id";
     case "artifact_read": {
