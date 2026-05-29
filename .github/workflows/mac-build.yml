@@ -53,4 +53,4 @@ jobs:
           releaseBody: "未签名 macOS 通用安装包。首次打开请右键→打开，或终端执行 `xattr -dr com.apple.quarantine /Applications/Polaris.app` 解除隔离。"
           releaseDraft: false
           prerelease: true
-          args: --target universal-apple-darwin --bundles dmg --config tauri.macbuild.conf.json
+          args: --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.macbuild.conf.json
