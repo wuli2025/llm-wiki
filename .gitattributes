@@ -1,0 +1,2 @@
+# macOS 启动脚本必须 LF,否则 bash 报错
+*.command text eol=lf
