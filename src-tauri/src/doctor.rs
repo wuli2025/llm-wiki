@@ -17,8 +17,11 @@
 //!   ② 立刻塞进**当前进程 PATH** (`std::env::set_var`), 让本次会话不重启即可
 //!   spawn claude。安装成功后自动执行, 对应「你帮他配置一下 / 一定要记得改环境变量」。
 //!
-//! 跨平台: 本模块以 Windows 为主场。非 Windows 下探测仍可用 (走 which/直接执行),
-//! 安装与 PATH 写入是 Windows 专属逻辑, 其余平台返回友好提示, 不阻断编译。
+//! 跨平台: 探测两端通用 (Windows 走 where.exe / cmd, 类 Unix 走 which / 直接执行)。
+//! 安装 Claude Code 已两端可用 —— npm 方式命令一致, native 各走官方脚本 (Windows 的
+//! install.ps1 / macOS·Linux 的 install.sh), 经 `build_install_shell` 选 PowerShell 或 sh。
+//! 仅「持久化 PATH 进注册表」与「装 Node/PowerShell7」是 Windows 专属逻辑 (mac 自带 shell,
+//! 全局 npm bin 通常已在 PATH); 其余平台对这两项返回友好提示, 不阻断编译。
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -353,6 +356,8 @@ fn is_app_exec_alias(p: &std::path::Path) -> bool {
 
 /// 探测可用的 Git Bash (claude 在 Windows 上可接受的另一种 shell)。
 /// 先认 `CLAUDE_CODE_GIT_BASH_PATH` 覆盖, 再扫常见安装位置。
+/// 仅 Windows 需要 (扫的全是 Windows 路径); 类 Unix 用系统自带 shell, 不走这里。
+#[cfg(windows)]
 fn git_bash_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("CLAUDE_CODE_GIT_BASH_PATH") {
         let pb = PathBuf::from(p);
@@ -642,9 +647,12 @@ pub fn env_check() -> EnvReport {
         _ => true,
     };
 
-    // 可用 shell: 真身 pwsh (detect 已滤掉 Store 别名) 或 Git Bash。
-    // claude 在 Windows 上必须有其一才能跑工具, 故并入「就绪」判定。
+    // 可用 shell: Windows 需真身 pwsh (detect 已滤掉 Store 别名) 或 Git Bash;
+    // 类 Unix(含 macOS) 自带 /bin/sh、zsh/bash, claude 直接可用 → 恒就绪。
+    #[cfg(windows)]
     let shell_ready = pwsh.found || git_bash_path().is_some();
+    #[cfg(not(windows))]
+    let shell_ready = true;
     let ready = claude.found && shell_ready;
 
     EnvReport {
@@ -677,22 +685,13 @@ pub fn env_fix_path() -> Result<PathFixResult, String> {
 
 /// 安装 Claude Code。method: "npm" (默认, 经国内镜像) | "native" (官方原生脚本, 兜底)。
 /// 流式把安装日志通过 `env:stream` 事件推给前端; 成功后自动修 PATH。
+/// 跨平台: Windows 经 PowerShell, macOS/Linux 经 `sh`(npm 方式两端一致; native 各走各的官方脚本)。
 #[tauri::command]
 pub fn env_install_claude(app: AppHandle, method: Option<String>) -> Result<String, String> {
-    if !cfg!(windows) {
-        return Err("自动安装目前仅支持 Windows; 其他平台请参考官方文档手动安装。".into());
-    }
     let method = method.unwrap_or_else(|| "npm".to_string());
-    let inner = match method.as_str() {
-        // 官方原生脚本: 产出 ~/.local/bin/claude.exe; 国内常因访问 claude.ai / GCS 受阻而失败 → 仅兜底
-        "native" => "irm https://claude.ai/install.ps1 | iex".to_string(),
-        // 默认: npm + 国内镜像 (npmmirror)。包体与原生二进制(optionalDependencies)同源镜像,
-        // 整个安装不依赖 claude.ai / GCS → 国内可装。装出真·原生 exe (postinstall 拷到 bin/claude.exe)。
-        _ => "npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com"
-            .to_string(),
-    };
+    let inner = claude_install_cmd(&method);
     let req_id = next_req_id();
-    let cmd = build_powershell(&inner);
+    let cmd = build_install_shell(&inner);
     stream_install(app, req_id.clone(), cmd, true, "Claude Code");
     Ok(req_id)
 }
@@ -946,13 +945,10 @@ pub fn env_claude_update_check() -> ClaudeUpdateInfo {
 /// 复用流式安装管线; 成功后清解析缓存并自动修 PATH (与首次安装一致)。
 #[tauri::command]
 pub fn env_update_claude(app: AppHandle) -> Result<String, String> {
-    if !cfg!(windows) {
-        return Err("自动更新目前仅支持 Windows; 其他平台请用 npm 手动更新。".into());
-    }
     let inner = "npm install -g @anthropic-ai/claude-code@latest \
 --registry=https://registry.npmmirror.com";
     let req_id = next_req_id();
-    let cmd = build_powershell(inner);
+    let cmd = build_install_shell(inner);
     stream_install(app, req_id.clone(), cmd, true, "Claude Code 更新");
     Ok(req_id)
 }
@@ -966,6 +962,46 @@ pub fn env_cancel(req_id: String) -> Result<(), String> {
 }
 
 // ───────────────────────── 内部: 流式安装 ─────────────────────────
+
+/// 构造一个跑给定内联命令的系统 shell 进程:
+/// - Windows → PowerShell (见 `build_powershell`);
+/// - 类 Unix(含 macOS) → `sh -lc`(`-l` 走登录配置以拿到用户 PATH, npm 全局 bin 才在内)。
+/// 安装/更新 Claude Code 这类跨平台命令统一走它。
+fn build_install_shell(inner: &str) -> Command {
+    #[cfg(windows)]
+    {
+        build_powershell(inner)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-lc", inner]);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
+    }
+}
+
+/// Claude Code 的安装命令串 (按平台 + 方式选择)。
+/// - `npm` (默认): 跨平台一致, 经国内镜像装 (含原生二进制, 国内可装);
+/// - `native`: Windows 走官方 PowerShell 脚本, 类 Unix 走官方 `install.sh`。
+fn claude_install_cmd(method: &str) -> String {
+    match method {
+        "native" => {
+            #[cfg(windows)]
+            {
+                "irm https://claude.ai/install.ps1 | iex".to_string()
+            }
+            #[cfg(not(windows))]
+            {
+                "curl -fsSL https://claude.ai/install.sh | bash".to_string()
+            }
+        }
+        _ => "npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com"
+            .to_string(),
+    }
+}
 
 /// 构造一个跑给定内联命令的 PowerShell 进程 (Bypass 执行策略, 以便 iex 远程脚本)。
 fn build_powershell(inner: &str) -> Command {
@@ -1001,7 +1037,7 @@ fn stream_install(app: AppHandle, req_id: String, mut cmd: Command, fix_path_aft
                     kind: "done".into(),
                     line: None,
                     ok: Some(false),
-                    message: Some(format!("启动安装进程失败: {e} (PowerShell 是否可用?)")),
+                    message: Some(format!("启动安装进程失败: {e} (系统 shell 是否可用?)")),
                 },
             );
             return;

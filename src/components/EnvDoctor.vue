@@ -140,7 +140,9 @@ async function installClaude(method: "native" | "npm") {
     logs.value.push(
       method === "npm"
         ? "$ npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com"
-        : "$ irm https://claude.ai/install.ps1 | iex"
+        : isWin.value
+          ? "$ irm https://claude.ai/install.ps1 | iex"
+          : "$ curl -fsSL https://claude.ai/install.sh | bash"
     );
   } catch (e) {
     busyKind.value = "";
@@ -246,11 +248,16 @@ function statusText(t: ToolStatus): string {
   return t.required ? "未安装 · 必需" : "未安装 · 建议";
 }
 
-const tools = computed<ToolStatus[]>(() =>
-  report.value
-    ? [report.value.claude, report.value.pwsh, report.value.node, report.value.npm]
-    : []
-);
+// 当前系统 (后端 env_check 回传): "windows" | "macos" | "linux" | "browser"
+const osName = computed(() => report.value?.os ?? "");
+const isWin = computed(() => osName.value === "windows");
+
+const tools = computed<ToolStatus[]>(() => {
+  if (!report.value) return [];
+  const all = [report.value.claude, report.value.pwsh, report.value.node, report.value.npm];
+  // PowerShell 7 仅 Windows 上是 Claude 的可用 shell; mac/Linux 自带 sh/zsh, 不展示该行。
+  return isWin.value ? all : all.filter((t) => t.key !== "pwsh");
+});
 const pathNeedsFix = computed(
   () =>
     !!report.value &&
@@ -296,7 +303,7 @@ const npmReady = computed(() => !!report.value?.npm.found);
             <!-- 行内动作 -->
             <div class="t-act">
               <template v-if="t.key === 'claude' && !t.found">
-                <!-- 默认 npm(国内镜像)装; 没有 npm 则先引导装 Node.js -->
+                <!-- 默认 npm(国内镜像)装 -->
                 <button
                   v-if="npmReady"
                   class="btn primary"
@@ -305,14 +312,25 @@ const npmReady = computed(() => !!report.value?.npm.found);
                 >
                   {{ busyKind === "claude-npm" ? "安装中…" : "一键安装" }}
                 </button>
+                <!-- Windows 无 npm: 先引导装 Node.js (winget) -->
                 <button
-                  v-else
+                  v-else-if="isWin"
                   class="btn primary"
                   :disabled="busy"
                   title="npm 安装方式需要 Node.js，先装 Node 再装 Claude Code"
                   @click="installNode"
                 >
                   {{ busyKind === "node" ? "安装中…" : "先装 Node.js" }}
+                </button>
+                <!-- mac/Linux 无 npm: 直接走官方 install.sh 脚本 (无需 Node) -->
+                <button
+                  v-else
+                  class="btn primary"
+                  :disabled="busy"
+                  title="经官方脚本安装 (curl install.sh，需能访问 claude.ai)"
+                  @click="installClaude('native')"
+                >
+                  {{ busyKind === "claude" ? "安装中…" : "一键安装" }}
                 </button>
               </template>
               <!-- 已装 Claude Code: 检查 / 一键更新 (走国内镜像) -->
@@ -342,7 +360,7 @@ const npmReady = computed(() => !!report.value?.npm.found);
                   }}
                 </button>
               </template>
-              <template v-else-if="t.key === 'node' && !t.found">
+              <template v-else-if="t.key === 'node' && !t.found && isWin">
                 <button class="btn" :disabled="busy" @click="installNode">
                   {{ busyKind === "node" ? "安装中…" : "安装" }}
                 </button>
@@ -360,9 +378,9 @@ const npmReady = computed(() => !!report.value?.npm.found);
         <p v-if="report && !report.claude.found" class="alt">
           默认经<strong>国内镜像</strong>用 npm 安装
           <code>npm i -g @anthropic-ai/claude-code --registry=npmmirror.com</code>（含原生二进制，国内可装、开箱即用）。
-          <span v-if="!npmReady">需先安装 <strong>Node.js</strong>（npm 随它一起来）。</span>
+          <span v-if="!npmReady && isWin">需先安装 <strong>Node.js</strong>（npm 随它一起来）。</span>
           <button class="link" :disabled="busy" @click="installClaude('native')">
-            或改用官方脚本（境外网络）
+            或改用官方脚本（境外网络{{ isWin ? "" : " · install.sh" }}）
           </button>
         </p>
 
