@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   envDoctor,
   listen,
   isTauri,
+  type ClaudeUpdateInfo,
   type EnvReport,
   type EnvStreamEvent,
   type ToolStatus,
 } from "../tauri";
+import McpConfigModal from "./McpConfigModal.vue";
 
 /**
  * 环境医生 — 新用户开箱的「环境监测 + 配置安装」。
@@ -23,12 +25,18 @@ type Phase = "checking" | "ready-skip" | "panel";
 const phase = ref<Phase>("checking");
 const report = ref<EnvReport | null>(null);
 
-// 安装 / 修复 的进行态
-const busyKind = ref<"" | "claude" | "claude-npm" | "pwsh" | "path">("");
+// 安装 / 修复 / 更新 的进行态
+const busyKind = ref<
+  "" | "claude" | "claude-npm" | "claude-update" | "node" | "pwsh" | "path"
+>("");
 const installReqId = ref<string | null>(null);
 const logs = ref<string[]>([]);
 const banner = ref<{ kind: "ok" | "err" | "info"; text: string } | null>(null);
 let unlisten: (() => void) | null = null;
+
+// Claude Code 更新检测
+const updateInfo = ref<ClaudeUpdateInfo | null>(null);
+const checkingUpdate = ref(false);
 
 const busy = computed(() => busyKind.value !== "");
 
@@ -64,6 +72,19 @@ onBeforeUnmount(() => {
   if (unlisten) unlisten();
 });
 
+// 进入面板 / 跳过页且 Claude Code 已安装时, 自动静默检测一次更新
+watch(phase, (p) => {
+  if (
+    (p === "panel" || p === "ready-skip") &&
+    isTauri &&
+    report.value?.claude.found &&
+    !updateInfo.value &&
+    !checkingUpdate.value
+  ) {
+    checkClaudeUpdate();
+  }
+});
+
 function onStream(ev: EnvStreamEvent) {
   if (installReqId.value && ev.reqId !== installReqId.value) return;
   if (ev.kind === "log" && ev.line) {
@@ -80,6 +101,9 @@ async function finishInstall(ok: boolean, message: string) {
   banner.value = { kind: ok ? "ok" : "err", text: message || (ok ? "完成。" : "未成功。") };
   const r = await runCheck();
   if (r.ready) localStorage.setItem(READY_FLAG, "1");
+  // 装好 / 更新完后重新检测版本, 让「更新」按钮翻成「已是最新」
+  updateInfo.value = null;
+  if (r.claude.found) checkClaudeUpdate();
 }
 
 async function installClaude(method: "native" | "npm") {
@@ -90,9 +114,22 @@ async function installClaude(method: "native" | "npm") {
     installReqId.value = await envDoctor.installClaude(method);
     logs.value.push(
       method === "npm"
-        ? "$ npm install -g @anthropic-ai/claude-code"
+        ? "$ npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com"
         : "$ irm https://claude.ai/install.ps1 | iex"
     );
+  } catch (e) {
+    busyKind.value = "";
+    banner.value = { kind: "err", text: String(e) };
+  }
+}
+
+async function installNode() {
+  banner.value = null;
+  logs.value = [];
+  busyKind.value = "node";
+  try {
+    installReqId.value = await envDoctor.installNode();
+    logs.value.push("$ winget install --id OpenJS.NodeJS.LTS -e");
   } catch (e) {
     busyKind.value = "";
     banner.value = { kind: "err", text: String(e) };
@@ -106,6 +143,36 @@ async function installPwsh() {
   try {
     installReqId.value = await envDoctor.installPwsh();
     logs.value.push("$ winget install --id Microsoft.PowerShell -e");
+  } catch (e) {
+    busyKind.value = "";
+    banner.value = { kind: "err", text: String(e) };
+  }
+}
+
+// 检测 Claude Code 是否有新版本 (静默, 不打扰; 仅在已安装时有意义)
+async function checkClaudeUpdate() {
+  if (checkingUpdate.value || busy.value) return;
+  if (!report.value?.claude.found) return;
+  checkingUpdate.value = true;
+  try {
+    updateInfo.value = await envDoctor.checkClaudeUpdate();
+  } catch {
+    // 检测失败不报错横幅, 静默留待用户手动点「检查更新」重试
+  } finally {
+    checkingUpdate.value = false;
+  }
+}
+
+// 一键更新 Claude Code (走国内 npmmirror), 复用安装的流式日志管线
+async function updateClaude() {
+  banner.value = null;
+  logs.value = [];
+  busyKind.value = "claude-update";
+  try {
+    installReqId.value = await envDoctor.updateClaude();
+    logs.value.push(
+      "$ npm install -g @anthropic-ai/claude-code@latest --registry=https://registry.npmmirror.com"
+    );
   } catch (e) {
     busyKind.value = "";
     banner.value = { kind: "err", text: String(e) };
@@ -165,6 +232,8 @@ const pathNeedsFix = computed(
     report.value.claude.found &&
     !report.value.claudeDirOnUserPath
 );
+// npm 安装方式需要 Node.js 带来的 npm; 没有则先引导装 Node
+const npmReady = computed(() => !!report.value?.npm.found);
 </script>
 
 <template>
@@ -202,8 +271,55 @@ const pathNeedsFix = computed(
             <!-- 行内动作 -->
             <div class="t-act">
               <template v-if="t.key === 'claude' && !t.found">
-                <button class="btn primary" :disabled="busy" @click="installClaude('native')">
-                  {{ busyKind === "claude" ? "安装中…" : "一键安装" }}
+                <!-- 默认 npm(国内镜像)装; 没有 npm 则先引导装 Node.js -->
+                <button
+                  v-if="npmReady"
+                  class="btn primary"
+                  :disabled="busy"
+                  @click="installClaude('npm')"
+                >
+                  {{ busyKind === "claude-npm" ? "安装中…" : "一键安装" }}
+                </button>
+                <button
+                  v-else
+                  class="btn primary"
+                  :disabled="busy"
+                  title="npm 安装方式需要 Node.js，先装 Node 再装 Claude Code"
+                  @click="installNode"
+                >
+                  {{ busyKind === "node" ? "安装中…" : "先装 Node.js" }}
+                </button>
+              </template>
+              <!-- 已装 Claude Code: 检查 / 一键更新 (走国内镜像) -->
+              <template v-else-if="t.key === 'claude' && t.found">
+                <button
+                  v-if="updateInfo?.updateAvailable"
+                  class="btn primary"
+                  :disabled="busy"
+                  :title="`更新到 ${updateInfo.latest}（当前 ${updateInfo.current}）`"
+                  @click="updateClaude"
+                >
+                  {{ busyKind === "claude-update" ? "更新中…" : `更新到 ${updateInfo.latest}` }}
+                </button>
+                <button
+                  v-else
+                  class="btn"
+                  :disabled="busy || checkingUpdate"
+                  :title="updateInfo?.checked ? updateInfo.message : '检查 Claude Code 是否有新版本'"
+                  @click="checkClaudeUpdate"
+                >
+                  {{
+                    checkingUpdate
+                      ? "检查中…"
+                      : updateInfo?.checked
+                        ? "已是最新"
+                        : "检查更新"
+                  }}
+                </button>
+              </template>
+              <template v-else-if="t.key === 'node' && !t.found">
+                <button class="btn" :disabled="busy" @click="installNode">
+                  {{ busyKind === "node" ? "安装中…" : "安装" }}
                 </button>
               </template>
               <template v-else-if="t.key === 'pwsh' && !t.found">
@@ -215,11 +331,13 @@ const pathNeedsFix = computed(
           </li>
         </ul>
 
-        <!-- 安装 Claude 的备用方式 -->
+        <!-- 安装 Claude 的方式说明 + 兜底 -->
         <p v-if="report && !report.claude.found" class="alt">
-          首选官方脚本 <code>irm https://claude.ai/install.ps1 | iex</code>（产出 claude.exe，开箱即用）。
-          <button class="link" :disabled="busy" @click="installClaude('npm')">
-            或改用 npm 安装
+          默认经<strong>国内镜像</strong>用 npm 安装
+          <code>npm i -g @anthropic-ai/claude-code --registry=npmmirror.com</code>（含原生二进制，国内可装、开箱即用）。
+          <span v-if="!npmReady">需先安装 <strong>Node.js</strong>（npm 随它一起来）。</span>
+          <button class="link" :disabled="busy" @click="installClaude('native')">
+            或改用官方脚本（境外网络）
           </button>
         </p>
 
@@ -260,6 +378,12 @@ const pathNeedsFix = computed(
               {{ report?.ready ? "环境就绪 · 进入北极星" : "仍要进入" }}
             </button>
           </template>
+        </div>
+
+        <!-- MCP 服务配置 -->
+        <div v-if="!props.gate" class="mcp-section"
+        >
+          <McpConfigModal inline @close="() => {}" />
         </div>
       </template>
     </div>
@@ -548,5 +672,11 @@ const pathNeedsFix = computed(
   padding: 0;
 }
 .link:hover:not(:disabled) { text-decoration: underline; }
+
+.mcp-section {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-soft);
+}
 .link:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

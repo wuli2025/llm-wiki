@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, onMounted } from "vue";
+import { computed, ref, watch, onMounted } from "vue";
 import Sidebar from "./components/Sidebar.vue";
+import ViewLoader from "./components/ViewLoader.vue";
 import RightDrawer from "./components/RightDrawer.vue";
 import ChatPanel from "./components/ChatPanel.vue";
 import WikiBrowse from "./components/WikiBrowse.vue";
@@ -10,24 +11,70 @@ import ClaudeMdPanel from "./components/ClaudeMdPanel.vue";
 import Settings from "./components/Settings.vue";
 import SkillCenter from "./components/SkillCenter.vue";
 import AddProviderModal from "./components/AddProviderModal.vue";
+import McpConfigModal from "./components/McpConfigModal.vue";
+import WorkflowPackModal from "./components/WorkflowPackModal.vue";
 import UsageBoard from "./components/UsageBoard.vue";
 import SplashScreen from "./components/SplashScreen.vue";
 import Onboarding from "./components/Onboarding.vue";
 import EnvDoctor from "./components/EnvDoctor.vue";
-import { useAppStore } from "./stores/app";
+import UpdatePanel from "./components/UpdatePanel.vue";
+import UpdateBanner from "./components/UpdateBanner.vue";
+import { checkForUpdate } from "./composables/useUpdater";
+import { useAppStore, type ViewKey } from "./stores/app";
 import { useArtifactsStore } from "./stores/artifacts";
 import { useProvidersStore } from "./stores/providers";
 import { useChatStore } from "./stores/chat";
+import { useWorkflowsStore } from "./stores/workflows";
 
 const app = useAppStore();
 const artifacts = useArtifactsStore();
 const providers = useProvidersStore();
 const chatStore = useChatStore();
+const workflows = useWorkflowsStore();
+
+// ─────────── 重视图切换的"点击即缓冲"加载条 ───────────
+// 点击图谱/沙箱(且首次=未被 KeepAlive 暖过)时：先立刻亮加载条(此刻重组件尚未挂载，
+// 能马上画出来) → 等两帧画出后再挂载重组件(建图 / 9 数字人挂载的卡顿被盖在条下) →
+// 组件 ready(图谱布局稳定 / 沙箱画好)后淡出。已暖的重视图直接秒切，不再亮条。
+const HEAVY: ViewKey[] = ["graph", "sandbox"];
+const warmed = ref<Set<ViewKey>>(new Set());
+const mountedView = ref<ViewKey>(app.view); // 真正挂载的视图（重视图冷启时滞后两帧）
+const switchLoader = ref<ViewKey | null>(null); // 当前加载条覆盖的重视图
+let loaderSafety: number | undefined;
+
+watch(
+  () => app.view,
+  (next) => {
+    if (HEAVY.includes(next) && !warmed.value.has(next)) {
+      switchLoader.value = next; // 点击瞬间亮条
+      clearTimeout(loaderSafety);
+      loaderSafety = window.setTimeout(() => {
+        if (switchLoader.value === next) switchLoader.value = null;
+      }, 4500); // 兜底：ready 没来也不卡住
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          if (app.view !== next) return; // 这两帧里用户又切走了
+          mountedView.value = next; // 现在才挂载重视图
+          warmed.value.add(next);
+        })
+      );
+    } else {
+      mountedView.value = next;
+      switchLoader.value = null;
+    }
+  }
+);
+
+function onViewReady(v: ViewKey) {
+  if (switchLoader.value === v) switchLoader.value = null;
+}
 
 // 多开核心：app 级注册一次流式监听，任意对话的事件都按 conversationId 路由进各自缓冲，
 // 这样切走/未挂载 ChatPanel 时后台任务仍持续流式推进、完成有提醒。
 onMounted(() => {
   chatStore.init();
+  // 启动后静默检查 GitHub Releases 是否有新版本（无网/未发布会被静默吞掉）
+  checkForUpdate();
 });
 
 // 启动流程：splash(每次) → onboarding(仅首次) → env(环境检测,健康则无感放行) → ready
@@ -62,20 +109,48 @@ const layoutCols = computed(
   <div class="shell" :style="{ gridTemplateColumns: layoutCols }">
     <Sidebar />
     <main class="main">
-      <ChatPanel v-if="app.view === 'chat'" />
-      <WikiBrowse v-else-if="app.view === 'wiki'" />
-      <KnowledgeGraph v-else-if="app.view === 'graph'" />
-      <SandboxStatus v-else-if="app.view === 'sandbox'" />
-      <ClaudeMdPanel v-else-if="app.view === 'claude_md'" />
-      <SkillCenter v-else-if="app.view === 'skill_center'" />
-      <EnvDoctor v-else-if="app.view === 'env_doctor'" />
-      <Settings v-else-if="app.view === 'settings'" />
-      <div v-else class="placeholder">—</div>
+      <!-- 重视图(图谱/沙箱)用 KeepAlive 缓存：第一次进算一次，之后切走再回来瞬开，
+           且离开时其动画/自转随 DOM 脱离自动暂停，不在后台空耗。其余视图照常按需挂载。
+           mountedView 让重视图冷启时滞后两帧挂载，先把加载条画出来再扛卡顿。 -->
+      <KeepAlive :include="['KnowledgeGraph', 'SandboxStatus']">
+        <ChatPanel v-if="mountedView === 'chat'" />
+        <WikiBrowse v-else-if="mountedView === 'wiki'" />
+        <KnowledgeGraph
+          v-else-if="mountedView === 'graph'"
+          @ready="onViewReady('graph')"
+        />
+        <SandboxStatus
+          v-else-if="mountedView === 'sandbox'"
+          @ready="onViewReady('sandbox')"
+        />
+        <ClaudeMdPanel v-else-if="mountedView === 'claude_md'" />
+        <SkillCenter v-else-if="mountedView === 'skill_center'" />
+        <EnvDoctor v-else-if="mountedView === 'env_doctor'" />
+        <UpdatePanel v-else-if="mountedView === 'update'" />
+        <McpConfigModal v-else-if="mountedView === 'mcp'" inline @close="app.setView('chat')" />
+        <Settings v-else-if="mountedView === 'settings'" />
+      </KeepAlive>
+
+      <!-- 点击重视图即刻浮现的快速加载条（盖住挂载/建图卡顿） -->
+      <Transition name="vl">
+        <ViewLoader
+          v-if="switchLoader"
+          :dark="switchLoader === 'graph'"
+          :label="switchLoader === 'graph' ? '星河生成中' : '沙箱加载中'"
+        />
+      </Transition>
     </main>
     <RightDrawer />
 
+    <!-- 自动更新提示条（发现新版本时浮出） -->
+    <UpdateBanner />
+
     <AddProviderModal v-if="providers.showAddModal" />
+    <WorkflowPackModal v-if="workflows.editorOpen" />
     <UsageBoard v-if="providers.showUsageBoard" />
+
+    <!-- MCP 配置对话框（触发器已移到 Sidebar 导航栏下方） -->
+    <McpConfigModal v-if="app.showMcpModal" @close="app.showMcpModal = false" />
 
     <!-- 启动流程覆盖层：splash → onboarding -->
     <Transition name="splash-fade">
@@ -97,6 +172,7 @@ const layoutCols = computed(
   transition: grid-template-columns 180ms ease;
 }
 .main {
+  position: relative;
   height: 100vh;
   overflow: hidden;
   background: var(--bg);

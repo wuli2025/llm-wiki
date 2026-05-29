@@ -99,7 +99,7 @@ Claude 官方、智谱、DeepSeek、火山方舟、Gemini、聚合站……点�
 | Node 20+ | 前端构建 (`npm`) |
 | Rust 1.80+ | Tauri 后端 |
 | Docker Desktop | 沙箱镜像构建 / 运行（可选）|
-| `claude` CLI | 对话核心调用（沙箱内自动装，宿主测试需 `npm i -g @anthropic-ai/claude-code`）|
+| `claude` CLI | 对话核心调用（沙箱内自动装；宿主由「环境医生」一键装，或手动 `npm i -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com`，国内可装）|
 
 ## 🚀 开发模式
 

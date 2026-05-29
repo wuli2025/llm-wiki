@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onActivated } from "vue";
 import {
   sandbox,
   cube,
@@ -8,6 +8,11 @@ import {
   type CubeStatus,
 } from "../api";
 import Workstations from "../../coworker/components/Workstations.vue";
+
+// KeepAlive 的 include 按组件 name 匹配 → 显式命名，确保本视图被缓存
+defineOptions({ name: "SandboxStatus" });
+// 挂载/状态就绪时通知 App 收起加载条
+const emit = defineEmits<{ ready: [] }>();
 
 const status = ref<SandboxStatus | null>(null);
 const log = ref<string[]>([]);
@@ -56,8 +61,16 @@ async function testCube() {
   }
 }
 onMounted(() => {
+  // 不 await：状态异步填入即可，不被 docker 慢查询拖住
   refresh();
   loadCube();
+  // 等数字人 / 状态卡片画出来后再通知 App 收起加载条（遮住挂载那一下的卡顿）
+  setTimeout(() => emit("ready"), 420);
+});
+
+// KeepAlive：缓存后切回不重新挂载（瞬开）；顺手异步刷新状态保持新鲜，不阻塞
+onActivated(() => {
+  refresh();
 });
 
 async function build() {
@@ -242,6 +255,7 @@ async function runCmd() {
 
 <style scoped>
 .sandbox {
+  position: relative;
   padding: 22px 30px;
   height: 100vh;
   overflow-y: auto;

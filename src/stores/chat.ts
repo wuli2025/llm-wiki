@@ -93,7 +93,12 @@ export const useChatStore = defineStore("chatRuntime", () => {
     prompt: string,
     displayText: string,
     files: AttachedFile[] | undefined,
-    opts: { permissionMode: PermissionMode; skillIds: string[]; goal?: string }
+    opts: {
+      permissionMode: PermissionMode;
+      skillIds: string[];
+      goal?: string;
+      consultMao?: boolean;
+    }
   ) {
     const sessions = useSessionsStore();
     const arr = ensureArr(convId);
@@ -110,6 +115,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
         permissionMode: opts.permissionMode,
         skillIds: opts.skillIds,
         goal: opts.goal,
+        consultMao: opts.consultMao,
         conversationId: convId,
       });
       reqByConv.value[convId] = reqId;

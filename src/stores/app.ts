@@ -14,12 +14,45 @@ export type ViewKey =
   | "claude_md"
   | "skill_center"
   | "env_doctor"
+  | "mcp"
+  | "update"
   | "settings";
 
 export const useAppStore = defineStore("app", () => {
   const view = ref<ViewKey>("chat");
   const sidebarCollapsed = ref(false);
   const drawerCollapsed = ref(false);
+
+  // 置顶对话：仅前端持久化（localStorage），侧栏排序时置顶优先
+  const PINNED_KEY = "polaris.pinnedConvs.v1";
+  function loadPinned(): Set<string> {
+    try {
+      const raw = localStorage.getItem(PINNED_KEY);
+      if (raw) return new Set(JSON.parse(raw) as string[]);
+    } catch {
+      /* ignore corrupt storage */
+    }
+    return new Set();
+  }
+  const pinnedConvs = ref<Set<string>>(loadPinned());
+  function persistPinned() {
+    try {
+      localStorage.setItem(PINNED_KEY, JSON.stringify([...pinnedConvs.value]));
+    } catch {
+      /* storage may be unavailable */
+    }
+  }
+  function isPinned(convId: string | null | undefined): boolean {
+    return !!convId && pinnedConvs.value.has(convId);
+  }
+  function togglePin(convId: string) {
+    if (!convId) return;
+    const s = new Set(pinnedConvs.value);
+    if (s.has(convId)) s.delete(convId);
+    else s.add(convId);
+    pinnedConvs.value = s;
+    persistPinned();
+  }
 
   // 任务完成但用户未查看的会话集合 → 侧栏显示墨蓝色未读点
   const unreadConvs = ref<Set<string>>(new Set());
@@ -54,7 +87,11 @@ export const useAppStore = defineStore("app", () => {
   }
 
   const sidebarWidth = computed(() => (sidebarCollapsed.value ? 48 : 260));
-  const drawerWidth = computed(() => (drawerCollapsed.value ? 48 : 300));
+  // 收起后右抽屉完全消失（0 宽，不留小框/导轨）；需要时点对话顶栏的抽屉按钮或生成产物自动展开
+  const drawerWidth = computed(() => (drawerCollapsed.value ? 0 : 300));
+
+  // MCP 配置弹窗（全局状态，Sidebar 与 App 共用）
+  const showMcpModal = ref(false);
 
   async function refreshProjects() {
     projects.value = await convApi.listProjects();
@@ -93,6 +130,28 @@ export const useAppStore = defineStore("app", () => {
     return p;
   }
 
+  // 归档项目 = 从活动列表移除(后端只置 archived 标记, 对话/消息保留, 不做硬删除)
+  async function archiveProject(projectId: string) {
+    await convApi.archiveProject(projectId);
+    projects.value = projects.value.filter((p) => p.id !== projectId);
+    const next = { ...conversationsByProject.value };
+    delete next[projectId];
+    conversationsByProject.value = next;
+    if (expandedProjects.value.has(projectId)) {
+      expandedProjects.value.delete(projectId);
+      expandedProjects.value = new Set(expandedProjects.value);
+    }
+    // 当前项目被归档 → 回退到第一个剩余项目
+    if (currentProjectId.value === projectId) {
+      currentProjectId.value = projects.value[0]?.id ?? null;
+    }
+  }
+
+  // 在系统文件管理器中打开该项目的工作目录
+  async function openProjectDir(projectId: string) {
+    await convApi.openProjectDir(projectId);
+  }
+
   async function createConversation(projectId: string) {
     const c = await convApi.createConversation(projectId);
     const cur = conversationsByProject.value[projectId] ?? [];
@@ -117,6 +176,19 @@ export const useAppStore = defineStore("app", () => {
     if (currentConvId.value === conv.id) {
       currentConvId.value = null;
     }
+    // 删除后顺手清掉置顶标记，避免遗留垃圾
+    if (pinnedConvs.value.has(conv.id)) togglePin(conv.id);
+  }
+
+  async function renameConversation(conv: Conversation, title: string) {
+    const t = title.trim();
+    if (!t || t === conv.title) return;
+    await convApi.renameConversation(conv.id, t);
+    const cur = conversationsByProject.value[conv.projectId] ?? [];
+    conversationsByProject.value = {
+      ...conversationsByProject.value,
+      [conv.projectId]: cur.map((c) => (c.id === conv.id ? { ...c, title: t } : c)),
+    };
   }
 
   function selectConversation(conv: Conversation) {
@@ -133,12 +205,17 @@ export const useAppStore = defineStore("app", () => {
     drawerCollapsed,
     sidebarWidth,
     drawerWidth,
+    showMcpModal,
     setView,
     toggleSidebar,
     toggleDrawer,
     unreadConvs,
     markUnread,
     clearUnread,
+    // pin
+    pinnedConvs,
+    isPinned,
+    togglePin,
     // conv
     projects,
     expandedProjects,
@@ -149,8 +226,11 @@ export const useAppStore = defineStore("app", () => {
     refreshConversations,
     toggleProject,
     createProject,
+    archiveProject,
+    openProjectDir,
     createConversation,
     deleteConversation,
+    renameConversation,
     selectConversation,
   };
 });

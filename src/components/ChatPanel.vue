@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick, watch } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from "vue";
 import {
   Puzzle,
   Search,
@@ -22,18 +22,32 @@ import {
   Paperclip,
   LoaderCircle,
   Target,
+  Ellipsis,
+  PencilLine,
+  Pin,
+  PinOff,
+  Copy,
+  Trash2,
+  Check,
+  Star,
+  PanelRightOpen,
+  PanelRightClose,
 } from "@lucide/vue";
 import {
   chat,
+  convApi,
   skills as skillsApi,
   type PermissionMode,
   type Skill,
   type AttachedFile,
+  type Message,
 } from "../tauri";
+import { marked } from "marked";
 import { useAppStore } from "../stores/app";
 import { useSkillsStore } from "../stores/skills";
 import { useArtifactsStore } from "../stores/artifacts";
-import { useChatStore } from "../stores/chat";
+import { useChatStore, type Bubble } from "../stores/chat";
+import { useWorkflowsStore } from "../stores/workflows";
 import { useFileDrop } from "../composables/useFileDrop";
 
 function fileName(path: string): string {
@@ -61,6 +75,7 @@ const app = useAppStore();
 const skillsStore = useSkillsStore();
 const artifactsStore = useArtifactsStore();
 const chatStore = useChatStore();
+const workflowsStore = useWorkflowsStore();
 
 /** 点击成品文件 chip → 展开右侧抽屉并预览 */
 function openArtifact(path: string) {
@@ -72,6 +87,109 @@ const input = ref("");
 // 多开：当前对话的气泡 / 运行态来自 chat store（按对话 id 维护，切走不丢、后台续流）
 const bubbles = computed(() => chatStore.bubblesFor(app.currentConvId));
 const sending = computed(() => chatStore.isSending(app.currentConvId));
+
+// 当前项目是否为默认赠送的「毛主席」项目 —— 决定空状态彩蛋（与后端 MAO_PROJECT_NAME 一致）
+const currentProjectName = computed(
+  () => app.projects.find((p) => p.id === app.currentProjectId)?.name || ""
+);
+const isMaoProject = computed(() => currentProjectName.value === "毛主席");
+
+// ─────────── 回复渲染：markdown + 终端码清洗 ───────────
+// 后端发来的是干净 markdown，这里渲染成 HTML（剥掉极少数残留的 ANSI 控制码）。
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+function renderMd(text: string): string {
+  const clean = (text || "").replace(ANSI_RE, "");
+  return marked.parse(clean, { gfm: true, breaks: true }) as string;
+}
+
+// 工具名 → 友好中文（对话里以优雅 pill 呈现，不再是终端灰块）
+const TOOL_LABELS: Record<string, string> = {
+  Bash: "运行命令",
+  Read: "读取文件",
+  Write: "写入文件",
+  Edit: "编辑文件",
+  MultiEdit: "批量编辑",
+  NotebookEdit: "编辑笔记本",
+  Glob: "查找文件",
+  Grep: "搜索内容",
+  WebSearch: "联网搜索",
+  WebFetch: "抓取网页",
+  Task: "子任务",
+  TodoWrite: "更新清单",
+};
+function toolLabel(n: string): string {
+  return TOOL_LABELS[n] ?? n;
+}
+
+// 一个「回合」= 一条用户消息 + 其后的助手正文/工具/产物，直到下一条用户消息。
+// 助手多段文本拼成一块 markdown；工具折叠成 pill；所有生成文件聚合到回合末尾。
+interface Turn {
+  key: number;
+  user?: Bubble;
+  text: string;
+  tools: { name: string }[];
+  artifacts: string[];
+  errors: string[];
+  hasAssistant: boolean;
+}
+const ERR_RE = /^\[(错误|发送失败|result error)/;
+const renderTurns = computed<Turn[]>(() => {
+  const out: Turn[] = [];
+  let cur: Turn | undefined;
+  let k = 0;
+  const startTurn = (user?: Bubble): Turn => {
+    const turn: Turn = {
+      key: k++,
+      user,
+      text: "",
+      tools: [],
+      artifacts: [],
+      errors: [],
+      hasAssistant: false,
+    };
+    out.push(turn);
+    cur = turn;
+    return turn;
+  };
+  for (const b of bubbles.value) {
+    if (b.role === "user") {
+      startTurn(b);
+      continue;
+    }
+    const t: Turn = cur ?? startTurn(undefined);
+    if (b.role === "tool") {
+      const name = b.tool || "工具";
+      // 合并连续同名工具，避免刷屏
+      if (t.tools[t.tools.length - 1]?.name !== name) t.tools.push({ name });
+    } else {
+      const txt = b.text || "";
+      if (ERR_RE.test(txt.trim())) {
+        t.errors.push(txt);
+      } else if (txt) {
+        t.text += (t.text ? "\n\n" : "") + txt;
+        t.hasAssistant = true;
+      }
+      if (b.artifacts) {
+        for (const a of b.artifacts) if (!t.artifacts.includes(a)) t.artifacts.push(a);
+      }
+    }
+  }
+  return out;
+});
+function isPending(t: Turn): boolean {
+  return sending.value && t === renderTurns.value[renderTurns.value.length - 1];
+}
+
+// 复制某一回合的回答正文（回答下方的「复制」按钮）
+async function copyTurn(t: Turn) {
+  if (!t.text) return;
+  try {
+    await navigator.clipboard.writeText(t.text);
+    flashCopied("已复制回答");
+  } catch {
+    flashCopied("复制失败");
+  }
+}
 const showPermDropdown = ref(false);
 const permMode = ref<PermissionMode>("manual");
 const showSkillPanel = ref(false);
@@ -85,10 +203,48 @@ const scrollEl = ref<HTMLDivElement | null>(null);
 const goalMode = ref(false);
 const inputEl = ref<HTMLTextAreaElement | null>(null);
 
+// 输入框高度随内容自动增长（仿豆包）：先归零再按 scrollHeight 撑高，到 CSS max-height 后内部滚动。
+function autoGrow() {
+  const el = inputEl.value;
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+}
+// 内容变化（手输 / 程序填入 / 发送清空）都重算高度
+watch(input, () => nextTick(autoGrow));
+onMounted(() => nextTick(autoGrow));
+
 function toggleGoal() {
   goalMode.value = !goalMode.value;
   if (goalMode.value) nextTick(() => inputEl.value?.focus());
 }
+
+// ─────────── 请教毛主席（模式开关，行为同「目标模式」） ───────────
+// 激活后，下一次 Enter/点发送都按「请教毛主席」走：注入毛选式分析指令、
+// 调资料库取证、生成标来源 HTML。不再是「点了立即发」，需要先写问题再发送。
+const maoMode = ref(false);
+function toggleMao() {
+  maoMode.value = !maoMode.value;
+  if (maoMode.value) nextTick(() => inputEl.value?.focus());
+}
+
+// ─────────── 工作流包「使用」→ 填入输入框 ───────────
+// 右侧「工作流包」点「使用」时，store 发来拼装好的提示词：已有内容则追加，否则填入；
+// 随后聚焦并把光标移到末尾。带 nonce 以便重复使用同一包也能触发。
+function applyInsert(req: { text: string; n: number } | null | undefined) {
+  if (!req || !req.text) return;
+  const cur = input.value.trimEnd();
+  input.value = cur ? `${cur}\n\n${req.text}` : req.text;
+  workflowsStore.clearInsert();
+  nextTick(() => {
+    const el = inputEl.value;
+    if (!el) return;
+    el.focus();
+    el.selectionStart = el.selectionEnd = el.value.length;
+    el.scrollTop = el.scrollHeight;
+  });
+}
+watch(() => workflowsStore.insertRequest, applyInsert);
 
 // ─────────── 拖拽上传附件到当前对话 ───────────
 const attachments = ref<AttachedFile[]>([]);
@@ -239,6 +395,8 @@ onMounted(async () => {
   await chatStore.loadHistory(app.currentConvId);
   await loadSkills();
   scrollToBottom();
+  // 若在别的视图点了工作流包「使用」才切来对话，挂载时补消费一次
+  applyInsert(workflowsStore.insertRequest);
 });
 
 async function ensureConversation(): Promise<string | null> {
@@ -273,14 +431,21 @@ async function send() {
     prompt += `\n\n---\n[附件]（用户拖拽上传，可用 Read 等工具读取）：\n${lines}`;
   }
 
+  // 气泡里给「请教毛主席」一个可见标记
+  const consult = maoMode.value;
+  const display = consult
+    ? `请教毛主席：${text || "（仅附件）"}`
+    : text || "（仅附件）";
+
   input.value = "";
   attachments.value = [];
   // 交给 chat store：推 user 气泡 + 调后端 + 记录 reqId/sending（按对话 id，多开）
-  await chatStore.send(convId, prompt, text || "（仅附件）", attached, {
+  await chatStore.send(convId, prompt, display, attached, {
     permissionMode: permMode.value,
     skillIds: Array.from(skillsStore.enabledSkills),
     // 目标模式下，本条输入框内容即完成条件
     goal: goalMode.value && text ? text : undefined,
+    consultMao: consult || undefined,
   });
 }
 
@@ -315,6 +480,110 @@ async function newChat() {
   }
   await app.createConversation(pid);
 }
+
+// ─────────── 对话「更多」菜单（标题旁 ··· ） ───────────
+// 当前对话对象（标题、置顶、复制、删除等操作的目标）
+const currentConv = computed(() => {
+  const list =
+    app.conversationsByProject[app.currentProjectId || ""] || [];
+  return list.find((c) => c.id === app.currentConvId) || null;
+});
+
+const showConvMenu = ref(false);
+function toggleConvMenu() {
+  showConvMenu.value = !showConvMenu.value;
+}
+function closeConvMenu() {
+  showConvMenu.value = false;
+}
+// 点空白处关菜单（菜单与触发按钮内部点击都 .stop，不会误关）
+onMounted(() => window.addEventListener("click", closeConvMenu));
+onBeforeUnmount(() => window.removeEventListener("click", closeConvMenu));
+
+// 复制反馈小提示（顶栏中央浮现 ~1.6s）
+const copied = ref("");
+let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+function flashCopied(msg: string) {
+  copied.value = msg;
+  if (copiedTimer) clearTimeout(copiedTimer);
+  copiedTimer = setTimeout(() => (copied.value = ""), 1600);
+}
+
+// 重命名：标题就地变输入框，Enter 提交 / Esc 取消 / 失焦提交
+const renaming = ref(false);
+const renameText = ref("");
+const renameInput = ref<HTMLInputElement | null>(null);
+function openRename() {
+  closeConvMenu();
+  renameText.value = currentConv.value?.title ?? "";
+  renaming.value = true;
+  nextTick(() => {
+    renameInput.value?.focus();
+    renameInput.value?.select();
+  });
+}
+async function commitRename() {
+  if (!renaming.value) return;
+  const conv = currentConv.value;
+  renaming.value = false;
+  if (conv) await app.renameConversation(conv, renameText.value);
+}
+function cancelRename() {
+  renaming.value = false;
+}
+
+function togglePinCurrent() {
+  closeConvMenu();
+  if (app.currentConvId) app.togglePin(app.currentConvId);
+}
+
+async function copyConvId() {
+  closeConvMenu();
+  const id = app.currentConvId;
+  if (!id) return;
+  try {
+    await navigator.clipboard.writeText(id);
+    flashCopied("已复制会话 ID");
+  } catch {
+    flashCopied("复制失败");
+  }
+}
+
+function conversationToMarkdown(title: string, msgs: Message[]): string {
+  const lines: string[] = [`# ${title}`, ""];
+  for (const msg of msgs) {
+    if (msg.role === "tool") continue; // 工具调用噪声不进转写
+    const who = msg.role === "user" ? "你" : "北极星";
+    const body = (msg.content || "").trim();
+    if (!body) continue;
+    lines.push(`**${who}：**`, "", body, "");
+  }
+  return lines.join("\n").trim() + "\n";
+}
+
+async function copyAsMarkdown() {
+  closeConvMenu();
+  const conv = currentConv.value;
+  if (!conv) return;
+  try {
+    const msgs = await convApi.getMessages(conv.id);
+    await navigator.clipboard.writeText(
+      conversationToMarkdown(conv.title, msgs)
+    );
+    flashCopied("已复制为 Markdown");
+  } catch {
+    flashCopied("复制失败");
+  }
+}
+
+async function deleteCurrentConv() {
+  closeConvMenu();
+  const conv = currentConv.value;
+  if (!conv) return;
+  if (confirm(`删除对话「${conv.title}」？(消息也会被清空)`)) {
+    await app.deleteConversation(conv);
+  }
+}
 </script>
 
 <template>
@@ -330,84 +599,200 @@ async function newChat() {
     <div class="chat-top">
       <div class="chat-title">
         <template v-if="app.currentConvId">
-          <span class="t-glyph">●</span>
-          <span class="t-text">{{
-            (
-              app.conversationsByProject[app.currentProjectId || ""] || []
-            ).find((c) => c.id === app.currentConvId)?.title ||
-            "(对话)"
-          }}</span>
+          <!-- 重命名：标题就地变输入框 -->
+          <input
+            v-if="renaming"
+            ref="renameInput"
+            v-model="renameText"
+            class="t-rename"
+            @keydown.enter.prevent="commitRename"
+            @keydown.esc.prevent="cancelRename"
+            @blur="commitRename"
+            @click.stop
+          />
+          <template v-else>
+            <Pin
+              v-if="app.isPinned(app.currentConvId)"
+              :size="12"
+              :stroke-width="1.9"
+              class="t-pin"
+            />
+            <span class="t-text">{{ currentConv?.title || "(对话)" }}</span>
+          </template>
+
+          <!-- 更多菜单 -->
+          <div v-if="!renaming" class="conv-menu-wrap">
+            <button
+              class="conv-more"
+              :class="{ active: showConvMenu }"
+              title="更多"
+              @click.stop="toggleConvMenu"
+            >
+              <Ellipsis :size="16" :stroke-width="2" />
+            </button>
+            <div v-if="showConvMenu" class="conv-menu" @click.stop>
+              <button class="cm-item" @click="openRename">
+                <PencilLine :size="14" :stroke-width="1.8" />
+                <span>重命名对话</span>
+              </button>
+              <button class="cm-item" @click="togglePinCurrent">
+                <component
+                  :is="app.isPinned(app.currentConvId) ? PinOff : Pin"
+                  :size="14"
+                  :stroke-width="1.8"
+                />
+                <span>{{
+                  app.isPinned(app.currentConvId) ? "取消置顶" : "置顶对话"
+                }}</span>
+              </button>
+              <div class="cm-sep"></div>
+              <button class="cm-item" @click="copyConvId">
+                <Copy :size="14" :stroke-width="1.8" />
+                <span>复制会话 ID</span>
+              </button>
+              <button class="cm-item" @click="copyAsMarkdown">
+                <FileText :size="14" :stroke-width="1.8" />
+                <span>复制为 Markdown</span>
+              </button>
+              <div class="cm-sep"></div>
+              <button class="cm-item danger" @click="deleteCurrentConv">
+                <Trash2 :size="14" :stroke-width="1.8" />
+                <span>删除对话</span>
+              </button>
+            </div>
+          </div>
         </template>
         <template v-else>
           <span class="t-text muted">未选择对话</span>
         </template>
       </div>
-      <button class="new-chat-btn" @click="newChat" title="新建对话">
-        + 新建对话
+      <Transition name="copy-fade">
+        <div v-if="copied" class="copy-toast">
+          <Check :size="13" :stroke-width="2.2" />
+          <span>{{ copied }}</span>
+        </div>
+      </Transition>
+      <button
+        class="drawer-toggle"
+        :title="app.drawerCollapsed ? '展开文件抽屉' : '收起文件抽屉'"
+        @click="app.toggleDrawer()"
+      >
+        <component
+          :is="app.drawerCollapsed ? PanelRightOpen : PanelRightClose"
+          :size="17"
+          :stroke-width="1.7"
+        />
       </button>
     </div>
 
     <div class="messages" ref="scrollEl">
-      <div v-if="bubbles.length === 0" class="hero-wrap">
-        <div class="hero">你说,北极星画</div>
-        <div class="hero-sub">
-          本地优先 · 调用 Claude Code · 维基知识库 KB-first 召回
-        </div>
-        <div class="hero-tips">
-          <div>
-            · <strong>对话历史会自动保存到当前项目</strong>
+      <div v-if="renderTurns.length === 0" class="hero-wrap">
+        <!-- 毛主席项目彩蛋：未对话前的空白中部 -->
+        <template v-if="isMaoProject">
+          <div class="mao-hero">小同志，你好。</div>
+          <div class="mao-desc">
+            这里是<strong>毛主席资料库</strong>。我已经把《毛泽东选集》《毛泽东全集》等
+            资料装进了你本地的知识库 —— 你可以在「浏览」里随时翻看。有什么问题，尽管向我提；
+            点对话框下的<strong>「请教毛主席」</strong>，我就用实事求是、矛盾分析的法子，
+            给你客观地分析分析。
           </div>
-          <div>
-            · 默认走宿主机 <code>claude</code>(已检测安装)
+          <div class="mao-slogan">为建设共产主义事业而奋斗</div>
+        </template>
+        <template v-else>
+          <div class="hero">你说,北极星画</div>
+          <div class="hero-sub">
+            本地优先 · 调用 Claude Code · 维基知识库 KB-first 召回
           </div>
-          <div>· 首次用 <code>claude</code> 请确认已 <code>claude login</code></div>
-        </div>
+        </template>
       </div>
 
-      <div
-        v-for="(b, i) in bubbles"
-        :key="i"
-        class="bubble"
-        :class="b.role"
-      >
-        <div class="who">
-          <template v-if="b.role === 'user'">你</template>
-          <template v-else-if="b.role === 'tool'">⚙ 工具</template>
-          <template v-else>北极星</template>
-        </div>
-        <div v-if="b.text" class="text">{{ b.text }}</div>
-        <!-- 用户上传的附件 -->
-        <div
-          v-if="b.role === 'user' && b.files && b.files.length"
-          class="attach-chips in-bubble"
-        >
-          <div
-            v-for="f in b.files"
-            :key="f.path"
-            class="attach-chip readonly"
-            :title="f.path"
-          >
-            <component :is="attachIcon(f.kind)" :size="14" :stroke-width="1.7" />
-            <span class="ac-name">{{ f.name }}</span>
+      <div v-for="t in renderTurns" :key="t.key" class="turn">
+        <!-- 用户消息：右侧中性气泡，无头像 -->
+        <div v-if="t.user" class="msg user">
+          <div class="bubble-user">
+            <div v-if="t.user.text" class="u-text">{{ t.user.text }}</div>
+            <div
+              v-if="t.user.files && t.user.files.length"
+              class="attach-chips in-bubble"
+            >
+              <div
+                v-for="f in t.user.files"
+                :key="f.path"
+                class="attach-chip readonly"
+                :title="f.path"
+              >
+                <component :is="attachIcon(f.kind)" :size="14" :stroke-width="1.7" />
+                <span class="ac-name">{{ f.name }}</span>
+              </div>
+            </div>
           </div>
         </div>
-        <!-- 成品文件：点击在右侧抽屉预览 -->
+
+        <!-- 助手回复：纯文本，无头像无边框（Codex 式） -->
         <div
-          v-if="b.role === 'assistant' && b.artifacts && b.artifacts.length"
-          class="artifacts"
+          v-if="
+            t.hasAssistant ||
+            t.tools.length ||
+            t.artifacts.length ||
+            t.errors.length ||
+            isPending(t)
+          "
+          class="msg ai"
         >
-          <button
-            v-for="a in b.artifacts"
-            :key="a"
-            class="artifact-chip"
-            :class="{ active: artifactsStore.current?.path === a }"
-            :title="a"
-            @click="openArtifact(a)"
+          <!-- 工具调用：低调 pill -->
+          <div v-if="t.tools.length" class="tool-strip">
+            <span v-for="(tl, j) in t.tools" :key="j" class="tool-pill">
+              <Wrench :size="11" :stroke-width="1.8" />
+              {{ toolLabel(tl.name) }}
+            </span>
+          </div>
+
+          <!-- 正文：markdown 渲染 -->
+          <div v-if="t.text" class="md" v-html="renderMd(t.text)"></div>
+
+          <!-- 生成中：三点呼吸 -->
+          <div v-if="isPending(t)" class="typing">
+            <span></span><span></span><span></span>
+          </div>
+
+          <!-- 错误行 -->
+          <div v-for="(e, j) in t.errors" :key="'e' + j" class="err-line">
+            {{ e }}
+          </div>
+
+          <!-- 生成的文件：统一收在回答末尾 -->
+          <div v-if="t.artifacts.length" class="files">
+            <div class="files-head">生成的文件 · {{ t.artifacts.length }}</div>
+            <div class="files-list">
+              <button
+                v-for="a in t.artifacts"
+                :key="a"
+                class="artifact-chip"
+                :class="{ active: artifactsStore.current?.path === a }"
+                :title="a"
+                @click="openArtifact(a)"
+              >
+                <component
+                  :is="artifactIcon(a)"
+                  :size="15"
+                  :stroke-width="1.7"
+                />
+                <span class="af-name">{{ fileName(a) }}</span>
+                <ExternalLink :size="12" :stroke-width="1.8" class="af-open" />
+              </button>
+            </div>
+          </div>
+
+          <!-- 回答下方操作：复制 -->
+          <div
+            v-if="t.hasAssistant && t.text && !isPending(t)"
+            class="turn-actions"
           >
-            <component :is="artifactIcon(a)" :size="15" :stroke-width="1.7" />
-            <span class="af-name">{{ fileName(a) }}</span>
-            <ExternalLink :size="12" :stroke-width="1.8" class="af-open" />
-          </button>
+            <button class="ta-btn" title="复制回答" @click="copyTurn(t)">
+              <Copy :size="13" :stroke-width="1.8" />
+              <span>复制</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -505,8 +890,9 @@ async function newChat() {
               ? '目标模式：在此写下完成条件，Claude 会持续推进直到达成 (Enter 发送) …'
               : '请输入消息 (Enter 发送 · Shift + Enter 换行，可拖文件进来作为附件) …'
           "
-          rows="3"
+          rows="2"
           @keydown="onKeydown"
+          @input="autoGrow"
         ></textarea>
         <div class="toolbar">
           <div class="toolbar-left">
@@ -550,6 +936,22 @@ async function newChat() {
                 </div>
               </div>
             </button>
+            <button
+              class="toolbar-btn"
+              :class="{ active: maoMode }"
+              @click="toggleMao"
+            >
+              <Star :size="14" :stroke-width="1.8" />
+              <span>请教毛主席</span>
+              <div class="btn-tooltip">
+                <div class="btn-tooltip-inner">
+                  激活后按 Enter 发送，毛主席用资料库客观分析并生成 HTML
+                  <div class="btn-tooltip-sub">
+                    毛选式大白话 · 称呼「同志」· 兼顾未来眼光看问题
+                  </div>
+                </div>
+              </div>
+            </button>
           </div>
           <div class="toolbar-right">
             <button
@@ -565,7 +967,7 @@ async function newChat() {
               class="send-btn"
               title="发送 (Enter)"
               :disabled="!input.trim()"
-              @click="send"
+              @click="send()"
             >
               <ArrowRight :size="16" :stroke-width="2" />
             </button>
@@ -637,23 +1039,23 @@ async function newChat() {
   position: relative;
 }
 .chat-top {
-  padding: 12px 24px;
+  position: relative;
+  padding: 16px 30px;
   display: flex;
   align-items: center;
   gap: 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
+  /* 顶栏与下方回答区无缝连成一片：透明背景、无分隔线，不再是单独的异色条；
+     比原来略高更有呼吸感（仿豆包 / Coda） */
+  border-bottom: none;
+  background: transparent;
 }
 .chat-title {
   flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
   font-family: var(--serif);
-}
-.t-glyph {
-  color: var(--primary);
-  font-size: 9px;
 }
 .t-text {
   font-size: 13px;
@@ -664,18 +1066,145 @@ async function newChat() {
   font-weight: 400;
   color: var(--muted);
 }
-.new-chat-btn {
-  padding: 5px 12px;
+/* 文件抽屉开关（移到顶栏右侧；收起后右侧整列消失，靠它再展开） */
+.drawer-toggle {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.drawer-toggle:hover {
+  background: var(--selection-bg);
+  color: var(--text);
+}
+
+/* 已置顶标记（标题前的小别针） */
+.t-pin {
+  color: var(--gold);
+  transform: rotate(35deg);
+  flex-shrink: 0;
+}
+
+/* 标题就地重命名输入框 */
+.t-rename {
+  flex: 1;
+  min-width: 0;
+  max-width: 420px;
+  font-family: var(--serif);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  padding: 3px 8px;
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  background: var(--panel);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+/* ── 对话「更多」菜单 ── */
+.conv-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.conv-more {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.conv-more:hover,
+.conv-more.active {
+  background: var(--selection-bg);
+  color: var(--text);
+}
+.conv-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  min-width: 184px;
+  padding: 5px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 12px;
-  color: var(--text-2);
-  cursor: pointer;
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  animation: cm-pop 130ms ease;
 }
-.new-chat-btn:hover {
-  border-color: var(--primary);
-  color: var(--primary);
+@keyframes cm-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+.cm-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  border-radius: 6px;
+  text-align: left;
+}
+.cm-item:hover {
+  background: var(--bg-soft);
+  color: var(--text);
+}
+.cm-item.danger {
+  color: var(--vermilion);
+}
+.cm-item.danger:hover {
+  background: var(--vermilion-soft);
+}
+.cm-sep {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--border-soft);
+}
+
+/* 复制反馈小提示 */
+.copy-toast {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 45;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--ink);
+  color: #fafaf7;
+  font-size: 12px;
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
+}
+.copy-fade-enter-active,
+.copy-fade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.copy-fade-enter-from,
+.copy-fade-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -4px);
 }
 
 .messages {
@@ -701,67 +1230,316 @@ async function newChat() {
   font-size: 13px;
   letter-spacing: 0.5px;
 }
-.hero-tips {
-  margin-top: 28px;
-  font-size: 12px;
-  color: var(--muted);
-  line-height: 2;
-  text-align: left;
-  display: inline-block;
+/* ── 毛主席项目彩蛋空状态 ── */
+.mao-hero {
+  font-family: var(--serif);
+  font-size: 40px;
+  font-weight: 600;
+  letter-spacing: 6px;
+  color: var(--vermilion);
 }
-.hero-tips code {
-  background: var(--bg-soft);
-  padding: 1px 5px;
-  border-radius: 2px;
-  font-family: var(--mono);
-  font-size: 11px;
+.mao-desc {
+  margin: 26px auto 0;
+  max-width: 560px;
+  font-size: 13.5px;
+  line-height: 2;
+  color: var(--text-2);
+  text-align: center;
+}
+.mao-desc strong {
+  color: var(--vermilion);
+  font-weight: 600;
+}
+.mao-slogan {
+  margin-top: 34px;
+  font-family: var(--serif);
+  font-size: 16px;
+  letter-spacing: 3px;
+  color: var(--vermilion);
+  font-weight: 600;
 }
 
-.bubble {
-  max-width: 820px;
-  margin: 0 auto 14px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 14px 18px;
-  box-shadow: var(--shadow-sm);
+/* ═══════════ 对话渲染 (Codex 式：纯对话，无头像) ═══════════ */
+.turn {
+  max-width: 880px;
+  margin: 0 auto 22px;
 }
-.bubble.user {
-  background: var(--primary-soft);
-  border-color: rgba(44, 70, 97, 0.12);
+
+/* 用户：右对齐中性灰气泡，无头像 */
+.msg.user {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 18px;
 }
-.bubble.tool {
+.bubble-user {
+  max-width: 82%;
   background: var(--bg-soft);
-  border-color: var(--border-soft);
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--text-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  padding: 9px 15px;
 }
-.who {
-  font-family: var(--serif);
-  font-size: 11px;
-  letter-spacing: 1.5px;
-  color: var(--muted);
-  margin-bottom: 4px;
-}
-.bubble.user .who {
-  color: var(--primary-deep);
-}
-.text {
+.u-text {
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 13.5px;
+  line-height: 1.65;
   color: var(--text);
-  line-height: 1.6;
 }
 
-/* 成品文件 chips —— 回答末尾的可点击文件 */
-.artifacts {
+/* 助手：纯文本，无头像无边框（Codex 式） */
+.msg.ai {
+  min-width: 0;
+}
+
+/* 工具调用 pill */
+.tool-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.tool-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--bg-soft);
+  border: 1px solid var(--border-soft);
+  padding: 3px 9px;
+  border-radius: 20px;
+}
+.tool-pill :deep(svg) {
+  color: var(--primary);
+}
+
+/* 生成中三点 */
+.typing {
+  display: flex;
+  gap: 4px;
+  padding: 4px 0 2px;
+}
+.typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  opacity: 0.5;
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+.typing span:nth-child(2) {
+  animation-delay: 0.18s;
+}
+.typing span:nth-child(3) {
+  animation-delay: 0.36s;
+}
+@keyframes typing-bounce {
+  0%, 80%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.err-line {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--vermilion);
+  background: var(--vermilion-soft);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-top: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 生成的文件：回答末尾 */
+.files {
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px dashed var(--border);
+}
+.files-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.files-head :deep(svg) {
+  color: var(--gold);
+}
+.files-list {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 10px;
 }
+
+/* 回答下方操作行（复制） —— 平时淡出，悬停回答时浮现 */
+.turn-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.msg.ai:hover .turn-actions {
+  opacity: 1;
+}
+.ta-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--border-soft);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11.5px;
+  border-radius: 7px;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.ta-btn:hover {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--bg-soft);
+}
+
+/* ── markdown 正文排版 ── */
+.md {
+  font-size: 13.5px;
+  line-height: 1.72;
+  color: var(--text);
+  word-break: break-word;
+}
+.md :deep(> *:first-child) {
+  margin-top: 0;
+}
+.md :deep(> *:last-child) {
+  margin-bottom: 0;
+}
+.md :deep(h1),
+.md :deep(h2),
+.md :deep(h3),
+.md :deep(h4) {
+  font-family: var(--serif);
+  line-height: 1.35;
+  margin: 1.1em 0 0.5em;
+  color: var(--ink);
+}
+.md :deep(h1) {
+  font-size: 1.5em;
+}
+.md :deep(h2) {
+  font-size: 1.3em;
+}
+.md :deep(h3) {
+  font-size: 1.12em;
+}
+.md :deep(h4) {
+  font-size: 1em;
+}
+.md :deep(p) {
+  margin: 0.55em 0;
+}
+.md :deep(ul),
+.md :deep(ol) {
+  margin: 0.55em 0;
+  padding-left: 1.5em;
+}
+.md :deep(li) {
+  margin: 0.25em 0;
+}
+.md :deep(li::marker) {
+  color: var(--muted);
+}
+.md :deep(a) {
+  color: var(--primary);
+  text-decoration: none;
+  border-bottom: 1px solid var(--primary-soft);
+}
+.md :deep(a:hover) {
+  border-bottom-color: var(--primary);
+}
+.md :deep(strong) {
+  color: var(--ink);
+  font-weight: 600;
+}
+.md :deep(hr) {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.1em 0;
+}
+.md :deep(blockquote) {
+  margin: 0.7em 0;
+  padding: 0.4em 0.9em;
+  border-left: 3px solid var(--primary);
+  background: var(--primary-soft);
+  border-radius: 0 6px 6px 0;
+  color: var(--text-2);
+}
+.md :deep(blockquote p) {
+  margin: 0.2em 0;
+}
+/* 行内代码 */
+.md :deep(:not(pre) > code) {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  background: var(--code-bg);
+  color: var(--primary-deep);
+  padding: 0.12em 0.4em;
+  border-radius: 5px;
+  border: 1px solid var(--border-soft);
+}
+/* 代码块：深色卡片，横向滚动，盒绘对齐 */
+.md :deep(pre) {
+  background: #0f1b2d;
+  color: #dbe6f5;
+  border-radius: 10px;
+  padding: 13px 15px;
+  overflow-x: auto;
+  margin: 0.8em 0;
+  line-height: 1.55;
+}
+.md :deep(pre code) {
+  font-family: var(--mono);
+  font-size: 12.4px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  white-space: pre;
+}
+/* 表格 */
+.md :deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.8em 0;
+  font-size: 12.8px;
+  display: block;
+  overflow-x: auto;
+}
+.md :deep(th),
+.md :deep(td) {
+  border: 1px solid var(--border);
+  padding: 6px 11px;
+  text-align: left;
+}
+.md :deep(thead th) {
+  background: var(--bg-soft);
+  font-weight: 600;
+  color: var(--text);
+}
+.md :deep(img) {
+  max-width: 100%;
+  border-radius: 6px;
+}
+
+/* 成品文件 chips —— 回答末尾的可点击文件 */
 .artifact-chip {
   display: inline-flex;
   align-items: center;
@@ -940,26 +1718,30 @@ async function newChat() {
   background: var(--primary-soft);
 }
 
-/* 输入卡片 */
+/* 输入卡片 —— 仿豆包：明显更宽（约原来的 1.7 倍），输入多了高度自动撑大 */
 .input-card {
   width: 100%;
-  max-width: 820px;
+  max-width: 1394px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 16px;
   box-shadow: var(--shadow);
-  padding: 12px 14px;
+  padding: 14px 18px;
 }
 textarea {
   width: 100%;
   border: none;
   outline: none;
   resize: none;
-  font-size: 13.5px;
+  font-size: 14.5px;
   background: transparent;
   color: var(--text);
-  padding: 4px 0;
-  line-height: 1.7;
+  padding: 4px 2px;
+  line-height: 1.75;
+  /* 高度随内容自动增长（JS 控制），最多到上限后内部滚动 */
+  min-height: 60px;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 /* 工具栏 */
@@ -998,7 +1780,6 @@ textarea {
   background: var(--primary-soft);
   color: var(--primary);
 }
-
 /* Tooltip — 放在按钮下方，避免顶部穿模 */
 .btn-tooltip {
   position: absolute;
@@ -1091,7 +1872,7 @@ textarea {
 /* ─────────── 底部授权栏 ─────────── */
 .auth-bar {
   width: 100%;
-  max-width: 820px;
+  max-width: 1394px;
   display: flex;
   justify-content: flex-end;
 }

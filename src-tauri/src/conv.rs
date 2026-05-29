@@ -50,7 +50,15 @@ struct State {
     conversations: Vec<Conversation>,
     #[serde(default)]
     messages: Vec<Message>,
+    /// 一次性 marker: 是否已赠送「毛主席」默认项目 + 写入人格 CLAUDE.md。
+    /// 置位后即便用户删了该项目也不再重建 —— 尊重用户。
+    #[serde(default)]
+    seeded_mao: bool,
 }
+
+/// 默认赠送的「毛主席」项目名(前端据此识别该项目, 显示彩蛋空状态)
+pub const MAO_PROJECT_NAME: &str = "毛主席";
+const MAO_PERSONA_TEMPLATE: &str = include_str!("templates/mao_persona_claude.md");
 
 // ───────────────────────── State ─────────────────────────
 
@@ -85,9 +93,49 @@ pub fn init(_app: &AppHandle) -> Result<()> {
         });
     }
 
+    // 首启一次性: 赠送「毛主席」项目 + 写入毛主席人格 CLAUDE.md。
+    // 插到最前, 作为默认进入的项目, 让对话框彩蛋空状态可见。
+    if !state.seeded_mao {
+        match state.projects.iter().find(|p| p.name == MAO_PROJECT_NAME) {
+            Some(p) => write_mao_persona(&p.id),
+            None => {
+                let pid = new_id("p");
+                state.projects.insert(
+                    0,
+                    Project {
+                        id: pid.clone(),
+                        name: MAO_PROJECT_NAME.into(),
+                        created_at: now_ms(),
+                        archived: false,
+                    },
+                );
+                write_mao_persona(&pid);
+            }
+        }
+        state.seeded_mao = true;
+    }
+
     *STATE.write() = state;
     persist();
     Ok(())
+}
+
+/// 把毛主席人格 CLAUDE.md 写到该项目目录 `~/Polaris/projects/<id>/CLAUDE.md`。
+/// 已存在则不覆盖(尊重用户改动)。路径须与 `claude_md` 模块一致。
+fn write_mao_persona(project_id: &str) {
+    let Some(user) = UserDirs::new() else { return };
+    let dir = user
+        .home_dir()
+        .join("Polaris")
+        .join("projects")
+        .join(project_id);
+    let path = dir.join("CLAUDE.md");
+    if path.exists() {
+        return;
+    }
+    if fs::create_dir_all(&dir).is_ok() {
+        let _ = fs::write(&path, MAO_PERSONA_TEMPLATE);
+    }
 }
 
 fn persist() {
@@ -201,6 +249,50 @@ pub fn conv_create_project(name: String) -> Result<Project, String> {
     STATE.write().projects.push(p.clone());
     persist();
     Ok(p)
+}
+
+/// 该项目在磁盘上的工作目录 `~/Polaris/projects/<id>/`(须与 write_mao_persona / claude_md 一致)。
+fn project_dir(project_id: &str) -> Option<PathBuf> {
+    let user = UserDirs::new()?;
+    Some(
+        user.home_dir()
+            .join("Polaris")
+            .join("projects")
+            .join(project_id),
+    )
+}
+
+/// 在系统文件管理器中打开该项目的工作目录(不存在则先建好, 否则 explorer 会报路径不存在)。
+#[tauri::command]
+pub fn conv_open_project_dir(project_id: String) -> Result<(), String> {
+    let dir = project_dir(&project_id).ok_or_else(|| "no user dir".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.to_string_lossy().to_string();
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // 路径可能含空格, 用 raw_arg 引号包裹; 正斜杠转反斜杠
+        let win_path = path.replace('/', "\\");
+        std::process::Command::new("explorer")
+            .raw_arg(format!("\"{}\"", win_path))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

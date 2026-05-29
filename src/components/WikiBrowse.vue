@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from "vue";
 import { marked } from "marked";
-import { Upload, LoaderCircle, CheckCircle2, XCircle } from "@lucide/vue";
+import { Upload, LoaderCircle, CheckCircle2, XCircle, X, Trash2 } from "@lucide/vue";
 import {
   kb,
   type KbHit,
@@ -83,6 +83,41 @@ async function doIngest() {
     await refreshList();
   } catch (e: any) {
     ingestMsg.value = `失败:${e?.message ?? e}`;
+  }
+}
+
+// 删除单份资料（浏览页每行右侧 ×）
+async function doDelete(rel: string) {
+  if (!confirm(`删除这份资料？\n${rel}`)) return;
+  try {
+    await kb.delete(rel);
+    if (selected.value === rel) {
+      selected.value = null;
+      markdown.value = "";
+    }
+    await refreshList();
+  } catch (e: any) {
+    alert(`删除失败:${e?.message ?? e}`);
+  }
+}
+
+// 清空整个资料库（管理页）
+const clearMsg = ref("");
+async function doClear() {
+  if (
+    !confirm(
+      "确定清空整个资料库吗?\n这会删除包括毛主席资料库在内的全部资料,且不可撤销;清空后重启也不会再自动恢复默认资料。"
+    )
+  )
+    return;
+  try {
+    const n = await kb.clear();
+    clearMsg.value = `已清空,剩余 ${n} 个文件`;
+    selected.value = null;
+    markdown.value = "";
+    await refreshList();
+  } catch (e: any) {
+    clearMsg.value = `失败:${e?.message ?? e}`;
   }
 }
 
@@ -253,7 +288,14 @@ const { isOver: dropOver } = useFileDrop({
           :class="{ active: selected === f }"
           @click="openFile(f)"
         >
-          {{ f }}
+          <span class="file-name">{{ f }}</span>
+          <button
+            class="file-del"
+            title="删除这份资料"
+            @click.stop="doDelete(f)"
+          >
+            <X :size="13" :stroke-width="2" />
+          </button>
         </div>
         <div v-if="files.length === 0" class="muted empty">
           KB 为空 —— 把文件直接拖到本页面即可入库,或在「管理」tab 手动 ingest
@@ -288,6 +330,19 @@ const { isOver: dropOver } = useFileDrop({
           扫描 KB 根下所有 .md 文件,构建内存索引(MVP 不持久化,启动后自动扫描)
         </div>
         <button class="primary-btn" @click="doScan">立即扫描</button>
+      </div>
+      <div class="card danger-card">
+        <div class="card-title">清空资料库</div>
+        <div class="card-body">
+          删除 <code>raw/</code> 下的<strong>全部资料</strong>(含默认的毛主席资料库),
+          保留目录结构。此操作<strong>不可撤销</strong>,且清空后重启不会再自动恢复默认资料。
+          也可在「浏览」里逐条点 × 删除单份资料。
+        </div>
+        <button class="danger-btn" @click="doClear">
+          <Trash2 :size="14" :stroke-width="1.8" />
+          <span>清空资料库</span>
+        </button>
+        <span v-if="clearMsg" class="muted clear-msg">{{ clearMsg }}</span>
       </div>
     </div>
   </div>
@@ -490,12 +545,22 @@ const { isOver: dropOver } = useFileDrop({
 }
 
 .file {
-  padding: 5px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px 5px 10px;
   font-size: 12.5px;
   color: var(--text-2);
   border-radius: 3px;
   cursor: pointer;
   font-family: var(--mono);
+}
+.file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .file:hover {
   background: var(--selection-bg);
@@ -505,6 +570,56 @@ const { isOver: dropOver } = useFileDrop({
   background: var(--selection-bg);
   color: var(--ink);
   font-weight: 500;
+}
+.file-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--dim);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.file:hover .file-del {
+  opacity: 1;
+}
+.file-del:hover {
+  background: var(--vermilion-soft);
+  color: var(--vermilion);
+}
+
+/* 清空资料库 —— 危险操作卡片 */
+.danger-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  border-color: rgba(192, 57, 43, 0.25);
+}
+.danger-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  margin-top: 12px;
+  padding: 7px 14px;
+  background: var(--vermilion);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.danger-btn:hover {
+  opacity: 0.9;
+}
+.clear-msg {
+  margin-top: 8px;
 }
 
 .placeholder {

@@ -25,6 +25,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// 给从 GUI 进程拉起的子进程加 `CREATE_NO_WINDOW`：宿主是窗口子系统、本身没有控制台，
+/// 直接 spawn 控制台子系统的 claude.exe / docker.exe 会被分配一个新控制台 → 每次发消息
+/// 都弹一个黑色终端窗口。加这个标志让它隐藏式运行，用户看不到终端。
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 pub fn init(_app: &AppHandle) -> Result<(), anyhow::Error> {
     Ok(())
 }
@@ -91,6 +106,9 @@ pub struct ChatSendArgs {
     /// 目标模式：完成条件。设置后注入「持续推进直到达成」指令。
     #[serde(default)]
     pub goal: Option<String>,
+    /// 「请教毛主席」：注入毛选式客观分析指令，调用毛主席资料库，生成标注来源的 HTML。
+    #[serde(default)]
+    pub consult_mao: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -190,6 +208,33 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         final_prompt.push_str("\n\n---\n\n");
     }
 
+    // 2.6 请教毛主席: 注入毛选式客观分析指令(调资料库 + 生成标来源 HTML)
+    if args.consult_mao {
+        final_prompt.push_str(&mao_consult_directive(&art_dir));
+        final_prompt.push_str("\n\n---\n\n");
+    }
+
+    // 2.7 生图能力检测: 用户想生成图片, 但供应商坞里全是文本/代码大模型, 没有一个能真生图。
+    //     注入「当前供应商 + 能否真生图」的事实, 让 image-gen 技能据此决定:
+    //     不支持 → 用中文说清楚, 并改用「很有图片质感的 HTML」兜底。
+    //     模型有时不遵守「开头摊牌」指令(会先说「已生成」), 所以由后端在回复最前面
+    //     **确定性地**插入这句中文说明(见下方 image_notice), 保证用户一上来就看到。
+    let image_notice: Option<String> = if skills::detect_image_intent(&args.prompt) {
+        let (provider_name, supported) = crate::provider::image_gen_capability();
+        final_prompt.push_str(&image_capability_directive(&provider_name, supported, &art_dir));
+        final_prompt.push_str("\n\n---\n\n");
+        if supported {
+            None
+        } else {
+            Some(format!(
+                "> ⚠️ **说明**：你当前使用的「{}」是文本大模型，**不支持生成真实图片**。下面用一张「HTML 模拟的画面」来替代；如需真实 AI 生图，请在「API 供应商」里配置支持文生图的图像接口。\n\n",
+                provider_name
+            ))
+        }
+    } else {
+        None
+    };
+
     // 3. CLAUDE.md 上下文
     if !cm_ctx.is_empty() {
         final_prompt.push_str(&cm_ctx);
@@ -253,6 +298,21 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut assistant_text = String::new();
+        // 生图不支持时: 后端确定性地把中文说明作为**第一段**发出去并计入正文,
+        // 不依赖模型遵守「开头摊牌」指令 → 用户一定先看到「当前模型不支持生图」。
+        if let Some(notice) = image_notice {
+            assistant_text.push_str(&notice);
+            emit_event(
+                &app_out,
+                ChatStreamEvent {
+                    req_id: req_out.clone(),
+                    kind: "delta".into(),
+                    text: Some(notice),
+                    tool: None,
+                    conversation_id: conv_id_thread.clone(),
+                },
+            );
+        }
         // 本轮生成的成品文件 (绝对路径, 正斜杠), 既来自 Write/Edit 工具调用,
         // 也来自产物目录的前后快照 diff (覆盖 Bash/脚本生成的文件)
         let mut artifacts: Vec<String> = Vec::new();
@@ -524,28 +584,30 @@ fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
     let allowed = allowed_tools_for(perm);
     // 沙箱内 KB 永远挂在 /kb (sandbox_start 时挂载),
     // 这里让 claude 把 /kb 也加进可读目录,并以 /workspace 为 cwd
-    let child = Command::new("docker")
-        .args([
-            "exec",
-            "-i",
-            "-w",
-            "/workspace",
-            polaris_sandbox::CONTAINER_NAME,
-            "claude",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--add-dir",
-            "/kb",
-            "--allowedTools",
-            &allowed,
-            &perm_flag,
-            prompt,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut cmd = Command::new("docker");
+    cmd.args([
+        "exec",
+        "-i",
+        "-w",
+        "/workspace",
+        polaris_sandbox::CONTAINER_NAME,
+        "claude",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--add-dir",
+        "/kb",
+        "--allowedTools",
+        &allowed,
+        &perm_flag,
+        prompt,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    no_window(&mut cmd); // 隐藏式: 不弹控制台窗口
+    let child = cmd
         .spawn()
         .map_err(|e| format!("在沙箱内调起 claude 失败: {}", e))?;
     Ok(child)
@@ -586,12 +648,21 @@ fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path) -> Result<Child, Stri
     args.push(perm_flag);
     args.push(prompt.to_string());
 
-    let child = Command::new("claude")
-        .args(&args)
+    // 解析 claude 可执行文件的全路径再 spawn, 而非裸名 "claude":
+    // npm 装只在 PATH 放 `claude.cmd`, 而 Windows CreateProcessW 解析裸名只补 `.exe`、不查 PATHEXT
+    // → 裸名找不到 npm 装的 claude。resolve_claude_exe 会挖出真·原生 exe (原生装 / npm 装通吃);
+    // 解析不到再回退裸名靠 PATH (兼容用户自行配好的环境)。
+    let claude_bin: std::ffi::OsString = crate::doctor::resolve_claude_exe()
+        .map(|p| p.into_os_string())
+        .unwrap_or_else(|| "claude".into());
+    let mut cmd = Command::new(&claude_bin);
+    cmd.args(&args)
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    no_window(&mut cmd); // 隐藏式: 每次发消息不再弹出黑色终端窗口
+    let child = cmd
         .spawn()
         .map_err(|e| format!("调起宿主机 claude CLI 失败: {}", e))?;
     Ok(child)
@@ -669,6 +740,87 @@ fn goal_directive(goal: &str) -> String {
 3. 条件达成后, 明确说明它已达成, 并简述你是如何确认的。\n\
 4. 仅当遇到无法自行解决的硬阻塞(如缺少凭据 / 权限 / 外部依赖)时, 才停下来向用户说明原因。",
         goal = goal
+    )
+}
+
+/// 生图能力指令: 把「当前供应商 + 能否真生图」作为事实交给模型。
+/// supported=false(绝大多数情况)时, 要求一开始就用中文讲清「当前模型不支持生成真实图片」,
+/// 再用「很有图片质感的自包含 HTML」兜底; supported=true 才允许走真实图像 API。
+fn image_capability_directive(provider_name: &str, supported: bool, art_dir: &Path) -> String {
+    let dir = art_dir.to_string_lossy().replace('\\', "/");
+    if supported {
+        format!(
+            "## 生图能力检测 (Image Capability)\n\n\
+本轮检测到用户想**生成图片**, 且环境里配置了独立的图像 API 密钥(`OPENAI_API_KEY`)。\n\
+- 可以走真实文生图: 按 image-gen 技能的说明调用图像 API 生成位图, 存到产物目录(绝对路径): `{dir}`。\n\
+- 若调用过程中报错(额度 / 网络 / 该 key 无图像权限), **立即用中文如实告知用户**, 再用下面的 HTML 兜底, 不要假装已生成。",
+            dir = dir
+        )
+    } else {
+        format!(
+            "## 生图能力检测 (Image Capability) — 关键\n\n\
+本轮检测到用户想**生成图片(写实照片 / AI 绘画类位图)**。但用户当前用的供应商是 **「{provider}」**, \
+它(以及供应商坞里其它走 Anthropic 协议的文本 / 代码大模型)**并不具备文生图能力**, 环境里也没有配置独立的图像生成 API 密钥。\n\n\
+因此请**严格**这样做:\n\
+1. 本应用**已经在你这条回复的最前面自动插入了一句中文说明**(「你当前使用的「{provider}」不支持生成真实图片…」), 用户一定会先看到它。所以**你不要再重复这句开头、也不要说「已生成」**, 直接从下面第 2 步动手。\n\
+2. **用「很有图片质感」的自包含 HTML 兜底**: 按 image-gen 技能的要求, 用 CSS 渐变 / SVG / 几何构图 / 排版做出一张**看起来就像那张图**的单文件 HTML(海报 / 插画 / 场景感), 存到产物目录(绝对路径): `{dir}`, 让用户在侧边栏直接看到。\n\
+3. 末尾用一句中文点明: 这是用 HTML 模拟的图片效果, 如需**真实 AI 生图**, 可在「API 供应商」里配置支持文生图的图像 API(如 OpenAI 图像接口 `OPENAI_API_KEY`)。\n\
+4. 例外: 如果用户其实要的是**图表 / 流程图 / 示意图 / 图标 / SVG**, 这些能用代码(SVG / HTML / matplotlib)直接画出来, **不受上面限制** —— 正常生成即可, 无需声明「不支持」。",
+            provider = provider_name,
+            dir = dir
+        )
+    }
+}
+
+/// 「请教毛主席」指令: 让 claude 以毛主席(毛选)的口吻和思想方法, 沿毛主席资料库
+/// 客观分析用户的问题, 并生成一份标注来源的自包含 HTML。资料库(结构化 wiki)已由
+/// `claude_md::render_for_project` 以长上下文 + 双链地图注入, 用 Read/Glob/Grep 沿双链自取。
+fn mao_consult_directive(art_dir: &Path) -> String {
+    let dir = art_dir.to_string_lossy().replace('\\', "/");
+    format!(
+        "## 请教毛主席 (Consult Mode)\n\n\
+本轮用户开启了「请教毛主席」模式。请你 **化身毛主席(毛泽东同志)**, 就同志提出的问题给出回答, \
+**核心交付物是一份 HTML 文件**, 对话里只作简要铺垫。\n\n\
+**口吻与文风(毛选风格 · 大白话第一)**\n\
+- 写成《毛泽东选集》那种调子: 平实有力、口语化, 多用大白话、多打比方, 庄稼汉、工人都听得懂; \
+不要堆术语、不要掉书袋、不要写论文腔。\n\
+- 称呼用户为「同志」或「小同志」, 自称用「我」。\n\
+- 句子要短, 段落要短, 一段讲一个道理; 道理要落到「该怎么办」上, 不空谈。\n\n\
+**分析方法**(自觉运用毛主席的思想方法, 客观地分析)\n\
+- 实事求是, 一切从实际出发; 调查研究, 没有调查就没有发言权。\n\
+- 矛盾分析法: 抓主要矛盾和矛盾的主要方面, 一分为二地看问题(两点论)。\n\
+- 具体问题具体分析, 反对教条主义; 从群众中来, 到群众中去。\n\n\
+**面向未来的视角(必须)**\n\
+- 不能只就事论事停在当下, 要 **站在未来的眼光回头看今天这件事**: 长远走向是什么? \
+五年、十年、再远些会怎么演变? 现在的小苗头, 将来会长成什么样的大势?\n\
+- 善于看「萌芽中的新东西」: 哪些事情现在看着不起眼, 将来要成主流; 哪些事情现在风光, \
+将来要被时代抛掉。把这个判断讲清楚, 才算给同志一个真有用的答复。\n\n\
+**引用要克制(重要)**\n\
+- **正文一开头不要堆原文/语录**, 不要拿《矛盾论》《实践论》整段往上糊。先用大白话把问题讲透, \
+该点出处就一句话带过(例如「这就是《矛盾论》里讲的抓主要矛盾」)。\n\
+- 详尽的篇目引用、原文摘抄, **统一放到 HTML 文件末尾的「来源」一节**, 不要散在正文上头。\n\n\
+**立场底线**\n\
+- 立场坚定地拥护社会主义、共产主义事业和人民利益; **回答不得违背共产主义、社会主义的基本原则**, \
+不传播违背社会主义核心价值观的内容。\n\n\
+**取证 (KB-first)**\n\
+- 毛主席资料库(结构化 wiki)已随本轮以长上下文 + 双链地图注入, 就在你工作目录的 `PolarisKB/` 下。\n\
+- 下笔前先用 Read/Glob/Grep 翻 `raw/毛主席/` 下相关篇目(如《矛盾论》《实践论》《论持久战》《关于正确处理人民内部矛盾的问题》等)取证, \
+不要凭空发挥; 引用就标明篇目名。\n\n\
+**输出步骤**\n\
+1. 对话里 **只写简短铺垫**: 一两段毛主席口吻的大白话, 点出抓哪个主要矛盾、看到什么未来走向。\
+不要在对话里铺长篇, 详细的分析交给 HTML。\n\
+2. 生成一份 **单文件、自包含的 HTML**(CSS 内联, 字体可读、排版清爽)保存到这个可写目录(用绝对路径):\n   `{dir}`\n\
+   HTML 内容结构建议:\n\
+     - 标题 (问题概括)\n\
+     - 「实事求是」: 把问题摆平, 大白话讲清楚现状\n\
+     - 「主要矛盾」: 抓住主要矛盾和矛盾的主要方面, 一分为二地看\n\
+     - 「该怎么办」: 给同志几条具体的、能落地的办法\n\
+     - 「站在未来看今天」: 长远走向、未来五年十年的演变、现在该种什么苗\n\
+     - 「来源」: 列出引用的篇目, 必要的原文摘抄集中放这里\n\
+   **正文开头不要罗列原文**, 把原文压到「来源」一节去。\n\
+3. 对话末尾用一句话点明生成了哪个 HTML 文件(绝对路径), 方便同志打开。\n\n\
+结尾可以用一句鼓励的话, 例如「为人民服务」「为建设共产主义事业而奋斗」。",
+        dir = dir
     )
 }
 

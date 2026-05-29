@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from "vue";
 import cytoscape, { type Core } from "cytoscape";
 // @ts-ignore — cytoscape-fcose 无类型声明
 import fcose from "cytoscape-fcose";
 import { kb, type KbGraph, type KbNode } from "../tauri";
+
+// KeepAlive 的 include 按组件 name 匹配 → 显式命名，确保本视图被缓存
+defineOptions({ name: "KnowledgeGraph" });
+// 布局稳定(或空/兜底)时通知 App 收起加载条
+const emit = defineEmits<{ ready: [] }>();
 
 // fcose 力导向引擎: 中心引力 → 有机圆盘云团 (银河感), 自动打包孤立分量
 try {
@@ -233,8 +238,11 @@ function render() {
   });
 
   wireInteractions(cy);
-  // 等入场布局动画结束再起转, 避免与 fcose 动画打架
-  cy.one("layoutstop", () => startSpinLoop());
+  // 等入场布局动画结束再起转, 避免与 fcose 动画打架；同时通知 App 收起加载条(此时图已稳定)
+  cy.one("layoutstop", () => {
+    startSpinLoop();
+    emit("ready");
+  });
 }
 
 // ── 交互: 悬停高亮邻居 / 选中信息 / 缩放显隐标签 ─────────────
@@ -291,7 +299,13 @@ function spinStep(t: number) {
     rafId = requestAnimationFrame(spinStep);
     return;
   }
-  const dt = Math.min(0.05, (t - spinLastT) / 1000); // 标签页切回时不跳变
+  const elapsed = t - spinLastT;
+  // 节流到 ~30fps：慢速自转下与 60fps 视觉无异，但每帧重绘全图的开销减半，更顺
+  if (elapsed < 30) {
+    rafId = requestAnimationFrame(spinStep);
+    return;
+  }
+  const dt = Math.min(0.05, elapsed / 1000); // 标签页切回时不跳变
   spinLastT = t;
   const d = 0.06 * dt;
   const cos = Math.cos(d);
@@ -355,9 +369,24 @@ onMounted(async () => {
     folders: graphData.nodes.filter((n) => n.kind === "folder").length,
     edges: graphData.edges.length,
   };
-  if (empty.value) return;
+  if (empty.value) {
+    emit("ready");
+    return;
+  }
   await nextTick();
-  render();
+  render(); // render 内 layoutstop 时 emit('ready')，App 据此收起加载条
+  // 兜底：极端情况下 layoutstop 未触发，也不让加载条一直卡住
+  setTimeout(() => emit("ready"), 3500);
+});
+
+// KeepAlive：切回本视图时恢复自转；切走时暂停(DOM 脱离，星场/自转都停，不空耗)
+onActivated(() => {
+  if (!cy) return;
+  cy.resize(); // KeepAlive 重新挂载后画布尺寸可能需校正
+  if (spinning.value) startSpinLoop();
+});
+onDeactivated(() => {
+  cancelSpinLoop();
 });
 
 onUnmounted(() => {
@@ -459,6 +488,7 @@ onUnmounted(() => {
 
 <style scoped>
 .graph {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;

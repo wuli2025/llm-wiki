@@ -67,6 +67,10 @@ export const kb = {
   list: (subdir: string | null = null) =>
     invoke<string[]>("kb_list", { subdir }),
   read: (relPath: string) => invoke<string>("kb_read", { relPath }),
+  /** 删除一份资料(浏览页 ×)，返回剩余文件数 */
+  delete: (relPath: string) => invoke<number>("kb_delete", { relPath }),
+  /** 清空资料库(管理页)，返回剩余文件数 */
+  clear: () => invoke<number>("kb_clear"),
   ingest: (sourcePath: string) =>
     invoke<string>("kb_ingest", { sourcePath }),
   /** 拖拽上传：任意格式 → 转 markdown 入 raw/，返回逐文件结果 */
@@ -101,6 +105,8 @@ export interface ChatSendArgs {
   conversationId?: string;
   /** 目标模式：完成条件。设置后 Claude 会持续推进直到达成，不中途收尾。 */
   goal?: string;
+  /** 「请教毛主席」：注入毛选式客观分析指令，调用毛主席资料库，生成标注来源的 HTML。 */
+  consultMao?: boolean;
 }
 
 export interface ChatStreamEvent {
@@ -331,6 +337,8 @@ export const convApi = {
     p(await invoke<RawProject>("conv_create_project", { name })),
   archiveProject: (projectId: string) =>
     invoke<void>("conv_archive_project", { projectId }),
+  openProjectDir: (projectId: string) =>
+    invoke<void>("conv_open_project_dir", { projectId }),
   listConversations: async (projectId: string) =>
     (await invoke<RawConv[]>("conv_list_conversations", { projectId })).map(c),
   createConversation: async (projectId: string) =>
@@ -451,14 +459,29 @@ export interface EnvStreamEvent {
   ok?: boolean;
   message?: string;
 }
+/** Claude Code 更新检测结果 */
+export interface ClaudeUpdateInfo {
+  installed: boolean;
+  current: string | null;
+  latest: string | null;
+  updateAvailable: boolean;
+  checked: boolean;
+  message: string;
+}
 
 export const envDoctor = {
   check: () => invoke<EnvReport>("env_check"),
   fixPath: () => invoke<PathFixResult>("env_fix_path"),
-  /** 安装 Claude Code。method: "native"(irm install.ps1, 默认) | "npm" */
-  installClaude: (method: "native" | "npm" = "native") =>
+  /** 安装 Claude Code。method: "npm"(经国内镜像, 默认) | "native"(官方原生脚本, 兜底) */
+  installClaude: (method: "npm" | "native" = "npm") =>
     invoke<string>("env_install_claude", { method }),
+  /** 安装 Node.js LTS (winget) —— npm 安装方式的前置依赖 */
+  installNode: () => invoke<string>("env_install_node"),
   installPwsh: () => invoke<string>("env_install_pwsh"),
+  /** 检测 Claude Code 是否有新版本 (当前版本 vs npmmirror latest) */
+  checkClaudeUpdate: () => invoke<ClaudeUpdateInfo>("env_claude_update_check"),
+  /** 更新 Claude Code 到最新版 (走国内 npmmirror)，流式日志同安装 */
+  updateClaude: () => invoke<string>("env_update_claude"),
   cancel: (reqId: string) => invoke<void>("env_cancel", { reqId }),
 };
 
@@ -475,6 +498,10 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return [];
     case "kb_read":
       return "_(browser stub)_  本文件需要 Tauri 后端读取。";
+    case "kb_delete":
+      return 0;
+    case "kb_clear":
+      return 0;
     case "kb_ingest":
       return "browser-stub";
     case "kb_upload_files": {
@@ -601,6 +628,7 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
     case "conv_get_messages":
       return [];
     case "conv_archive_project":
+    case "conv_open_project_dir":
     case "conv_delete_conversation":
     case "conv_rename_conversation":
       return undefined;
@@ -677,8 +705,19 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         message: "浏览器预览模式无法修改环境变量。",
       };
     case "env_install_claude":
+    case "env_install_node":
     case "env_install_pwsh":
+    case "env_update_claude":
       return "env-stub-req";
+    case "env_claude_update_check":
+      return {
+        installed: true,
+        current: "1.0.0",
+        latest: "1.0.1",
+        updateAvailable: true,
+        checked: true,
+        message: "(browser stub) 发现新版本 1.0.1 (当前 1.0.0)。",
+      };
     case "env_cancel":
       return undefined;
     case "usage_summary": {

@@ -557,6 +557,34 @@ fn apply_settings_config(cfg: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// 给「生图」用的当前供应商画像：返回 (当前供应商展示名, 是否疑似具备真实生图能力)。
+///
+/// 真相：供应商坞里 55 家全部是 Anthropic 协议的文本 / 代码大模型，**没有一个能生图**；
+/// 真要生图得另配一份独立的图像 API（如 OpenAI gpt-image）。所以默认「不支持」，
+/// 仅当 settings.json 的 env 或进程环境里检测到 `OPENAI_API_KEY` 时才认为可尝试真实生图。
+pub fn image_gen_capability() -> (String, bool) {
+    let store = STORE.read().clone();
+    let views = build_views(&store);
+    let cur = detect_current(&views, &store);
+    let name = views
+        .iter()
+        .find(|v| v.id == cur)
+        .map(|v| v.name.clone())
+        .unwrap_or_else(|| "Claude 官方".to_string());
+
+    let live = read_live_env();
+    let has_image_key = live
+        .get("OPENAI_API_KEY")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+        || std::env::var("OPENAI_API_KEY")
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+
+    (name, has_image_key)
+}
+
 // ───────────────────────── Commands: 供应商 ─────────────────────────
 
 #[tauri::command]

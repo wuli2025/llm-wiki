@@ -3,10 +3,13 @@
 //! 设计目标 (PRD: 新用户点开软件应先过一道环境关):
 //! - **监测**: Claude Code (`claude.exe`) 与 PowerShell 7 (`pwsh`) 是否就绪;
 //!   附带 Node.js / npm (Claude Code 的可选安装路径) 的探测。
-//! - **安装**: Claude Code 没装时一键安装 —— 官方原生脚本
-//!   `irm https://claude.ai/install.ps1 | iex` (首选, 产出 `claude.exe`,
-//!   与 chat.rs 的 `Command::new("claude")` 直接兼容), 或 `npm i -g` 兜底。
-//!   PowerShell 7 缺失时用 winget 安装。
+//! - **安装**: Claude Code 没装时一键安装 —— 默认走 **npm + 国内镜像**
+//!   `npm i -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com`:
+//!   该包的原生二进制经 `optionalDependencies` (`@anthropic-ai/claude-code-win32-x64`)
+//!   同源镜像分发, postinstall 只是把它拷成 `bin/claude.exe` —— 整个安装不碰 claude.ai / GCS,
+//!   故**国内可装**。装出的是真·原生 `claude.exe`, chat.rs 解析其全路径直接 spawn。
+//!   官方原生脚本 `irm https://claude.ai/install.ps1 | iex` 改作兜底 (国内常被墙, 故不再首选)。
+//!   npm 方式需要 Node.js —— 缺失时用 winget 装 Node; PowerShell 7 缺失时同样用 winget。
 //! - **改环境变量 (关键)**: Windows 上原生安装把 `claude.exe` 落到
 //!   `~/.local/bin`, 但该目录常不在 PATH —— 不修则装了也找不到。这里
 //!   **双写**: ① 持久化进「用户 PATH」(注册表, `[Environment]::SetEnvironmentVariable`,
@@ -200,17 +203,118 @@ fn probe_version(bin: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-/// 已知的 claude.exe 候选位置 (原生安装 → ~/.local/bin; npm 全局 → %APPDATA%\npm)。
+/// npm 全局安装前缀。走 `npm prefix -g` —— **用户可能改过前缀**(实测有人放在 `D:\Users\x\npm`,
+/// 而非默认 `%APPDATA%\npm`), 硬编码默认值会漏掉。失败 / 目录不存在 → None。
+fn npm_global_prefix() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let mut cmd = {
+        // 经 cmd /c 以便解析 npm.cmd (CreateProcessW 不认 .cmd)
+        let mut c = Command::new("cmd");
+        c.args(["/c", "npm", "prefix", "-g"]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new("npm");
+        c.args(["prefix", "-g"]);
+        c
+    };
+    cmd.stdin(Stdio::null());
+    no_window(&mut cmd);
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())?
+        .to_string();
+    let p = PathBuf::from(line);
+    p.exists().then_some(p)
+}
+
+/// 某个 npm 全局前缀下 Claude Code 的**真·原生 exe** 路径
+/// (`<prefix>/node_modules/@anthropic-ai/claude-code/bin/claude.exe`)。
+/// postinstall 把平台二进制拷到这里; 这是可被 `Command::new` 直接 spawn 的目标,
+/// 而 `<prefix>/claude.cmd` 只是调它的 shim。
+fn npm_claude_native_exe(prefix: &std::path::Path) -> PathBuf {
+    prefix
+        .join("node_modules")
+        .join("@anthropic-ai")
+        .join("claude-code")
+        .join("bin")
+        .join("claude.exe")
+}
+
+/// 已知的 claude 可执行文件候选位置。原生 `.exe` 优先 (能直接 spawn),
+/// npm 的 `claude.cmd` shim 仅作探测 / PATH 兜底。
 fn claude_candidates() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(h) = home_dir() {
+        // 官方原生脚本: ~/.local/bin/claude.exe
         v.push(h.join(".local").join("bin").join("claude.exe"));
         v.push(h.join(".local").join("bin").join("claude"));
-        // npm 全局前缀 (Windows 默认)
-        v.push(h.join("AppData").join("Roaming").join("npm").join("claude.cmd"));
-        v.push(h.join("AppData").join("Roaming").join("npm").join("claude.exe"));
+    }
+    // npm 全局 (用户真实前缀): 先原生 exe, 再 shim
+    if let Some(prefix) = npm_global_prefix() {
+        v.push(npm_claude_native_exe(&prefix));
+        v.push(prefix.join("claude.exe"));
+        v.push(prefix.join("claude.cmd"));
+    }
+    // 默认前缀兜底 (拿不到 `npm prefix -g` 时, 例如 npm 不在 PATH)
+    if let Some(h) = home_dir() {
+        let appdata_npm = h.join("AppData").join("Roaming").join("npm");
+        v.push(npm_claude_native_exe(&appdata_npm));
+        v.push(appdata_npm.join("claude.cmd"));
+        v.push(appdata_npm.join("claude.exe"));
     }
     v
+}
+
+/// chat.rs spawn 用的解析结果缓存 —— 避免每次发消息都跑 `where.exe` / `npm prefix -g`。
+/// 安装成功后 (`stream_install`) 会清空, 下次重新解析。
+static CLAUDE_EXE_CACHE: once_cell::sync::Lazy<Mutex<Option<PathBuf>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+
+/// 解析一个「可直接 spawn」的 claude 可执行文件全路径, 供 chat.rs 调起宿主机 CLI。
+///
+/// 为什么不让 chat.rs 用裸名 `Command::new("claude")`: Windows 的 `CreateProcessW` 解析裸名时
+/// 只补 `.exe`、不查 PATHEXT, 而 **npm 装只在 PATH 放 `claude.cmd`** → 裸名根本找不到。
+/// 这里偏好真·原生 `.exe` (PATH 命中的 .exe → 已知候选里的 .exe), 实在没有才回退到 `.cmd`;
+/// 全部落空返回 None, 让调用方退回裸名靠 PATH。带进程内缓存。
+pub fn resolve_claude_exe() -> Option<PathBuf> {
+    // 命中缓存且文件仍在 → 直接用
+    if let Some(p) = CLAUDE_EXE_CACHE.lock().as_ref() {
+        if p.exists() {
+            return Some(p.clone());
+        }
+    }
+    let resolved = resolve_claude_exe_uncached();
+    *CLAUDE_EXE_CACHE.lock() = resolved.clone();
+    resolved
+}
+
+fn resolve_claude_exe_uncached() -> Option<PathBuf> {
+    let is_exe = |p: &std::path::Path| {
+        p.extension()
+            .map(|e| e.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false)
+    };
+    let hits = which_all("claude"); // 已过滤为「存在的」路径
+    // 1. PATH 命中里的 .exe (原生装常见)
+    if let Some(p) = hits.iter().find(|p| is_exe(p)) {
+        return Some(p.clone());
+    }
+    // 2. 已知候选里存在的 .exe (npm 装 → node_modules 里的原生 exe)
+    let cands = claude_candidates();
+    if let Some(p) = cands.iter().find(|p| is_exe(p) && p.exists()) {
+        return Some(p.clone());
+    }
+    // 3. 退而求其次: 任意 PATH 命中 / 存在候选 (可能是 .cmd)
+    hits.into_iter()
+        .next()
+        .or_else(|| cands.into_iter().find(|p| p.exists()))
 }
 
 fn pwsh_candidates() -> Vec<PathBuf> {
@@ -412,13 +516,18 @@ if ($parts -notcontains $d) {{ \
     }
 }
 
-/// claude 应该落脚的目录: 已解析路径的父目录优先, 否则 ~/.local/bin。
+/// claude 应该落脚的目录 (用于「修复 PATH」): 已解析路径的父目录优先, 否则 ~/.local/bin。
 fn claude_dir_for_fix(claude: &ToolStatus) -> Option<PathBuf> {
     if let Some(p) = &claude.path {
-        // 排除 npm 的 .cmd shim 目录? 不排除 —— 谁解析到就修谁的目录
-        return PathBuf::from(p.replace('/', std::path::MAIN_SEPARATOR_STR))
-            .parent()
-            .map(|p| p.to_path_buf());
+        let pb = PathBuf::from(p.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // npm 装时解析到的可能是 `node_modules/.../bin/claude.exe` —— 该上 PATH 的是 npm 全局前缀
+        // (放 `claude.cmd` 的地方, npm 通常已替我们加好), 而非内部 bin 目录。
+        if pb.components().any(|c| c.as_os_str() == "node_modules") {
+            if let Some(prefix) = npm_global_prefix() {
+                return Some(prefix);
+            }
+        }
+        return pb.parent().map(|p| p.to_path_buf());
     }
     home_dir().map(|h| h.join(".local").join("bin"))
 }
@@ -503,18 +612,21 @@ pub fn env_fix_path() -> Result<PathFixResult, String> {
     }
 }
 
-/// 安装 Claude Code。method: "native" (默认, irm install.ps1) | "npm"。
+/// 安装 Claude Code。method: "npm" (默认, 经国内镜像) | "native" (官方原生脚本, 兜底)。
 /// 流式把安装日志通过 `env:stream` 事件推给前端; 成功后自动修 PATH。
 #[tauri::command]
 pub fn env_install_claude(app: AppHandle, method: Option<String>) -> Result<String, String> {
     if !cfg!(windows) {
         return Err("自动安装目前仅支持 Windows; 其他平台请参考官方文档手动安装。".into());
     }
-    let method = method.unwrap_or_else(|| "native".to_string());
+    let method = method.unwrap_or_else(|| "npm".to_string());
     let inner = match method.as_str() {
-        "npm" => "npm install -g @anthropic-ai/claude-code".to_string(),
-        // 官方原生脚本: 产出 ~/.local/bin/claude.exe, 与 chat.rs 直接兼容
-        _ => "irm https://claude.ai/install.ps1 | iex".to_string(),
+        // 官方原生脚本: 产出 ~/.local/bin/claude.exe; 国内常因访问 claude.ai / GCS 受阻而失败 → 仅兜底
+        "native" => "irm https://claude.ai/install.ps1 | iex".to_string(),
+        // 默认: npm + 国内镜像 (npmmirror)。包体与原生二进制(optionalDependencies)同源镜像,
+        // 整个安装不依赖 claude.ai / GCS → 国内可装。装出真·原生 exe (postinstall 拷到 bin/claude.exe)。
+        _ => "npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com"
+            .to_string(),
     };
     let req_id = next_req_id();
     let cmd = build_powershell(&inner);
@@ -522,18 +634,263 @@ pub fn env_install_claude(app: AppHandle, method: Option<String>) -> Result<Stri
     Ok(req_id)
 }
 
-/// 安装 PowerShell 7 (winget)。成功无需改 PATH (winget 安装会自带)。
+/// 安装 Node.js LTS (winget) —— npm 安装方式的前置依赖。
+/// winget 安装会自带配 PATH, 故无需我们再改 (`fix_path_after=false`)。
+#[tauri::command]
+pub fn env_install_node(app: AppHandle) -> Result<String, String> {
+    if !cfg!(windows) {
+        return Err("Node.js 自动安装仅支持 Windows; 其他平台请用系统包管理器手动安装。".into());
+    }
+    let inner = "winget install --id OpenJS.NodeJS.LTS -e --source winget \
+--accept-package-agreements --accept-source-agreements"
+        .to_string();
+    let req_id = next_req_id();
+    let cmd = build_powershell(&inner);
+    stream_install(app, req_id.clone(), cmd, false, "Node.js");
+    Ok(req_id)
+}
+
+/// 安装 PowerShell 7。成功无需改 PATH (MSI / winget 安装都会自带配 PATH)。
+///
+/// 之前只用 `winget`, 但很多机器上要么没有 winget、要么 winget 源在国内拉不动
+/// → 用户报「PowerShell 7 下载不了」。这里改成**两层策略**:
+/// ① 有 winget 先用 winget (官方、能拿最新版);
+/// ② winget 缺失 / 失败 → **直接下载官方 MSI 再 msiexec 静默安装**, 且下载走
+///    国内可达的 GitHub 文件代理 (gh-proxy / ghfast) 兜底, 实在不行再走 GitHub 直连。
+///    这就是「下载路径」修复 —— 明确把 MSI 落到 `%TEMP%` 再装, 不再黑盒依赖 winget。
 #[tauri::command]
 pub fn env_install_pwsh(app: AppHandle) -> Result<String, String> {
     if !cfg!(windows) {
         return Err("PowerShell 7 自动安装仅支持 Windows。".into());
     }
-    let inner = "winget install --id Microsoft.PowerShell -e --source winget \
---accept-package-agreements --accept-source-agreements"
-        .to_string();
     let req_id = next_req_id();
-    let cmd = build_powershell(&inner);
+    let cmd = build_powershell(PWSH_INSTALL_SCRIPT);
     stream_install(app, req_id.clone(), cmd, false, "PowerShell 7");
+    Ok(req_id)
+}
+
+/// PowerShell 7 安装脚本: winget 优先, 失败则下载官方 MSI (国内代理加速) 静默安装。
+/// 版本仅用于 MSI 兜底直链 (winget 路径自动取最新); 选 7.4.x LTS, 稳定且长期可用。
+const PWSH_INSTALL_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Continue'
+# ① 优先 winget (能拿最新版, 自带配 PATH)
+$wg = Get-Command winget -ErrorAction SilentlyContinue
+if ($wg) {
+  Write-Output '检测到 winget, 优先用它安装 PowerShell 7...'
+  & winget install --id Microsoft.PowerShell -e --source winget --accept-package-agreements --accept-source-agreements
+  if ($LASTEXITCODE -eq 0) { Write-Output 'PowerShell 7 (winget) 安装完成。'; exit 0 }
+  Write-Output ('winget 安装未成功 (退出码 ' + $LASTEXITCODE + '), 改用直接下载 MSI...')
+} else {
+  Write-Output '未检测到 winget, 改用直接下载官方 MSI...'
+}
+# ② 下载官方 MSI -> %TEMP% -> msiexec 静默安装。下载路径走国内可达的 GitHub 代理兜底。
+$ver = '7.4.6'
+$arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'ARM64' { 'arm64' } 'AMD64' { 'x64' } default { 'x86' } }
+$msi = "PowerShell-$ver-win-$arch.msi"
+$dst = Join-Path $env:TEMP $msi
+$rel = "https://github.com/PowerShell/PowerShell/releases/download/v$ver/$msi"
+$urls = @(
+  "https://gh-proxy.com/$rel",
+  "https://ghfast.top/$rel",
+  "https://ghproxy.net/$rel",
+  $rel
+)
+$ok = $false
+foreach ($u in $urls) {
+  try {
+    Write-Output "下载: $u"
+    Invoke-WebRequest -Uri $u -OutFile $dst -UseBasicParsing -TimeoutSec 600
+    if ((Test-Path $dst) -and ((Get-Item $dst).Length -gt 1MB)) { $ok = $true; break }
+  } catch {
+    Write-Output ("  下载失败: " + $_.Exception.Message)
+  }
+}
+if (-not $ok) {
+  Write-Output 'PowerShell 7 安装包下载失败 (可检查网络 / 代理后重试)。'
+  exit 1
+}
+# 安装到 Program Files 需要管理员权限 -> 用 RunAs 触发 UAC (拒绝则友好报错, 不静默失败)
+Write-Output "安装中 (msiexec, 会弹一次 UAC 授权): $dst"
+try {
+  $p = Start-Process msiexec.exe -ArgumentList ('/i "' + $dst + '" /quiet /norestart ADD_PATH=1') -Wait -PassThru -Verb RunAs
+} catch {
+  Write-Output ('安装启动失败 (可能未授予管理员权限): ' + $_.Exception.Message)
+  exit 1
+}
+Remove-Item $dst -ErrorAction SilentlyContinue
+if ($p.ExitCode -ne 0) { Write-Output ('msiexec 退出码 ' + $p.ExitCode); exit 1 }
+Write-Output 'PowerShell 7 安装完成。'
+"#;
+
+// ───────────────────────── Claude Code 更新 ─────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeUpdateInfo {
+    /// 是否已安装 (装了才谈更新)
+    pub installed: bool,
+    /// 当前版本 (纯 x.y.z, 解析不出则原样)
+    pub current: Option<String>,
+    /// 镜像上的最新版本
+    pub latest: Option<String>,
+    /// 是否有可用更新 (latest > current)
+    pub update_available: bool,
+    /// 是否成功查到了 latest (网络/镜像可用)
+    pub checked: bool,
+    /// 一句话说明
+    pub message: String,
+}
+
+/// 把 "1.0.44 (Claude Code)" 这类串里第一个形如 a.b.c 的版本号解析成元组。
+fn parse_triplet(tok: &str) -> Option<(u64, u64, u64)> {
+    let mut it = tok.split('.');
+    let a = it.next()?.parse::<u64>().ok()?;
+    let b = it.next()?.parse::<u64>().ok()?;
+    let c = it.next()?.parse::<u64>().ok()?;
+    Some((a, b, c))
+}
+
+fn extract_semver(s: &str) -> Option<(u64, u64, u64)> {
+    for tok in s.split(|c: char| !(c.is_ascii_digit() || c == '.')) {
+        if tok.is_empty() {
+            continue;
+        }
+        if let Some(t) = parse_triplet(tok) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// npm 镜像上 Claude Code 的最新版本号 (`npm view ... version`, 走 npmmirror)。
+fn npm_view_latest() -> Option<String> {
+    let pkg = "@anthropic-ai/claude-code";
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.args([
+            "/c",
+            "npm",
+            "view",
+            pkg,
+            "version",
+            "--registry=https://registry.npmmirror.com",
+        ]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new("npm");
+        c.args([
+            "view",
+            pkg,
+            "version",
+            "--registry=https://registry.npmmirror.com",
+        ]);
+        c
+    };
+    cmd.stdin(Stdio::null());
+    no_window(&mut cmd);
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// 没有 npm 时的兜底: 直接打 npmmirror 的 registry HTTP 接口取 dist-tags.latest。
+#[cfg(windows)]
+fn registry_latest_via_http() -> Option<String> {
+    let script = "(Invoke-RestMethod -UseBasicParsing \
+'https://registry.npmmirror.com/@anthropic-ai/claude-code').'dist-tags'.latest";
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    cmd.stdin(Stdio::null());
+    no_window(&mut cmd);
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+#[cfg(not(windows))]
+fn registry_latest_via_http() -> Option<String> {
+    None
+}
+
+/// 检测 Claude Code 是否有新版本: 当前版本 (`claude --version`) vs 镜像 latest。
+#[tauri::command]
+pub fn env_claude_update_check() -> ClaudeUpdateInfo {
+    let current_raw = probe_version("claude", &["--version"]);
+    let installed = current_raw.is_some() || resolve_claude_exe().is_some();
+    if !installed {
+        return ClaudeUpdateInfo {
+            installed: false,
+            current: None,
+            latest: None,
+            update_available: false,
+            checked: false,
+            message: "未检测到 Claude Code, 请先安装。".into(),
+        };
+    }
+
+    // 当前版本: 优先展示解析出的纯 semver, 否则原样
+    let cur_semver = current_raw.as_deref().and_then(extract_semver);
+    let current = cur_semver
+        .map(|(a, b, c)| format!("{a}.{b}.{c}"))
+        .or_else(|| current_raw.clone());
+
+    let latest = npm_view_latest().or_else(registry_latest_via_http);
+    match latest {
+        Some(l) => {
+            let lv = extract_semver(&l);
+            let update_available = match (cur_semver, lv) {
+                (Some(c), Some(n)) => n > c,
+                _ => false,
+            };
+            let message = if update_available {
+                format!("发现新版本 {l} (当前 {})。", current.clone().unwrap_or_default())
+            } else {
+                format!("已是最新版本 ({})。", current.clone().unwrap_or_default())
+            };
+            ClaudeUpdateInfo {
+                installed: true,
+                current,
+                latest: Some(l),
+                update_available,
+                checked: true,
+                message,
+            }
+        }
+        None => ClaudeUpdateInfo {
+            installed: true,
+            current,
+            latest: None,
+            update_available: false,
+            checked: false,
+            message: "无法获取最新版本号 (可检查网络 / npm 后重试)。".into(),
+        },
+    }
+}
+
+/// 更新 Claude Code 到最新版 —— 走国内 npmmirror, 与默认安装方式同源, 国内最快。
+/// 复用流式安装管线; 成功后清解析缓存并自动修 PATH (与首次安装一致)。
+#[tauri::command]
+pub fn env_update_claude(app: AppHandle) -> Result<String, String> {
+    if !cfg!(windows) {
+        return Err("自动更新目前仅支持 Windows; 其他平台请用 npm 手动更新。".into());
+    }
+    let inner = "npm install -g @anthropic-ai/claude-code@latest \
+--registry=https://registry.npmmirror.com";
+    let req_id = next_req_id();
+    let cmd = build_powershell(inner);
+    stream_install(app, req_id.clone(), cmd, true, "Claude Code 更新");
     Ok(req_id)
 }
 
@@ -663,6 +1020,11 @@ fn stream_install(app: AppHandle, req_id: String, mut cmd: Command, fix_path_aft
         } else {
             format!("{label} 安装未成功 (进程非零退出)，可查看上方日志或改用其他方式重试。")
         };
+
+        // 装完 claude 的路径可能变了 → 清空 chat spawn 的解析缓存, 下次重新解析
+        if success {
+            *CLAUDE_EXE_CACHE.lock() = None;
+        }
 
         // 成功后自动修 PATH (改环境变量) —— 这是「装完即可用」的关键
         if success && fix_path_after {

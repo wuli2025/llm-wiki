@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use walkdir::WalkDir;
 
 // ───────────────────────── State ─────────────────────────
@@ -40,7 +40,7 @@ static KB_ROOT: Lazy<RwLock<PathBuf>> = Lazy::new(|| RwLock::new(PathBuf::new())
 
 // ───────────────────────── Init ──────────────────────────
 
-pub fn init(_app: &AppHandle) -> Result<()> {
+pub fn init(app: &AppHandle) -> Result<()> {
     let settings = load_settings();
     let root = settings
         .kb_root
@@ -48,6 +48,8 @@ pub fn init(_app: &AppHandle) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| default_kb_root().unwrap_or_else(|_| PathBuf::from(".")));
     ensure_skeleton(&root)?;
+    // 首启一次性播种「默认资料库」(随安装包打进来的毛主席资料库)
+    seed_default_kb(app, &root);
     *KB_ROOT.write() = root.clone();
     let docs = scan_all(&root);
     *INDEX.write() = docs;
@@ -58,6 +60,69 @@ fn default_kb_root() -> Result<PathBuf> {
     let user = UserDirs::new().ok_or_else(|| anyhow::anyhow!("no user dir"))?;
     let home = user.home_dir();
     Ok(home.join("Polaris").join("PolarisKB"))
+}
+
+// ───────────────────────── 默认资料库播种 ─────────────────────────
+
+/// 首启一次性播种「默认资料库」: 把随安装包打进来的毛主席资料库拷到 KB 的 `raw/` 下。
+/// 用一次性 marker(`<root>/.polaris_seeded`)记录, 之后即便用户在「管理」里清空、
+/// 或在「浏览」里逐条删除, 重启也 **不会** 再次重播 —— 尊重用户对资料库的删除。
+fn seed_default_kb(app: &AppHandle, root: &Path) {
+    let marker = root.join(".polaris_seeded");
+    if marker.exists() {
+        return;
+    }
+    if let Some(src) = seed_source(app) {
+        let _ = copy_dir_recursive(&src, &root.join("raw"));
+    }
+    // 不管有没有播到内容都打 marker, 避免每次启动都尝试拷贝
+    let _ = fs::write(&marker, b"seeded\n");
+}
+
+/// 定位打进安装包的资料库种子目录(其内含 `毛主席/`)。
+/// 发布版走 Tauri `resource_dir`; 开发期回退到 `src-tauri/resources/seed-kb`。
+fn seed_source(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(rd) = app.path().resource_dir() {
+        for cand in [rd.join("resources").join("seed-kb"), rd.join("seed-kb")] {
+            if cand.exists() {
+                return Some(cand);
+            }
+        }
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("seed-kb");
+    if dev.exists() {
+        Some(dev)
+    } else {
+        None
+    }
+}
+
+/// 递归拷贝目录内容到目标; 已存在的文件跳过(不覆盖用户改动)。
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    for entry in WalkDir::new(src).into_iter().flatten() {
+        let p = entry.path();
+        let rel = match p.strip_prefix(src) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let target = dst.join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target)?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if !target.exists() {
+                fs::copy(p, &target)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 // ───────────────────────── Settings ──────────────────────
@@ -261,6 +326,115 @@ pub fn kb_list(subdir: Option<String>) -> Vec<String> {
         .collect()
 }
 
+/// Karpathy 式「结构化 wiki + 长上下文 + 双链导航」上下文块, 供 chat 发送前注入。
+///
+/// 不做关键词召回硬塞 (那是 Karpathy 反对的「平铺 + 向量/关键词召回」范式)。而是把
+/// **wiki/ 知识层全文** + **整库的双链/目录地图** + **KB 根的绝对路径** 给模型,
+/// 让它用 Read/Glob/Grep 沿双链自取 —— 这才是 headless 下真正可行、且忠于 llmwiki 的
+/// 「调用知识库」方式 (claude CLI 在 --print 下有 Read/Glob/Grep, 且 KB 就在 cwd 子树里)。
+/// KB 为空 / 不存在时返回空串。
+pub fn kb_context_block() -> String {
+    let root = KB_ROOT.read().clone();
+    if root.as_os_str().is_empty() || !root.exists() {
+        return String::new();
+    }
+    let idx = INDEX.read();
+    if idx.is_empty() {
+        return String::new();
+    }
+    let norm = |s: &str| s.replace('\\', "/");
+    let stem = |rp: &str| -> String {
+        let n = norm(rp);
+        let base = n.rsplit('/').next().unwrap_or(&n).to_string();
+        base.strip_suffix(".md")
+            .or_else(|| base.strip_suffix(".markdown"))
+            .unwrap_or(&base)
+            .to_string()
+    };
+    let parent = |rp: &str| -> String {
+        let n = norm(rp);
+        match n.rfind('/') {
+            Some(i) => n[..i].to_string(),
+            None => ".".to_string(),
+        }
+    };
+
+    let root_disp = norm(&root.to_string_lossy());
+    let mut out = String::new();
+    out.push_str(&format!(
+        "### 维基库结构 (Karpathy 式: 结构化 wiki + 长上下文 + 双链导航)\n\n\
+知识库根目录: `{root_disp}`\n\
+**就在你的工作目录下** —— 你可以(并且应当)用 `Read` / `Glob` / `Grep` 直接打开其中任意页面来取证。\n\
+三层目录: `raw/`(只读原始资料, 严禁写入) · `output/`(生成的成品) · `wiki/`(人工确认的知识层)。\n\n"
+    ));
+
+    // wiki/ 知识层: 全文注入 (很小, 是导航的起点; 顺着里面的双链继续展开)
+    let mut wiki_docs: Vec<&KbDoc> = idx
+        .iter()
+        .filter(|d| norm(&d.rel_path).starts_with("wiki/"))
+        .collect();
+    wiki_docs.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    if !wiki_docs.is_empty() {
+        out.push_str("#### wiki/ 知识层 (已全文注入, 请顺着其中的双链继续展开)\n\n");
+        for d in &wiki_docs {
+            out.push_str(&format!(
+                "##### [[{}]] · `{}`\n\n{}\n\n",
+                stem(&d.rel_path),
+                norm(&d.rel_path),
+                d.body.trim()
+            ));
+        }
+    }
+
+    // 知识库地图: raw/ output/ 等按文件夹分组, 列标题清单 (供沿双链/路径用 Read/Grep 自取)
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<String, Vec<&KbDoc>> = BTreeMap::new();
+    for d in idx.iter() {
+        let rp = norm(&d.rel_path);
+        if rp == "CLAUDE.md" || rp.starts_with("wiki/") {
+            continue; // 行为指南单独注入; wiki 已全文给过
+        }
+        groups.entry(parent(&rp)).or_default().push(d);
+    }
+    if !groups.is_empty() {
+        out.push_str("#### 知识库地图 (沿双链 `[[名称]]` 或路径, 用 Read / Grep 自取原文)\n\n");
+        const MAX_PER_FOLDER: usize = 60;
+        for (folder, docs) in &groups {
+            out.push_str(&format!("- **{}/** ({} 篇)\n", folder, docs.len()));
+            for d in docs.iter().take(MAX_PER_FOLDER) {
+                let title = if d.title.trim().is_empty() {
+                    stem(&d.rel_path)
+                } else {
+                    d.title.trim().to_string()
+                };
+                out.push_str(&format!(
+                    "  - [[{}]] — {} · `{}`\n",
+                    stem(&d.rel_path),
+                    title,
+                    norm(&d.rel_path)
+                ));
+            }
+            if docs.len() > MAX_PER_FOLDER {
+                out.push_str(&format!(
+                    "  - …其余 {} 篇, 用 `Glob \"{}/**\"` 或 `Grep` 关键词列出\n",
+                    docs.len() - MAX_PER_FOLDER,
+                    folder
+                ));
+            }
+        }
+        out.push('\n');
+    }
+
+    out.push_str(
+        "#### 调用方式 (KB-first, 忠于 Karpathy)\n\
+- 回答前先沿上面的结构与双链, 用 Read/Glob/Grep 打开相关页面取证, 不要凭空作答。\n\
+- 命中知识库内容时用脚注标源: 正文处 `[^1]`, 文末 `[^1]: [[文件名]]`。\n\
+- 双链 `[[…]]` 只写名称 (wiki 根相对名或标题), 不写绝对路径。\n\
+- 库里确实查不到时, 用 `💡` 标明这是你的推断/仿写, 不要伪造引文, 也不要谎称检索过。\n\n",
+    );
+    out
+}
+
 #[tauri::command]
 pub fn kb_read(rel_path: String) -> Result<String, String> {
     let root = KB_ROOT.read().clone();
@@ -269,6 +443,45 @@ pub fn kb_read(rel_path: String) -> Result<String, String> {
         return Err("path escapes KB root".into());
     }
     fs::read_to_string(&full).map_err(|e| e.to_string())
+}
+
+/// 删除资料库里的一份资料(浏览页每条右侧 × 用)。
+/// 仅允许删除 KB root 子树内的文件; 删除后重扫索引, 返回剩余文件数。
+#[tauri::command]
+pub fn kb_delete(rel_path: String) -> Result<usize, String> {
+    let root = KB_ROOT.read().clone();
+    let full = root.join(&rel_path);
+    // 防越界: 规范化后必须仍在 KB root 下
+    let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+    let canon_full = full.canonicalize().map_err(|_| "文件不存在".to_string())?;
+    if !canon_full.starts_with(&canon_root) {
+        return Err("路径越界, 拒绝删除".into());
+    }
+    if !canon_full.is_file() {
+        return Err("只能删除文件".into());
+    }
+    fs::remove_file(&canon_full).map_err(|e| e.to_string())?;
+    let docs = scan_all(&root);
+    let n = docs.len();
+    *INDEX.write() = docs;
+    Ok(n)
+}
+
+/// 清空资料库(管理页「清空资料库」用): 删除 `raw/` 下全部资料并重建空 `raw/`,
+/// 保留三层骨架与 CLAUDE.md / wiki。返回清空后剩余索引文件数。
+/// 注: 不删 `<root>/.polaris_seeded` marker, 所以重启 **不会** 重新播种默认资料库。
+#[tauri::command]
+pub fn kb_clear() -> Result<usize, String> {
+    let root = KB_ROOT.read().clone();
+    let raw = root.join("raw");
+    if raw.exists() {
+        fs::remove_dir_all(&raw).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir_all(&raw).map_err(|e| e.to_string())?;
+    let docs = scan_all(&root);
+    let n = docs.len();
+    *INDEX.write() = docs;
+    Ok(n)
 }
 
 #[derive(Serialize)]
