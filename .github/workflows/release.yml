@@ -5,8 +5,9 @@
 # 应用端从 releases/latest/download/latest.json 检查更新，对上 pubkey 即可自动升级。
 #
 # 需要在仓库 Settings → Secrets and variables → Actions 配置：
-#   TAURI_SIGNING_PRIVATE_KEY           = 私钥文件全文（D:\polaris\polaris-updater-private.key 的内容）
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  = 留空（本密钥无密码）
+#   TAURI_SIGNING_PRIVATE_KEY           = 私钥文件全文（D:\polaris\polaris-updater-private.key 的内容，单行无换行）
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  = 私钥密码（polaris2026）
+#   POLARIS_GIFT_MINIMAX_KEY            = 「粉丝福利」MiniMax key（构建期注入，build.rs 混淆进二进制）
 # ─────────────────────────────────────────────────────────────
 name: release
 
@@ -44,6 +45,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # 「粉丝福利」MiniMax key：构建期注入，build.rs XOR 混淆进二进制，公开源码里无明文。
+          POLARIS_GIFT_MINIMAX_KEY: ${{ secrets.POLARIS_GIFT_MINIMAX_KEY }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Polaris ${{ github.ref_name }}"

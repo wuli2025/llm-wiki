@@ -6,6 +6,8 @@ import RightDrawer from "./components/RightDrawer.vue";
 import ChatPanel from "./components/ChatPanel.vue";
 import WikiBrowse from "./components/WikiBrowse.vue";
 import KnowledgeGraph from "./components/KnowledgeGraph.vue";
+import Automation from "./components/Automation.vue";
+import AutomationModal from "./components/AutomationModal.vue";
 import SandboxStatus from "./features/sandbox/components/SandboxStatus.vue";
 import ClaudeMdPanel from "./components/ClaudeMdPanel.vue";
 import Settings from "./components/Settings.vue";
@@ -25,12 +27,14 @@ import { useArtifactsStore } from "./stores/artifacts";
 import { useProvidersStore } from "./stores/providers";
 import { useChatStore } from "./stores/chat";
 import { useWorkflowsStore } from "./stores/workflows";
+import { useAutomationStore } from "./stores/automation";
 
 const app = useAppStore();
 const artifacts = useArtifactsStore();
 const providers = useProvidersStore();
 const chatStore = useChatStore();
 const workflows = useWorkflowsStore();
+const automation = useAutomationStore();
 
 // ─────────── 重视图切换的"点击即缓冲"加载条 ───────────
 // 点击图谱/沙箱(且首次=未被 KeepAlive 暖过)时：先立刻亮加载条(此刻重组件尚未挂载，
@@ -115,6 +119,7 @@ const layoutCols = computed(
       <KeepAlive :include="['KnowledgeGraph', 'SandboxStatus']">
         <ChatPanel v-if="mountedView === 'chat'" />
         <WikiBrowse v-else-if="mountedView === 'wiki'" />
+        <Automation v-else-if="mountedView === 'automation'" />
         <KnowledgeGraph
           v-else-if="mountedView === 'graph'"
           @ready="onViewReady('graph')"
@@ -147,6 +152,7 @@ const layoutCols = computed(
 
     <AddProviderModal v-if="providers.showAddModal" />
     <WorkflowPackModal v-if="workflows.editorOpen" />
+    <AutomationModal v-if="automation.editorOpen" />
     <UsageBoard v-if="providers.showUsageBoard" />
 
     <!-- MCP 配置对话框（触发器已移到 Sidebar 导航栏下方） -->

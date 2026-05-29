@@ -10,6 +10,7 @@ export type ViewKey =
   | "chat"
   | "wiki"
   | "graph"
+  | "automation"
   | "sandbox"
   | "claude_md"
   | "skill_center"

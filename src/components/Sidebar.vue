@@ -4,6 +4,7 @@ import {
   MessagesSquare,
   Library,
   Waypoints,
+  Clock,
   Puzzle,
   CloudDownload,
   FileText,
@@ -30,6 +31,7 @@ const primaryNav: NavItem[] = [
   { key: "chat", label: "对话", icon: MessagesSquare },
   { key: "wiki", label: "知识库", icon: Library },
   { key: "graph", label: "图谱", icon: Waypoints },
+  { key: "automation", label: "自动化", icon: Clock },
   // 沙箱入口已隐藏：进入沙箱视图首挂载较重、点击有卡顿，且当前非核心路径。
   // 视图与路由（App.vue / SandboxStatus）保留，未来需要时把这一项加回即可。
   { key: "skill_center", label: "技能中心", icon: Puzzle },

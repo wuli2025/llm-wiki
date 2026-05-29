@@ -19,11 +19,14 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 use walkdir::WalkDir;
+
+// 构建期注入的「粉丝福利」MiniMax key(XOR 滚动混淆字节, 见 build.rs)。
+include!(concat!(env!("OUT_DIR"), "/gift_key.rs"));
 
 const DEFAULT_TOKEN_FIELD: &str = "ANTHROPIC_AUTH_TOKEN";
 const API_KEY_FIELD: &str = "ANTHROPIC_API_KEY";
@@ -195,6 +198,56 @@ struct Store {
 static STORE: Lazy<RwLock<Store>> = Lazy::new(|| RwLock::new(Store::default()));
 static STORE_PATH: Lazy<RwLock<PathBuf>> = Lazy::new(|| RwLock::new(PathBuf::new()));
 
+/// 还原构建期注入的「粉丝福利」MiniMax key。
+/// 二进制内为 XOR 混淆字节, 此处解出明文; 未注入(本地 dev 构建)时返回空串。
+/// 提醒: 客户端解密逻辑随包一起分发, 混淆只是延缓提取, 不构成真正保护。
+fn gift_minimax_key() -> String {
+    if GIFT_MINIMAX_OBF.is_empty() || GIFT_MINIMAX_PAD.is_empty() {
+        return String::new();
+    }
+    let bytes: Vec<u8> = GIFT_MINIMAX_OBF
+        .iter()
+        .enumerate()
+        .map(|(i, b)| b ^ GIFT_MINIMAX_PAD[i % GIFT_MINIMAX_PAD.len()])
+        .collect();
+    String::from_utf8(bytes).unwrap_or_default()
+}
+
+/// 首启一次性把「粉丝福利」MiniMax 供应商(含构建期注入的 key)种进 store。
+/// 用 marker(`<data>/.gift_minimax_seeded`)记录, 之后即便用户在坞里删除/改空,
+/// 重启也 **不会** 再种 —— 尊重用户的删除(沿用资料库播种的语义)。
+/// 未注入 key(dev 构建)时直接跳过。返回是否新种了内容。
+fn seed_gift_minimax(store: &mut Store, data_dir: &Path) -> bool {
+    let key = gift_minimax_key();
+    if key.is_empty() {
+        return false;
+    }
+    let marker = data_dir.join(".gift_minimax_seeded");
+    if marker.exists() {
+        return false;
+    }
+    // 不管后面有没有真种进去, 都打 marker, 避免每次启动重试 + 尊重删除。
+    let _ = fs::write(&marker, b"seeded\n");
+
+    // 用户已自配同 id 供应商则不覆盖。
+    if store.items.iter().any(|i| i.id == "minimax") {
+        return false;
+    }
+    store.items.push(StoredProvider {
+        id: "minimax".to_string(),
+        name: "MiniMax".to_string(),
+        note: "粉丝福利 · 预置额度，开箱即用".to_string(),
+        website_url: "https://www.minimaxi.com".to_string(),
+        token_field: DEFAULT_TOKEN_FIELD.to_string(),
+        settings_config: default_config(
+            "https://api.minimaxi.com/anthropic",
+            DEFAULT_TOKEN_FIELD,
+            &key,
+        ),
+    });
+    true
+}
+
 pub fn init(_app: &AppHandle) -> Result<()> {
     let user = UserDirs::new().ok_or_else(|| anyhow::anyhow!("no user dir"))?;
     let dir = user.home_dir().join("Polaris").join("data");
@@ -254,8 +307,11 @@ pub fn init(_app: &AppHandle) -> Result<()> {
         }
     }
 
+    // 首启一次性种「粉丝福利」MiniMax(含构建期注入的 key)。
+    let gifted = seed_gift_minimax(&mut store, &dir);
+
     *STORE.write() = store;
-    if migrated {
+    if migrated || gifted {
         persist();
     }
     Ok(())

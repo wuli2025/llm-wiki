@@ -444,6 +444,8 @@ export interface EnvReport {
   npm: ToolStatus;
   claudeDir: string | null;
   claudeDirOnUserPath: boolean;
+  /** 是否有 claude 可用的 shell (真身 PowerShell 7 / Git Bash)；false ⇒ 对话会报缺 shell */
+  shellReady: boolean;
   ready: boolean;
 }
 export interface PathFixResult {
@@ -694,6 +696,7 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         npm: tool("npm", "npm", true),
         claudeDir: null,
         claudeDirOnUserPath: true,
+        shellReady: false,
         ready: false,
       };
     }

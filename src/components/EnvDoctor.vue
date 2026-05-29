@@ -40,9 +40,30 @@ const checkingUpdate = ref(false);
 
 const busy = computed(() => busyKind.value !== "");
 
+// 本次会话只自动装一次 shell, 避免失败时每次复检都反复弹 UAC
+let autoPwshTried = false;
+
 async function runCheck() {
   report.value = await envDoctor.check();
   return report.value;
+}
+
+/**
+ * claude 已装但缺可用 shell (真身 PowerShell 7 / Git Bash) → 自动装 PowerShell 7。
+ * 否则用户进去对话时 claude 会报「找不到 PowerShell / bash」。仅启动关 (gate) 自动触发,
+ * 每次会话最多一次。返回是否已发起安装 (true ⇒ 调用方应让出, 进入流式日志)。
+ */
+function maybeAutoInstallShell(r: EnvReport): boolean {
+  if (!props.gate || !isTauri) return false;
+  if (!r.claude.found || r.shellReady || autoPwshTried || busy.value) return false;
+  autoPwshTried = true;
+  phase.value = "panel";
+  installPwsh();
+  banner.value = {
+    kind: "info",
+    text: "检测到缺少 Claude Code 可用的 Shell（PowerShell 7），正在自动为你安装——装好后即可正常对话，无需重启。",
+  };
+  return true;
 }
 
 onMounted(async () => {
@@ -65,6 +86,8 @@ onMounted(async () => {
     return;
   }
   if (r.ready) localStorage.setItem(READY_FLAG, "1");
+  // claude 在但缺 shell → 自动补装 PowerShell 7 (进入流式日志), 不再放任用户进去后对话报错
+  if (maybeAutoInstallShell(r)) return;
   phase.value = r.ready && props.gate ? "ready-skip" : "panel";
 });
 
@@ -104,6 +127,8 @@ async function finishInstall(ok: boolean, message: string) {
   // 装好 / 更新完后重新检测版本, 让「更新」按钮翻成「已是最新」
   updateInfo.value = null;
   if (r.claude.found) checkClaudeUpdate();
+  // 刚装完 claude 但还缺 shell → 链式自动补上 PowerShell 7 (启动关)
+  maybeAutoInstallShell(r);
 }
 
 async function installClaude(method: "native" | "npm") {

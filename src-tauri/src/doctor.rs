@@ -80,7 +80,10 @@ pub struct EnvReport {
     pub claude_dir: Option<String>,
     /// 该目录是否已在「用户 PATH」里 (Windows)。false ⇒ 需要修复
     pub claude_dir_on_user_path: bool,
-    /// 整体是否就绪 (claude 可用即视为可以进入)
+    /// 是否有 claude 可用的 shell —— 真身 PowerShell 7 (非 Store 别名) 或 Git Bash。
+    /// false ⇒ 即便装了 claude, 对话里也会报「找不到 PowerShell / bash」。
+    pub shell_ready: bool,
+    /// 整体是否就绪 (claude 已装 **且** 有可用 shell 才算真能跑起来)
     pub ready: bool,
 }
 
@@ -324,6 +327,49 @@ fn pwsh_candidates() -> Vec<PathBuf> {
     ]
 }
 
+/// Windows「应用执行别名」空壳: `%LOCALAPPDATA%\Microsoft\WindowsApps\` 下的 0 字节重解析点
+/// (从 Microsoft Store 装 PowerShell 7 / Python 等会留下)。交互式终端里它能转发到 Store 真身,
+/// 但**本应用是 GUI 进程、以 CREATE_NO_WINDOW 无控制台方式 spawn claude**, claude 再去拉这个
+/// 别名时在该上下文下起不来 → 报「找不到 PowerShell」。故探测时把它当「没装」, 引导装
+/// Program Files 里的真身 (普通 exe, 任何子进程都能稳定 spawn) 替代。
+fn is_app_exec_alias(p: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        let in_windows_apps = p
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("WindowsApps"));
+        if !in_windows_apps {
+            return false;
+        }
+        // 0 字节 = 典型的执行别名占位 (reparse point), 不是真二进制
+        std::fs::metadata(p).map(|m| m.len() == 0).unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        false
+    }
+}
+
+/// 探测可用的 Git Bash (claude 在 Windows 上可接受的另一种 shell)。
+/// 先认 `CLAUDE_CODE_GIT_BASH_PATH` 覆盖, 再扫常见安装位置。
+fn git_bash_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("CLAUDE_CODE_GIT_BASH_PATH") {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return Some(pb);
+        }
+    }
+    [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|p| p.exists())
+}
+
 /// 通用工具探测: which 命中 + 已知候选, 取首个可用; on_path = 是否被 PATH 发现。
 fn detect(
     key: &str,
@@ -334,7 +380,11 @@ fn detect(
     required: bool,
     install_hint: &str,
 ) -> ToolStatus {
-    let on_path_hits = which_all(bin);
+    // 滤掉 WindowsApps 的执行别名空壳 —— 它对无控制台 spawn 的 claude 不可用, 不能算「已装」
+    let on_path_hits: Vec<PathBuf> = which_all(bin)
+        .into_iter()
+        .filter(|p| !is_app_exec_alias(p))
+        .collect();
     let on_path = !on_path_hits.is_empty();
 
     // 解析出一个具体路径: PATH 命中优先 (Windows 偏好 .exe), 否则用存在的候选
@@ -532,6 +582,15 @@ fn claude_dir_for_fix(claude: &ToolStatus) -> Option<PathBuf> {
     home_dir().map(|h| h.join(".local").join("bin"))
 }
 
+/// 装完 PowerShell 7 后, 把它的目录 (`C:\Program Files\PowerShell\7`) 塞进 PATH (进程 + 用户),
+/// 让**本进程**后续 spawn 的 claude 立刻找到真身, 而不是 WindowsApps 里起不来的 Store 别名 —— 装完免重启即用。
+/// 真身不存在 (没装成功) 时返回 None。
+fn ensure_pwsh_on_path() -> Option<PathFixResult> {
+    let exe = pwsh_candidates().into_iter().find(|p| p.exists())?;
+    let dir = exe.parent()?.to_string_lossy().to_string();
+    Some(ensure_dir_on_path(&dir))
+}
+
 // ───────────────────────── Commands ─────────────────────────
 
 #[tauri::command]
@@ -583,7 +642,10 @@ pub fn env_check() -> EnvReport {
         _ => true,
     };
 
-    let ready = claude.found;
+    // 可用 shell: 真身 pwsh (detect 已滤掉 Store 别名) 或 Git Bash。
+    // claude 在 Windows 上必须有其一才能跑工具, 故并入「就绪」判定。
+    let shell_ready = pwsh.found || git_bash_path().is_some();
+    let ready = claude.found && shell_ready;
 
     EnvReport {
         os,
@@ -593,6 +655,7 @@ pub fn env_check() -> EnvReport {
         npm,
         claude_dir: claude_dir.as_deref().map(to_fwd),
         claude_dir_on_user_path,
+        shell_ready,
         ready,
     }
 }
@@ -1024,6 +1087,14 @@ fn stream_install(app: AppHandle, req_id: String, mut cmd: Command, fix_path_aft
         // 装完 claude 的路径可能变了 → 清空 chat spawn 的解析缓存, 下次重新解析
         if success {
             *CLAUDE_EXE_CACHE.lock() = None;
+            // 若真身 pwsh 已就位 (本次刚装好, 或本就装了), 顺手把它的目录注入 PATH(进程+用户),
+            // 让本进程 spawn 的 claude 立刻用上 —— 装完 PowerShell 7 免重启即可对话。
+            if let Some(fix) = ensure_pwsh_on_path() {
+                if fix.ok && fix.status == "added" {
+                    message.push('\n');
+                    message.push_str(&fix.message);
+                }
+            }
         }
 
         // 成功后自动修 PATH (改环境变量) —— 这是「装完即可用」的关键
