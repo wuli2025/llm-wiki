@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────
+# 临时「只出 mac 包」工作流 —— 给手上没有 Mac 的人快速拿到一个可用的 .dmg。
+# 推一个 `mac-v*` 标签（如 mac-v0.2.10）即在 macOS 云机器上构建并发 Release。
+#   · 产物：universal（Intel + Apple Silicon 通用）未签名 .dmg
+#   · 不需要任何 secret（关掉 updater 签名产物，跳过苹果签名/公证）
+#   · 关闭 LTO/单 codegen-unit 以缩短云端编译时间（牺牲少量运行性能，换更快出包）
+# 正式发版仍走 release.yml（v* 标签，带更新签名 + 双平台）。
+# ─────────────────────────────────────────────────────────────
+name: mac-build
+
+on:
+  push:
+    tags:
+      - "mac-v*"
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      # 加速编译：关 LTO、放开 codegen-units（仅本工作流，不动仓库 Cargo.toml）
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust toolchain (mac universal)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm install
+
+      - name: Build unsigned universal .dmg & publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Polaris macOS (unsigned) ${{ github.ref_name }}"
+          releaseBody: "未签名 macOS 通用安装包。首次打开请右键→打开，或终端执行 `xattr -dr com.apple.quarantine /Applications/Polaris.app` 解除隔离。"
+          releaseDraft: false
+          prerelease: true
+          args: --target universal-apple-darwin --bundles dmg --config tauri.macbuild.conf.json
