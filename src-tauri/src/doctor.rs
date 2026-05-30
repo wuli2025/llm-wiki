@@ -18,11 +18,13 @@
 //!   spawn claude。安装成功后自动执行, 对应「你帮他配置一下 / 一定要记得改环境变量」。
 //!
 //! 跨平台: 探测两端通用 (Windows 走 where.exe / cmd, 类 Unix 走 which / 直接执行)。
-//! 安装 Claude Code 两端可用, 但**默认路径按平台分**: Windows 走 npm+npmmirror (绕墙拿 win32
-//! 原生包), native 兜底 install.ps1; macOS·Linux 一律走官方 install.sh (自带平台原生二进制、
-//! 无需 Node、不依赖 npmmirror), 经 `build_install_shell` 选 PowerShell 或 sh。
-//! 仅「持久化 PATH 进注册表」与「装 Node/PowerShell7」是 Windows 专属逻辑 (mac 自带 shell,
-//! 全局 npm bin 通常已在 PATH); 其余平台对这两项返回友好提示, 不阻断编译。
+//! 安装 Claude Code **两端默认一致走 npm+npmmirror**: 原生二进制 (win32 / darwin-arm64 /
+//! darwin-x64 …) 经 optionalDependencies 由 npmmirror 同源镜像分发, 安装不碰 claude.ai/GCS,
+//! 故国内 (含 macOS) 可装; 官方原生脚本 (install.ps1 / install.sh) 因从 claude.ai 拉二进制、
+//! 国内常被墙, 仅作「境外网络」兜底。npm 方式需要 Node.js —— 缺失时:
+//! Windows 用 winget / 官方 MSI 装, **macOS 免 sudo 下载官方 darwin tar.gz (npmmirror 镜像)**
+//! 解压到 `~/.local/polaris-node` 并写 shell 配置。经 `build_install_shell` 选 PowerShell 或 sh。
+//! 持久化 PATH: Windows 写注册表用户 PATH; macOS·Linux 写 `~/.zshrc` 等 shell 配置。
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -259,9 +261,13 @@ fn npm_claude_native_exe(prefix: &std::path::Path) -> PathBuf {
 fn claude_candidates() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(h) = home_dir() {
-        // 官方原生脚本: ~/.local/bin/claude.exe
+        // 官方原生脚本: ~/.local/bin/claude(.exe)
         v.push(h.join(".local").join("bin").join("claude.exe"));
         v.push(h.join(".local").join("bin").join("claude"));
+        // macOS 免 sudo 装的 Node (~/.local/polaris-node) 的全局 bin: `npm i -g` 把 claude
+        // 链到这里。mac GUI 从 Finder 启动时 PATH 极简、`npm prefix -g` 又拿不到 → 显式兜底,
+        // 让重启后 chat spawn 仍找得到。
+        v.push(h.join(".local").join("polaris-node").join("bin").join("claude"));
     }
     // npm 全局 (用户真实前缀): 先原生 exe, 再 shim
     if let Some(prefix) = npm_global_prefix() {
@@ -329,6 +335,31 @@ fn pwsh_candidates() -> Vec<PathBuf> {
         PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
         PathBuf::from(r"C:\Program Files\PowerShell\7-preview\pwsh.exe"),
     ]
+}
+
+/// Node.js 可执行文件所在目录候选 (放 `node`/`npm`)。装完 Node 后用它把目录塞进进程 PATH,
+/// 让同一会话紧接着的 npm/claude 安装立刻找得到 npm (免重启 app)。
+fn node_dir_candidates() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        vec![
+            PathBuf::from(r"C:\Program Files\nodejs"),
+            PathBuf::from(r"C:\Program Files (x86)\nodejs"),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        let mut v = Vec::new();
+        if let Some(h) = home_dir() {
+            // 本应用免 sudo 装 Node 的落脚处 (见 MAC_NODE_INSTALL_SCRIPT), 优先
+            v.push(h.join(".local").join("polaris-node").join("bin"));
+            v.push(h.join(".local").join("bin"));
+        }
+        // Homebrew (Apple Silicon / Intel) 与系统常见位置
+        v.push(PathBuf::from("/opt/homebrew/bin"));
+        v.push(PathBuf::from("/usr/local/bin"));
+        v
+    }
 }
 
 /// Windows「应用执行别名」空壳: `%LOCALAPPDATA%\Microsoft\WindowsApps\` 下的 0 字节重解析点
@@ -473,6 +504,27 @@ fn path_contains_dir(path_str: &str, dir: &str) -> bool {
     path_str.split(';').any(|p| norm(p) == target)
 }
 
+/// 把 dir 前插进**当前进程 PATH** (若尚不在其中)。仅改本进程、不碰注册表; 返回是否真加了。
+/// 这是「装完 / 启动后不重启即可 spawn claude」的底座 —— 子进程继承本进程 env。
+fn prepend_process_path(dir: &str) -> bool {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return false;
+    }
+    let proc_path = std::env::var("PATH").unwrap_or_default();
+    if path_contains_dir(&proc_path, dir) {
+        return false;
+    }
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let new = if proc_path.is_empty() {
+        dir.to_string()
+    } else {
+        format!("{dir}{sep}{proc_path}")
+    };
+    std::env::set_var("PATH", new);
+    true
+}
+
 /// 把 dir 追加进「用户 PATH」(持久化, 注册表) + 当前进程 PATH (立即生效)。
 /// Windows 专属; 其余平台仅尝试改进程 PATH。
 fn ensure_dir_on_path(dir: &str) -> PathFixResult {
@@ -487,16 +539,7 @@ fn ensure_dir_on_path(dir: &str) -> PathFixResult {
     }
 
     // ① 当前进程 PATH (prepend → 本次会话立即能 spawn claude, 无需重启 app)
-    let proc_path = std::env::var("PATH").unwrap_or_default();
-    if !path_contains_dir(&proc_path, dir) {
-        let sep = if cfg!(windows) { ';' } else { ':' };
-        let new = if proc_path.is_empty() {
-            dir.to_string()
-        } else {
-            format!("{dir}{sep}{proc_path}")
-        };
-        std::env::set_var("PATH", new);
-    }
+    prepend_process_path(dir);
 
     // ② 用户级持久化 PATH (Windows)。用显式 return 收尾, 避免 cfg 块尾表达式歧义。
     #[cfg(windows)]
@@ -532,12 +575,62 @@ fn ensure_dir_on_path(dir: &str) -> PathFixResult {
     }
     #[cfg(not(windows))]
     {
-        return PathFixResult {
+        return persist_unix_path(dir);
+    }
+}
+
+/// 类 Unix(含 macOS) 持久化 PATH: 把 `export PATH="dir:$PATH"` 追加进 shell 配置
+/// (zsh 为 macOS 默认, 同时照顾 bash/sh), 已存在则跳过。进程 PATH 已在调用处 prepend。
+#[cfg(not(windows))]
+fn persist_unix_path(dir: &str) -> PathFixResult {
+    use std::io::Write;
+    let home = match home_dir() {
+        Some(h) => h,
+        None => {
+            return PathFixResult {
+                ok: true,
+                dir: Some(dir.to_string()),
+                status: "process_only".into(),
+                message: format!("已加入当前进程 PATH ({dir})。"),
+            }
+        }
+    };
+    let line = format!("export PATH=\"{dir}:$PATH\"");
+    let mut wrote = false;
+    let mut already = false;
+    for rc in [".zshrc", ".zprofile", ".bash_profile", ".profile"] {
+        let p = home.join(rc);
+        let existing = std::fs::read_to_string(&p).unwrap_or_default();
+        if existing.contains(dir) {
+            already = true;
+            continue;
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+            let _ = writeln!(f, "\n# Added by Polaris\n{line}");
+            wrote = true;
+        }
+    }
+    if wrote {
+        PathFixResult {
+            ok: true,
+            dir: Some(dir.to_string()),
+            status: "added".into(),
+            message: format!("已把 {dir} 写进 shell 配置 (~/.zshrc 等) 并同步当前进程。新开终端即生效。"),
+        }
+    } else if already {
+        PathFixResult {
+            ok: true,
+            dir: Some(dir.to_string()),
+            status: "present".into(),
+            message: format!("{dir} 已在 shell 配置中 (进程 PATH 已同步)。"),
+        }
+    } else {
+        PathFixResult {
             ok: true,
             dir: Some(dir.to_string()),
             status: "process_only".into(),
-            message: format!("已加入当前进程 PATH。请把 {dir} 写进你的 shell 配置以持久化。"),
-        };
+            message: format!("已加入当前进程 PATH ({dir})。"),
+        }
     }
 }
 
@@ -572,18 +665,23 @@ if ($parts -notcontains $d) {{ \
     }
 }
 
+/// 由一个具体的 claude 可执行文件路径推出「该上 PATH 的目录」。
+/// npm 装解析到的常是 `node_modules/.../bin/claude.exe` —— 该上 PATH 的是 npm 全局前缀
+/// (放 `claude.cmd` 的地方, npm 通常已替我们加好), 而非内部 bin 目录; 其余情况取父目录。
+fn claude_dir_from_path(p: &std::path::Path) -> Option<PathBuf> {
+    if p.components().any(|c| c.as_os_str() == "node_modules") {
+        if let Some(prefix) = npm_global_prefix() {
+            return Some(prefix);
+        }
+    }
+    p.parent().map(|x| x.to_path_buf())
+}
+
 /// claude 应该落脚的目录 (用于「修复 PATH」): 已解析路径的父目录优先, 否则 ~/.local/bin。
 fn claude_dir_for_fix(claude: &ToolStatus) -> Option<PathBuf> {
     if let Some(p) = &claude.path {
         let pb = PathBuf::from(p.replace('/', std::path::MAIN_SEPARATOR_STR));
-        // npm 装时解析到的可能是 `node_modules/.../bin/claude.exe` —— 该上 PATH 的是 npm 全局前缀
-        // (放 `claude.cmd` 的地方, npm 通常已替我们加好), 而非内部 bin 目录。
-        if pb.components().any(|c| c.as_os_str() == "node_modules") {
-            if let Some(prefix) = npm_global_prefix() {
-                return Some(prefix);
-            }
-        }
-        return pb.parent().map(|p| p.to_path_buf());
+        return claude_dir_from_path(&pb);
     }
     home_dir().map(|h| h.join(".local").join("bin"))
 }
@@ -595,6 +693,55 @@ fn ensure_pwsh_on_path() -> Option<PathFixResult> {
     let exe = pwsh_candidates().into_iter().find(|p| p.exists())?;
     let dir = exe.parent()?.to_string_lossy().to_string();
     Some(ensure_dir_on_path(&dir))
+}
+
+/// 探测可用的 Git Bash, 供 chat.rs spawn 时显式喂给子 claude (跨平台签名; 类 Unix 恒 None)。
+#[cfg(windows)]
+pub fn detect_git_bash() -> Option<PathBuf> {
+    git_bash_path()
+}
+#[cfg(not(windows))]
+pub fn detect_git_bash() -> Option<PathBuf> {
+    None
+}
+
+/// 启动期环境预热 —— 让本进程**之后** spawn 的 claude CLI 一定「找得到、且有 shell 可用」,
+/// 不必等用户走一遍「环境医生 / 安装」, 也不必重启 app。对应「环境配置时把 PATH 改成适合
+/// claude code CLI 调用, 避免类似(找不到 claude / 找不到 shell)的问题」。
+///
+/// 只改**当前进程** env (set_var), **不写注册表** —— 启动期保持轻量、幂等、无副作用;
+/// 持久化仍由「安装成功」与显式「修复 PATH」按钮负责。三件事, 每件仅在尚未满足时才动:
+/// ① claude 所在目录 → 进程 PATH (即便 app 从一个 PATH 不含它的上下文被拉起也能裸名命中);
+/// ② 真身 PowerShell 7 目录 → 进程 PATH (claude 在 Windows 靠 pwsh/git-bash 跑工具, 缺则报错);
+/// ③ 找到 Git Bash 就设 `CLAUDE_CODE_GIT_BASH_PATH` (claude 在 Windows 默认偏好 git-bash)。
+///
+/// 内部会跑 where.exe / `npm prefix -g` (可能各几百 ms), 故在后台线程里做, 不阻塞 app 启动。
+pub fn prime_path_for_claude() {
+    std::thread::spawn(prime_path_for_claude_inner);
+}
+
+/// 预热的实际逻辑 (同步)。抽出来便于单测直接调用并断言, 公开入口只负责丢到后台线程。
+fn prime_path_for_claude_inner() {
+    // ① claude 目录上进程 PATH
+    if let Some(exe) = resolve_claude_exe() {
+        if let Some(dir) = claude_dir_from_path(&exe) {
+            prepend_process_path(&dir.to_string_lossy());
+        }
+    }
+    // ② 真身 pwsh 目录上进程 PATH (滤掉 Store 别名: pwsh_candidates 只列 Program Files 真身)
+    #[cfg(windows)]
+    if let Some(exe) = pwsh_candidates().into_iter().find(|p| p.exists()) {
+        if let Some(dir) = exe.parent() {
+            prepend_process_path(&dir.to_string_lossy());
+        }
+    }
+    // ③ Git Bash → 环境变量 (用户没显式设过才补)
+    #[cfg(windows)]
+    if std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH").is_none() {
+        if let Some(bash) = git_bash_path() {
+            std::env::set_var("CLAUDE_CODE_GIT_BASH_PATH", bash);
+        }
+    }
 }
 
 // ───────────────────────── Commands ─────────────────────────
@@ -697,21 +844,128 @@ pub fn env_install_claude(app: AppHandle, method: Option<String>) -> Result<Stri
     Ok(req_id)
 }
 
-/// 安装 Node.js LTS (winget) —— npm 安装方式的前置依赖。
-/// winget 安装会自带配 PATH, 故无需我们再改 (`fix_path_after=false`)。
+/// 安装 Node.js LTS —— npm 安装方式的前置依赖。两端都走「国内镜像优先」, 装完把 bin 目录
+/// 塞进进程 PATH (stream_install 收尾处), 故 `fix_path_after=false`。
+///
+/// - **Windows**: 两层策略 —— ① 有 winget 先用 winget; ② 缺失/失败 → 下载官方 MSI (npmmirror
+///   镜像加速) 静默安装 (Win10 常无 winget, 故必须有 MSI 兜底)。
+/// - **macOS**: 下载 Node 官方 darwin tar.gz (走 npmmirror 二进制镜像, 国内可达) **免 sudo**
+///   解压到 `~/.local/polaris-node`, 并把其 `bin` 写进 shell 配置 —— 不动系统目录、不弹 UAC/密码。
 #[tauri::command]
 pub fn env_install_node(app: AppHandle) -> Result<String, String> {
-    if !cfg!(windows) {
-        return Err("Node.js 自动安装仅支持 Windows; 其他平台请用系统包管理器手动安装。".into());
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = &app;
+        return Err("Node.js 自动安装目前支持 Windows 与 macOS; Linux 请用系统包管理器安装。".into());
     }
-    let inner = "winget install --id OpenJS.NodeJS.LTS -e --source winget \
---accept-package-agreements --accept-source-agreements"
-        .to_string();
-    let req_id = next_req_id();
-    let cmd = build_powershell(&inner);
-    stream_install(app, req_id.clone(), cmd, false, "Node.js");
-    Ok(req_id)
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let req_id = next_req_id();
+        #[cfg(windows)]
+        let cmd = build_powershell(NODE_INSTALL_SCRIPT);
+        #[cfg(target_os = "macos")]
+        let cmd = build_install_shell(MAC_NODE_INSTALL_SCRIPT);
+        stream_install(app, req_id.clone(), cmd, false, "Node.js");
+        Ok(req_id)
+    }
 }
+
+/// macOS Node.js 安装脚本 (POSIX sh) —— 免 sudo: 下载官方 darwin tar.gz 解压到
+/// `~/.local/polaris-node`, 把 `bin` 写进 zsh/bash 配置。下载走 npmmirror 二进制镜像 (国内可达),
+/// 不行再退 nodejs.org 直连。选 20.x LTS, 与 Windows 一致。
+#[cfg(target_os = "macos")]
+const MAC_NODE_INSTALL_SCRIPT: &str = r#"
+VER=20.18.1
+ARCH=$(uname -m)
+case "$ARCH" in
+  arm64|aarch64) NARCH=arm64 ;;
+  x86_64) NARCH=x64 ;;
+  *) NARCH=x64 ;;
+esac
+PKG="node-v${VER}-darwin-${NARCH}.tar.gz"
+DEST="$HOME/.local"
+NODE_DIR="$DEST/polaris-node"
+TMP="$(mktemp -d)"
+TARBALL="$TMP/$PKG"
+echo "目标架构: $NARCH; Node 版本: v$VER"
+OK=0
+for U in \
+  "https://cdn.npmmirror.com/binaries/node/v${VER}/${PKG}" \
+  "https://npmmirror.com/mirrors/node/v${VER}/${PKG}" \
+  "https://nodejs.org/dist/v${VER}/${PKG}" ; do
+  echo "下载: $U"
+  if curl -fsSL "$U" -o "$TARBALL" && [ -s "$TARBALL" ]; then OK=1; break; fi
+  echo "  下载失败, 试下一个镜像..."
+done
+if [ "$OK" != "1" ]; then echo "Node.js 下载失败 (检查网络/代理后重试)。"; rm -rf "$TMP"; exit 1; fi
+mkdir -p "$DEST"
+rm -rf "$NODE_DIR"
+mkdir -p "$NODE_DIR"
+tar -xzf "$TARBALL" -C "$NODE_DIR" --strip-components=1 || { echo "解压失败。"; rm -rf "$TMP"; exit 1; }
+rm -rf "$TMP"
+BIN="$NODE_DIR/bin"
+if [ ! -x "$BIN/node" ]; then echo "解压后未找到 node 可执行文件。"; exit 1; fi
+# 把 node bin 写进 shell 配置 (zsh 为 macOS 默认; 同时照顾 bash/sh), 已存在则不重复
+LINE="export PATH=\"$BIN:\$PATH\""
+for RC in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.profile" ; do
+  touch "$RC" 2>/dev/null || true
+  grep -qF "$BIN" "$RC" 2>/dev/null || printf '\n# Added by Polaris (Node.js)\n%s\n' "$LINE" >> "$RC"
+done
+export PATH="$BIN:$PATH"
+echo "Node.js 安装完成: node $("$BIN/node" -v), npm $("$BIN/npm" -v)"
+echo "已写入 ~/.zshrc 等; 本次会话已即时生效。"
+"#;
+
+/// Node.js LTS 安装脚本: winget 优先, 失败则下载官方 MSI (国内 npmmirror 镜像加速) 静默安装。
+/// 选 20.x LTS ("Iron"): 长期支持、兼容 Windows 10。
+const NODE_INSTALL_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Continue'
+# ① 优先 winget (能拿最新 LTS, 自带配 PATH)
+$wg = Get-Command winget -ErrorAction SilentlyContinue
+if ($wg) {
+  Write-Output '检测到 winget, 优先用它安装 Node.js LTS...'
+  & winget install --id OpenJS.NodeJS.LTS -e --source winget --accept-package-agreements --accept-source-agreements
+  if ($LASTEXITCODE -eq 0) { Write-Output 'Node.js (winget) 安装完成。'; exit 0 }
+  Write-Output ('winget 安装未成功 (退出码 ' + $LASTEXITCODE + '), 改用直接下载 MSI...')
+} else {
+  Write-Output '未检测到 winget (Windows 10 常见), 改用直接下载官方 MSI...'
+}
+# ② 下载官方 Node LTS MSI -> %TEMP% -> msiexec 静默安装。下载路径走国内 npmmirror 镜像兜底。
+$ver = '20.18.1'
+$arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'ARM64' { 'arm64' } 'AMD64' { 'x64' } default { 'x86' } }
+$msi = "node-v$ver-$arch.msi"
+$dst = Join-Path $env:TEMP $msi
+$urls = @(
+  "https://cdn.npmmirror.com/binaries/node/v$ver/$msi",
+  "https://npmmirror.com/mirrors/node/v$ver/$msi",
+  "https://nodejs.org/dist/v$ver/$msi"
+)
+$ok = $false
+foreach ($u in $urls) {
+  try {
+    Write-Output "下载: $u"
+    Invoke-WebRequest -Uri $u -OutFile $dst -UseBasicParsing -TimeoutSec 600
+    if ((Test-Path $dst) -and ((Get-Item $dst).Length -gt 1MB)) { $ok = $true; break }
+  } catch {
+    Write-Output ("  下载失败: " + $_.Exception.Message)
+  }
+}
+if (-not $ok) {
+  Write-Output 'Node.js 安装包下载失败 (可检查网络 / 代理后重试)。'
+  exit 1
+}
+# 安装到 Program Files 需要管理员权限 -> 用 RunAs 触发 UAC (拒绝则友好报错, 不静默失败)
+Write-Output "安装中 (msiexec, 会弹一次 UAC 授权): $dst"
+try {
+  $p = Start-Process msiexec.exe -ArgumentList ('/i "' + $dst + '" /quiet /norestart') -Wait -PassThru -Verb RunAs
+} catch {
+  Write-Output ('安装启动失败 (可能未授予管理员权限): ' + $_.Exception.Message)
+  exit 1
+}
+Remove-Item $dst -ErrorAction SilentlyContinue
+if ($p.ExitCode -ne 0) { Write-Output ('msiexec 退出码 ' + $p.ExitCode); exit 1 }
+Write-Output 'Node.js 安装完成。'
+"#;
 
 /// 安装 PowerShell 7。成功无需改 PATH (MSI / winget 安装都会自带配 PATH)。
 ///
@@ -984,25 +1238,27 @@ fn build_install_shell(inner: &str) -> Command {
     }
 }
 
-/// Claude Code 的安装命令串 (按平台 + 方式选择)。
-/// - **Windows**: 默认 `npm` + 国内镜像 (含 win32 原生二进制, 绕开被墙的 claude.ai, 国内可装);
-///   `native` 兜底走官方 PowerShell 脚本 `install.ps1`。
-/// - **macOS / Linux**: 一律走官方 `install.sh` —— 它自带平台原生二进制、无需 Node, 也不依赖
-///   npmmirror (该镜像对 darwin/linux 的原生可选包覆盖不稳)。故 `method` 在非 Windows 上被忽略,
-///   npm+npmmirror 这套是为 Windows 设计的, 不该套到 mac 头上。
+/// Claude Code 的安装命令串 (按方式选择, 两端默认一致)。
+/// - `npm` (**默认, 两端**): `npm i -g @anthropic-ai/claude-code --registry=npmmirror.com`。
+///   原生二进制 (win32 / darwin-arm64 / darwin-x64 …) 经 `optionalDependencies` 由 npmmirror
+///   **同源镜像**分发, postinstall 只把它拷成 `bin/claude` —— 整个过程**不碰 claude.ai / GCS**,
+///   故国内 (含 macOS) 可装。这是国内最稳的路径, 需要 Node.js (缺则先 `env_install_node`)。
+/// - `native` (**兜底, 境外网络**): 官方原生脚本 —— Windows `install.ps1` / macOS·Linux
+///   `install.sh`。它从 claude.ai/GCS 拉二进制, **国内常被墙 → 默认不走**, 仅给能访问外网的人。
 fn claude_install_cmd(method: &str) -> String {
-    #[cfg(windows)]
-    {
-        return match method {
-            "native" => "irm https://claude.ai/install.ps1 | iex".to_string(),
-            _ => "npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com"
-                .to_string(),
-        };
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = method; // 非 Windows 忽略安装方式, 恒走官方 install.sh
-        "curl -fsSL https://claude.ai/install.sh | bash".to_string()
+    match method {
+        "native" => {
+            #[cfg(windows)]
+            {
+                "irm https://claude.ai/install.ps1 | iex".to_string()
+            }
+            #[cfg(not(windows))]
+            {
+                "curl -fsSL https://claude.ai/install.sh | bash".to_string()
+            }
+        }
+        _ => "npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com"
+            .to_string(),
     }
 }
 
@@ -1123,6 +1379,15 @@ fn stream_install(app: AppHandle, req_id: String, mut cmd: Command, fix_path_aft
             format!("{label} 安装未成功 (进程非零退出)，可查看上方日志或改用其他方式重试。")
         };
 
+        // 装完 Node: 把 node bin 目录塞进**进程** PATH, 让同一会话里紧接着的 npm/claude 安装
+        // 立刻找得到 npm —— 安装器(Win MSI / mac 写 shell 配置)只为「新进程/新终端」配 PATH,
+        // 本进程不刷新就会「装了 Node 还说没 npm」。两端通用 (node_dir_candidates 按平台给候选)。
+        if success {
+            if let Some(dir) = node_dir_candidates().into_iter().find(|p| p.exists()) {
+                prepend_process_path(&dir.to_string_lossy());
+            }
+        }
+
         // 装完 claude 的路径可能变了 → 清空 chat spawn 的解析缓存, 下次重新解析
         if success {
             *CLAUDE_EXE_CACHE.lock() = None;
@@ -1157,4 +1422,95 @@ fn stream_install(app: AppHandle, req_id: String, mut cmd: Command, fix_path_aft
             },
         );
     });
+}
+
+// ───────────────────────── Tests ─────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 把内嵌的安装脚本原文 dump 到临时文件, 供外部用 PowerShell AST 解析器做语法校验
+    /// (内嵌脚本的语法错误只会在「真正安装」时才暴露, 这里提前抓出来)。`--ignored` 手动跑。
+    #[test]
+    #[ignore]
+    fn dump_install_scripts() {
+        let dir = std::env::temp_dir();
+        let node = dir.join("polaris_node_install.ps1");
+        let pwsh = dir.join("polaris_pwsh_install.ps1");
+        std::fs::write(&node, NODE_INSTALL_SCRIPT).unwrap();
+        std::fs::write(&pwsh, PWSH_INSTALL_SCRIPT).unwrap();
+        println!("NODE_SCRIPT={}", node.display());
+        println!("PWSH_SCRIPT={}", pwsh.display());
+    }
+
+    #[test]
+    fn path_contains_dir_is_case_and_slash_insensitive() {
+        let p = r"C:\Program Files\PowerShell\7;C:\Users\mi\.local\bin";
+        assert!(path_contains_dir(p, r"c:\program files\powershell\7")); // 大小写不敏感
+        assert!(path_contains_dir(p, r"C:\Users\mi\.local\bin\")); // 尾斜杠归一
+        assert!(!path_contains_dir(p, r"C:\Program Files\nodejs"));
+        assert!(!path_contains_dir(p, "")); // 空目标不误命中
+    }
+
+    #[test]
+    fn claude_dir_from_path_picks_parent_or_npm_prefix() {
+        // 普通原生 exe → 取父目录
+        let native = PathBuf::from(r"C:\Users\mi\.local\bin\claude.exe");
+        assert_eq!(
+            claude_dir_from_path(&native),
+            Some(PathBuf::from(r"C:\Users\mi\.local\bin"))
+        );
+        // node_modules 路径 → 永不返回那个内部 bin 目录 (要么 npm 前缀, 要么至少不是 .../bin 自身的误用)
+        let npmish =
+            PathBuf::from(r"D:\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe");
+        let dir = claude_dir_from_path(&npmish).expect("应解析出某个目录");
+        assert!(
+            !dir.ends_with("claude.exe"),
+            "返回的应是目录而非文件: {dir:?}"
+        );
+    }
+
+    /// 所有会改进程 PATH/env 的断言放进同一个测试串行跑, 避免与其他测试并发改 env 抢同一全局态。
+    #[test]
+    fn prime_and_prepend_behaviour() {
+        // prepend 幂等: 首次真加、PATH 命中、再加返回 false
+        let marker = r"Z:\polaris-test-marker-dir-do-not-exist";
+        let first = prepend_process_path(marker);
+        let path_now = std::env::var("PATH").unwrap_or_default();
+        assert!(first, "首次应真的前插");
+        assert!(path_contains_dir(&path_now, marker), "前插后 PATH 应含该目录");
+        assert!(!prepend_process_path(marker), "已在 PATH 中应返回 false (幂等)");
+
+        // resolve_claude_exe: 若本机装了 claude, 解析出的路径必须真实存在 (Windows 上偏好 .exe)
+        if let Some(exe) = resolve_claude_exe() {
+            assert!(exe.exists(), "解析出的 claude 路径应存在: {exe:?}");
+            #[cfg(windows)]
+            {
+                let is_exe = exe
+                    .extension()
+                    .map(|e| e.eq_ignore_ascii_case("exe"))
+                    .unwrap_or(false);
+                // 本机同时有 .exe 与 .cmd 时, 必须挑 .exe (chat spawn 只认 .exe)
+                let has_exe_alt = which_all("claude")
+                    .iter()
+                    .any(|p| p.extension().map(|e| e.eq_ignore_ascii_case("exe")).unwrap_or(false));
+                if has_exe_alt {
+                    assert!(is_exe, "存在 .exe 候选时应优先解析为 .exe, 实得: {exe:?}");
+                }
+            }
+        }
+
+        // 预热不应 panic; 且 (Windows) 若真身 pwsh 存在, 其目录预热后应在进程 PATH 中 → claude 能找到 shell
+        prime_path_for_claude_inner();
+        #[cfg(windows)]
+        if let Some(pwsh) = pwsh_candidates().into_iter().find(|p| p.exists()) {
+            let dir = pwsh.parent().unwrap().to_string_lossy().to_string();
+            let path_after = std::env::var("PATH").unwrap_or_default();
+            assert!(
+                path_contains_dir(&path_after, &dir),
+                "预热后真身 pwsh 目录应在进程 PATH: {dir}"
+            );
+        }
+    }
 }

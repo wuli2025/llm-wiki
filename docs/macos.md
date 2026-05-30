@@ -35,9 +35,12 @@ npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
 1. 打开 `.dmg`，把 **Polaris** 拖进「应用程序」。
 2. 首次启动若被 Gatekeeper 拦（“无法验证开发者”），见下方「签名/公证」。
 3. App 内「环境检测与配置」会自动检查 **Claude Code**：
-   - mac 上「一键安装」**一律走官方脚本** `curl -fsSL https://claude.ai/install.sh | bash`
-     （自带 macOS 原生二进制，无需 Node.js）。npm + 国内镜像那套是为 Windows 绕墙拿 win32
-     原生包设计的，不套用到 mac。
+   - 「一键安装」**默认走 npm + 国内镜像** `npm i -g @anthropic-ai/claude-code --registry=npmmirror.com`
+     （darwin 原生二进制经 npmmirror 同源镜像分发，**不碰 claude.ai/GCS**，国内可装）。
+   - 缺 `npm` 时先点「先装 Node.js」：**免 sudo** 从 npmmirror 下载官方 darwin tar.gz 解压到
+     `~/.local/polaris-node`，并写进 `~/.zshrc` 等；装完即可继续装 Claude Code。
+   - 官方脚本 `curl -fsSL https://claude.ai/install.sh | bash` 仅作**境外网络兜底**——它从
+     claude.ai 拉二进制，国内常被墙、会「进程非零退出」，故默认不走。
    - mac 自带 `sh`/`zsh`，**不需要** PowerShell 7（该项仅 Windows 显示）。
 
 ## 三、签名与公证（重要）

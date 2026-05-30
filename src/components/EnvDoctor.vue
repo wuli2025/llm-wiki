@@ -156,7 +156,11 @@ async function installNode() {
   busyKind.value = "node";
   try {
     installReqId.value = await envDoctor.installNode();
-    logs.value.push("$ winget install --id OpenJS.NodeJS.LTS -e");
+    logs.value.push(
+      isWin.value
+        ? "$ winget install --id OpenJS.NodeJS.LTS -e  (或下载官方 MSI)"
+        : "$ curl -fsSL https://cdn.npmmirror.com/binaries/node/... | tar xz  → ~/.local/polaris-node"
+    );
   } catch (e) {
     busyKind.value = "";
     banner.value = { kind: "err", text: String(e) };
@@ -303,34 +307,24 @@ const npmReady = computed(() => !!report.value?.npm.found);
             <!-- 行内动作 -->
             <div class="t-act">
               <template v-if="t.key === 'claude' && !t.found">
-                <!-- Windows + 有 npm: 默认 npm(国内镜像)装 -->
+                <!-- 有 npm: 默认 npm(国内镜像)装 —— 两端一致, 国内可达, 不碰 claude.ai -->
                 <button
-                  v-if="isWin && npmReady"
+                  v-if="npmReady"
                   class="btn primary"
                   :disabled="busy"
                   @click="installClaude('npm')"
                 >
                   {{ busyKind === "claude-npm" ? "安装中…" : "一键安装" }}
                 </button>
-                <!-- Windows 无 npm: 先引导装 Node.js (winget) -->
+                <!-- 无 npm: 先引导装 Node.js (Windows winget/MSI, macOS 走 npmmirror tar.gz) -->
                 <button
-                  v-else-if="isWin"
+                  v-else
                   class="btn primary"
                   :disabled="busy"
                   title="npm 安装方式需要 Node.js，先装 Node 再装 Claude Code"
                   @click="installNode"
                 >
                   {{ busyKind === "node" ? "安装中…" : "先装 Node.js" }}
-                </button>
-                <!-- mac/Linux: 一律走官方 install.sh 脚本 (自带原生二进制, 无需 Node) -->
-                <button
-                  v-else
-                  class="btn primary"
-                  :disabled="busy"
-                  title="经官方脚本安装 (curl install.sh，需能访问 claude.ai)"
-                  @click="installClaude('native')"
-                >
-                  {{ busyKind === "claude" ? "安装中…" : "一键安装" }}
                 </button>
               </template>
               <!-- 已装 Claude Code: 检查 / 一键更新 (走国内镜像) -->
@@ -360,7 +354,7 @@ const npmReady = computed(() => !!report.value?.npm.found);
                   }}
                 </button>
               </template>
-              <template v-else-if="t.key === 'node' && !t.found && isWin">
+              <template v-else-if="t.key === 'node' && !t.found">
                 <button class="btn" :disabled="busy" @click="installNode">
                   {{ busyKind === "node" ? "安装中…" : "安装" }}
                 </button>
@@ -374,20 +368,14 @@ const npmReady = computed(() => !!report.value?.npm.found);
           </li>
         </ul>
 
-        <!-- 安装 Claude 的方式说明 + 兜底 (按平台分: Windows 默认 npm 镜像, mac/Linux 官方脚本) -->
+        <!-- 安装 Claude 的方式说明 + 兜底 (两端默认 npm 国内镜像; 官方脚本仅境外网络兜底) -->
         <p v-if="report && !report.claude.found" class="alt">
-          <template v-if="isWin">
-            默认经<strong>国内镜像</strong>用 npm 安装
-            <code>npm i -g @anthropic-ai/claude-code --registry=npmmirror.com</code>（含原生二进制，国内可装、开箱即用）。
-            <span v-if="!npmReady">需先安装 <strong>Node.js</strong>（npm 随它一起来）。</span>
-            <button class="link" :disabled="busy" @click="installClaude('native')">
-              或改用官方脚本（境外网络）
-            </button>
-          </template>
-          <template v-else>
-            经<strong>官方脚本</strong>安装
-            <code>curl -fsSL https://claude.ai/install.sh | bash</code>（自带 macOS 原生二进制，无需 Node.js，需能访问 claude.ai）。
-          </template>
+          默认经<strong>国内镜像</strong>用 npm 安装
+          <code>npm i -g @anthropic-ai/claude-code --registry=npmmirror.com</code>（含平台原生二进制，国内可装、不碰 claude.ai）。
+          <span v-if="!npmReady">需先安装 <strong>Node.js</strong>（{{ isWin ? "随 npm 一起来" : "免 sudo 装到 ~/.local" }}）。</span>
+          <button class="link" :disabled="busy" @click="installClaude('native')">
+            或改用官方脚本（境外网络{{ isWin ? "" : " · install.sh" }}）
+          </button>
         </p>
 
         <!-- 环境变量 (PATH) 体检 -->
