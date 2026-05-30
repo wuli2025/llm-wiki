@@ -74,14 +74,11 @@ jobs:
           # `security import ""` → SecKeychainItemImport 失败。mac 走 ad-hoc 签名
           # (tauri.conf bundle.macOS.signingIdentity = "-")，根本不需要 Apple 证书。
         with:
-          # 直接在 workflow 内建/更新同一个 Release（仓库 Workflow 权限已置为 write,
-          # mac-build 实测 token 可创建 Release）。两端 matrix 任务都指向同一 tag,
-          # tauri-action 会把各自平台条目合并进同一份 latest.json（应用端据此自动升级）。
-          tagName: ${{ github.ref_name }}
-          releaseName: "Polaris ${{ github.ref_name }}"
-          releaseBody: "Polaris ${{ github.ref_name }} —— Windows(.exe) + macOS(universal .dmg)。\nmacOS 未签名: 首次打开右键→打开, 或 `xattr -dr com.apple.quarantine /Applications/Polaris.app`。\n本版起 macOS 安装 Claude Code 走 npm+国内镜像(缺 Node 自动装), 并支持自动更新。"
-          releaseDraft: false
-          prerelease: false
+          # 不在 workflow 内发布 Release —— 实测本仓库 Actions GITHUB_TOKEN 即便 Workflow
+          # 权限为 write、job 也声明 contents:write, 调 create-a-release 仍返回
+          # "Resource not accessible by integration"(账号级限制, 非 fork/权限位问题)。
+          # 故只构建 + 用更新私钥签名, 产物随 if:always() 上传为 artifact, 由仓库 owner
+          # 本机用 `gh` 建 Release 并附带手工合并的 latest.json(见 docs/release-manual.md)。
           args: ${{ matrix.args }}
 
       - name: Upload bundles as artifacts
