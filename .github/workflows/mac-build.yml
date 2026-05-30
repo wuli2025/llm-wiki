@@ -44,6 +44,8 @@ jobs:
         run: npm install
 
       - name: Build unsigned universal .dmg & publish release
+        # 即便发 Release 这步因 token 权限失败, 也要继续到下面把 .dmg 传成工件可下载。
+        continue-on-error: true
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -54,3 +56,13 @@ jobs:
           releaseDraft: false
           prerelease: true
           args: --target universal-apple-darwin --bundles dmg --config src-tauri/tauri.macbuild.conf.json
+
+      # 兜底取包: 无论 Release 是否发成功, 都把构建出的 .dmg 传成可下载的工件
+      # (工件上传走 actions 权限, 不受 contents 写权限限制)。
+      - name: Upload .dmg as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Polaris-macos-universal-dmg
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: warn
