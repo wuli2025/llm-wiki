@@ -18,8 +18,9 @@
 //!   spawn claude。安装成功后自动执行, 对应「你帮他配置一下 / 一定要记得改环境变量」。
 //!
 //! 跨平台: 探测两端通用 (Windows 走 where.exe / cmd, 类 Unix 走 which / 直接执行)。
-//! 安装 Claude Code 已两端可用 —— npm 方式命令一致, native 各走官方脚本 (Windows 的
-//! install.ps1 / macOS·Linux 的 install.sh), 经 `build_install_shell` 选 PowerShell 或 sh。
+//! 安装 Claude Code 两端可用, 但**默认路径按平台分**: Windows 走 npm+npmmirror (绕墙拿 win32
+//! 原生包), native 兜底 install.ps1; macOS·Linux 一律走官方 install.sh (自带平台原生二进制、
+//! 无需 Node、不依赖 npmmirror), 经 `build_install_shell` 选 PowerShell 或 sh。
 //! 仅「持久化 PATH 进注册表」与「装 Node/PowerShell7」是 Windows 专属逻辑 (mac 自带 shell,
 //! 全局 npm bin 通常已在 PATH); 其余平台对这两项返回友好提示, 不阻断编译。
 
@@ -984,22 +985,24 @@ fn build_install_shell(inner: &str) -> Command {
 }
 
 /// Claude Code 的安装命令串 (按平台 + 方式选择)。
-/// - `npm` (默认): 跨平台一致, 经国内镜像装 (含原生二进制, 国内可装);
-/// - `native`: Windows 走官方 PowerShell 脚本, 类 Unix 走官方 `install.sh`。
+/// - **Windows**: 默认 `npm` + 国内镜像 (含 win32 原生二进制, 绕开被墙的 claude.ai, 国内可装);
+///   `native` 兜底走官方 PowerShell 脚本 `install.ps1`。
+/// - **macOS / Linux**: 一律走官方 `install.sh` —— 它自带平台原生二进制、无需 Node, 也不依赖
+///   npmmirror (该镜像对 darwin/linux 的原生可选包覆盖不稳)。故 `method` 在非 Windows 上被忽略,
+///   npm+npmmirror 这套是为 Windows 设计的, 不该套到 mac 头上。
 fn claude_install_cmd(method: &str) -> String {
-    match method {
-        "native" => {
-            #[cfg(windows)]
-            {
-                "irm https://claude.ai/install.ps1 | iex".to_string()
-            }
-            #[cfg(not(windows))]
-            {
-                "curl -fsSL https://claude.ai/install.sh | bash".to_string()
-            }
-        }
-        _ => "npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com"
-            .to_string(),
+    #[cfg(windows)]
+    {
+        return match method {
+            "native" => "irm https://claude.ai/install.ps1 | iex".to_string(),
+            _ => "npm install -g @anthropic-ai/claude-code --registry=https://registry.npmmirror.com"
+                .to_string(),
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = method; // 非 Windows 忽略安装方式, 恒走官方 install.sh
+        "curl -fsSL https://claude.ai/install.sh | bash".to_string()
     }
 }
 

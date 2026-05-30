@@ -303,9 +303,9 @@ const npmReady = computed(() => !!report.value?.npm.found);
             <!-- 行内动作 -->
             <div class="t-act">
               <template v-if="t.key === 'claude' && !t.found">
-                <!-- 默认 npm(国内镜像)装 -->
+                <!-- Windows + 有 npm: 默认 npm(国内镜像)装 -->
                 <button
-                  v-if="npmReady"
+                  v-if="isWin && npmReady"
                   class="btn primary"
                   :disabled="busy"
                   @click="installClaude('npm')"
@@ -322,7 +322,7 @@ const npmReady = computed(() => !!report.value?.npm.found);
                 >
                   {{ busyKind === "node" ? "安装中…" : "先装 Node.js" }}
                 </button>
-                <!-- mac/Linux 无 npm: 直接走官方 install.sh 脚本 (无需 Node) -->
+                <!-- mac/Linux: 一律走官方 install.sh 脚本 (自带原生二进制, 无需 Node) -->
                 <button
                   v-else
                   class="btn primary"
@@ -374,14 +374,20 @@ const npmReady = computed(() => !!report.value?.npm.found);
           </li>
         </ul>
 
-        <!-- 安装 Claude 的方式说明 + 兜底 -->
+        <!-- 安装 Claude 的方式说明 + 兜底 (按平台分: Windows 默认 npm 镜像, mac/Linux 官方脚本) -->
         <p v-if="report && !report.claude.found" class="alt">
-          默认经<strong>国内镜像</strong>用 npm 安装
-          <code>npm i -g @anthropic-ai/claude-code --registry=npmmirror.com</code>（含原生二进制，国内可装、开箱即用）。
-          <span v-if="!npmReady && isWin">需先安装 <strong>Node.js</strong>（npm 随它一起来）。</span>
-          <button class="link" :disabled="busy" @click="installClaude('native')">
-            或改用官方脚本（境外网络{{ isWin ? "" : " · install.sh" }}）
-          </button>
+          <template v-if="isWin">
+            默认经<strong>国内镜像</strong>用 npm 安装
+            <code>npm i -g @anthropic-ai/claude-code --registry=npmmirror.com</code>（含原生二进制，国内可装、开箱即用）。
+            <span v-if="!npmReady">需先安装 <strong>Node.js</strong>（npm 随它一起来）。</span>
+            <button class="link" :disabled="busy" @click="installClaude('native')">
+              或改用官方脚本（境外网络）
+            </button>
+          </template>
+          <template v-else>
+            经<strong>官方脚本</strong>安装
+            <code>curl -fsSL https://claude.ai/install.sh | bash</code>（自带 macOS 原生二进制，无需 Node.js，需能访问 claude.ai）。
+          </template>
         </p>
 
         <!-- 环境变量 (PATH) 体检 -->
