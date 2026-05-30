@@ -30,6 +30,7 @@ import {
   Trash2,
   Check,
   Star,
+  Workflow,
   PanelRightOpen,
   PanelRightClose,
 } from "@lucide/vue";
@@ -226,6 +227,15 @@ const maoMode = ref(false);
 function toggleMao() {
   maoMode.value = !maoMode.value;
   if (maoMode.value) nextTick(() => inputEl.value?.focus());
+}
+
+// ─────────── 动态编排（多智能体）模式开关 ───────────
+// 激活后，本条请求按「编排器扇出 N 个独立子任务，每条 实现→对抗式校验→修复，最后汇总」
+// 的多智能体方式跑（后端放行 Task 子代理并注入编排指令）。适合可拆分 + 可验证的任务。
+const orchestrateMode = ref(false);
+function toggleOrchestrate() {
+  orchestrateMode.value = !orchestrateMode.value;
+  if (orchestrateMode.value) nextTick(() => inputEl.value?.focus());
 }
 
 // ─────────── 工作流包「使用」→ 填入输入框 ───────────
@@ -446,6 +456,7 @@ async function send() {
     // 目标模式下，本条输入框内容即完成条件
     goal: goalMode.value && text ? text : undefined,
     consultMao: consult || undefined,
+    dynamicWorkflow: orchestrateMode.value || undefined,
   });
 }
 
@@ -948,6 +959,22 @@ async function deleteCurrentConv() {
                   激活后按 Enter 发送，毛主席用资料库客观分析并生成 HTML
                   <div class="btn-tooltip-sub">
                     毛选式大白话 · 称呼「同志」· 兼顾未来眼光看问题
+                  </div>
+                </div>
+              </div>
+            </button>
+            <button
+              class="toolbar-btn"
+              :class="{ active: orchestrateMode }"
+              @click="toggleOrchestrate"
+            >
+              <Workflow :size="14" :stroke-width="1.8" />
+              <span>动态编排</span>
+              <div class="btn-tooltip">
+                <div class="btn-tooltip-inner">
+                  多智能体编排：拆成多个独立子任务并行干，每条 实现→校验→修复
+                  <div class="btn-tooltip-sub">
+                    适合可拆分 + 可验证的任务（批量改写 / 多维审查 / 调研）· 比单轮更贵
                   </div>
                 </div>
               </div>

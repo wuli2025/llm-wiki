@@ -43,6 +43,9 @@ pub fn run() {
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             provider::init(h)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            // 环境预热: 后台把 claude / pwsh 目录塞进进程 PATH + 设 Git Bash 路径,
+            // 让之后 spawn 的 claude CLI 直接「找得到、有 shell」, 无需重启 (见 doctor.rs)。
+            doctor::prime_path_for_claude();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

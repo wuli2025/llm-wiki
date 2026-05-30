@@ -9,7 +9,7 @@ resolver = "2"
 
 [package]
 name = "polaris-app"
-version = "0.2.11"
+version = "0.2.12"
 description = "Polaris - 本地优先 AI 工作台 (MVP)"
 authors = ["winner3388"]
 edition = "2021"

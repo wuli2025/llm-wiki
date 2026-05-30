@@ -24,6 +24,7 @@
 | 内置浏览器 | ⏳ 规划中 | CloakBrowser 隐身浏览器集成。见 [08-browser-PRD.md](./08-browser-PRD.md) |
 | **Coworker 升级** | 🔧 进行中 | PPT 能力 + 产物归属 + 参考资料文件夹 + CubeSandbox(E2B) + 多开 + 工位数字人 + 完成提醒。见 [09-coworker-upgrade-PRD.md](./09-coworker-upgrade-PRD.md) |
 | **毛主席资料库与人格** | ✅ 已实现 | 默认资料库随包打进安装包 + 首启播种 + 内置「毛主席」人格项目 + 请教毛主席(毛选式客观分析,标来源 HTML) + 资料库删除/清空。见 [10-mao-persona-PRD.md](./10-mao-persona-PRD.md) |
+| **动态编排(多智能体)** | ✅ 已实现 | 对话框「动态编排」模式：编排器拆 N 个独立子任务 → `Task` 子代理并行扇出 → 每条 实现/对抗式校验/修复 → 汇总；headless 下放行 `Task`。见 [11-dynamic-workflows-PRD.md](./11-dynamic-workflows-PRD.md) |
 
 ## 演进路径
 

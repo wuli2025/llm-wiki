@@ -61,12 +61,18 @@ const LOCAL_WORK_TOOLS: &str = "Read,Write,Edit,Glob,Grep,Bash,PowerShell";
 /// 按权限档位 (cli_value: default | acceptEdits | plan) 组装 `--allowedTools`。
 /// - plan (拒绝授权 / 只读): 仅联网工具, 不放行任何本地执行;
 /// - default / acceptEdits (手动 / 自动): 联网 + 本地读写执行, 成品能真正产出。
-fn allowed_tools_for(perm: &str) -> String {
-    if perm == "plan" {
+/// - with_task=true (动态编排): 额外放行 `Task` —— 否则 headless(stdin=null)下编排器
+///   想扇出子代理会卡在权限确认上, 多智能体并行就跑不起来。
+fn allowed_tools_for(perm: &str, with_task: bool) -> String {
+    let mut tools = if perm == "plan" {
         DEFAULT_WEB_TOOLS.to_string()
     } else {
         format!("{},{}", DEFAULT_WEB_TOOLS, LOCAL_WORK_TOOLS)
+    };
+    if with_task {
+        tools.push_str(",Task");
     }
+    tools
 }
 
 // ───────────────────────── Types ─────────────────────────
@@ -109,6 +115,10 @@ pub struct ChatSendArgs {
     /// 「请教毛主席」：注入毛选式客观分析指令，调用毛主席资料库，生成标注来源的 HTML。
     #[serde(default)]
     pub consult_mao: bool,
+    /// 「动态编排」：把本轮当成多智能体编排——编排器拆成 N 个独立子任务，
+    /// 用 Task 子代理并行扇出，每条流水线 实现→对抗式校验→修复，最后汇总。
+    #[serde(default)]
+    pub dynamic_workflow: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,6 +224,13 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         final_prompt.push_str("\n\n---\n\n");
     }
 
+    // 2.65 动态编排: 把本轮当成多智能体编排, 用 Task 子代理并行扇出, 每条流水线
+    //      实现 -> 对抗式校验 -> 修复, 最后汇总(详见 dynamic_workflow_directive)。
+    if args.dynamic_workflow {
+        final_prompt.push_str(&dynamic_workflow_directive());
+        final_prompt.push_str("\n\n---\n\n");
+    }
+
     // 2.7 生图能力检测: 用户想生成图片, 但供应商坞里全是文本/代码大模型, 没有一个能真生图。
     //     注入「当前供应商 + 能否真生图」的事实, 让 image-gen 技能据此决定:
     //     不支持 → 用中文说清楚, 并改用「很有图片质感的 HTML」兜底。
@@ -247,8 +264,8 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     let perm = args.permission_mode.cli_value();
     let conv_id_opt = args.conversation_id.clone();
 
-    // 默认走宿主机执行（沙箱可选，但默认关闭）
-    let mut child = spawn_on_host(&final_prompt, perm, &art_dir)?;
+    // 默认走宿主机执行（沙箱可选，但默认关闭）；动态编排时放行 Task 子代理
+    let mut child = spawn_on_host(&final_prompt, perm, &art_dir, args.dynamic_workflow)?;
 
     let stdout = child
         .stdout
@@ -581,7 +598,7 @@ fn emit_event(app: &AppHandle, ev: ChatStreamEvent) {
 fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
     let perm_flag = format!("--permission-mode={}", perm);
     // 联网 + (非只读档位)本地读写执行, 让成品能真正产出
-    let allowed = allowed_tools_for(perm);
+    let allowed = allowed_tools_for(perm, false);
     // 沙箱内 KB 永远挂在 /kb (sandbox_start 时挂载),
     // 这里让 claude 把 /kb 也加进可读目录,并以 /workspace 为 cwd
     let mut cmd = Command::new("docker");
@@ -613,7 +630,7 @@ fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
     Ok(child)
 }
 
-fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path) -> Result<Child, String> {
+fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path, with_task: bool) -> Result<Child, String> {
     let perm_flag = format!("--permission-mode={}", perm);
     // cwd = polaris-app 根 (env!("CARGO_MANIFEST_DIR") 的父级),
     // 这样 claude CLI 自动信任整棵 polaris-app/ 子树, 包括 PolarisKB/
@@ -644,7 +661,7 @@ fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path) -> Result<Child, Stri
     // 联网工具默认放行; 非「拒绝授权」档位再叠加本地读写执行 (Bash/PowerShell/文件),
     // 否则 headless 下连 `python xxx.py` 都被拒, .pptx/.xlsx 这类成品根本产不出来。
     args.push("--allowedTools".into());
-    args.push(allowed_tools_for(perm));
+    args.push(allowed_tools_for(perm, with_task));
     args.push(perm_flag);
     args.push(prompt.to_string());
 
@@ -661,6 +678,14 @@ fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path) -> Result<Child, Stri
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Windows: claude 跑 Bash 工具要靠 Git Bash。启动期 prime 通常已设好 CLAUDE_CODE_GIT_BASH_PATH,
+    // 但若 Git Bash 是 app 启动后才装的, 这里兜底显式喂给子进程 —— 免得 claude 扫不到 shell。
+    #[cfg(windows)]
+    if std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH").is_none() {
+        if let Some(bash) = crate::doctor::detect_git_bash() {
+            cmd.env("CLAUDE_CODE_GIT_BASH_PATH", bash);
+        }
+    }
     no_window(&mut cmd); // 隐藏式: 每次发消息不再弹出黑色终端窗口
     let child = cmd
         .spawn()
@@ -822,6 +847,42 @@ fn mao_consult_directive(art_dir: &Path) -> String {
 结尾可以用一句鼓励的话, 例如「为人民服务」「为建设共产主义事业而奋斗」。",
         dir = dir
     )
+}
+
+/// 「动态编排」指令: 把本轮当成多智能体编排(Dynamic Workflows)。
+/// 思路严格对齐参考设计——编排器拆出 N 个【相互独立】的子任务, 用 Claude Code 自带的
+/// `Task` 子代理【并行扇出】, 每条流水线 实现→对抗式校验→修复, 最后汇总成最终交付。
+/// 不另造编排框架, 直接借 Claude Code 现成的子代理机制(这正是该架构本身的形状)。
+fn dynamic_workflow_directive() -> String {
+    "## 动态编排模式 (Dynamic Workflows · 多智能体)\n\n\
+本轮开启**动态编排**。把你自己当作**编排器(orchestrator)**, 用 Claude Code 自带的 \
+`Task` 子代理把活儿**拆开并行干**, 而不是一条道自己从头做到尾。\n\n\
+**先判断该不该扇出(重要, 别浪费)**\n\
+- 只有**能拆成多块、且每块做完能被独立检查**的任务才扇出(批量改写 / 多维审查 / 多角度调研 / \
+逐条数据或文档处理 / 需要多方独立判断的决策)。\n\
+- 若是普通问答、强顺序依赖(后一步必须等前一步结论)、或拆不开的整体任务: **不要扇出**, \
+直接正常作答即可, 一句话说明「本任务无需并行编排」。\n\n\
+**编排流程(扇出时)**\n\
+1. **拆解**: 先把目标拆成若干**相互独立、边界不重叠**的子任务, 在对话里用一两句列出拆法(分配方案), \
+让用户看清活儿是怎么分的。\n\
+2. **扇出 + 限流**: 用 `Task` 工具并行派发子任务——**在同一条回复里一次发起多个 `Task` 调用**即可并发执行; \
+但**每批最多 6~8 个**, 跑完再放下一批, 别一口气开几十个把额度和速率打爆。\n\
+3. **每条流水线 = 实现 → 校验 → 修复**:\n\
+   - **实现(implementer)**: 子代理认真完成它那一块。\n\
+   - **对抗式校验(verifier, 精华所在)**: 再派一个**独立**子代理去检查, prompt 里写死「**默认这个结果有问题, 主动挑错、证伪**」; \
+   光说「你看看对不对」没用。高风险的可以派 2~3 个校验各自独立投票, 多数说有问题才打回。\n\
+   - **修复(fixer)**: 校验不通过就派子代理按校验意见改, 直到通过。\n\
+4. **结构化交接**: 阶段之间让子代理返回**结构化结论(JSON / 明确字段)**, 别靠自然语言瞎猜对方说了啥。\n\
+5. **流水线优先于齐步走(pipeline > barrier)**: 每条子任务自己跑完就继续往下, 不要等所有子任务都做完才一起进下一阶段, \
+否则快的白等慢的。\n\
+6. **文件隔离**: 若多个子任务会**改同一批文件**, 让它们各写各的、最后由你合并, 避免并行互相覆盖。\n\n\
+**汇总收尾**\n\
+- 所有子任务有结论后, **你(编排器)负责汇总**成一份连贯的最终交付, 别把一堆零散子结果直接甩给用户。\n\
+- 回答末尾简要交代**分配效果**: 拆了几块、各块谁干的、校验拦下并修了哪些问题。\n\n\
+**护栏**\n\
+- 多智能体多阶段比单轮**贵很多**(token 是几倍到几十倍), 子任务数量按需要来, 别为拆而拆。\n\
+- 子任务范围要聚焦, 边界讲清楚, 避免重叠返工。"
+        .to_string()
 }
 
 /// 标准 Base64 编码 (无外部依赖) — 给图片产物拼 data URL 用

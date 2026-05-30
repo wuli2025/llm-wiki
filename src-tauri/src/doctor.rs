@@ -720,8 +720,66 @@ pub fn prime_path_for_claude() {
     std::thread::spawn(prime_path_for_claude_inner);
 }
 
+/// macOS/Linux: 从 Finder/Dock 启动的 GUI 进程只继承极简 PATH (`/usr/bin:/bin:/usr/sbin:/sbin`),
+/// 拿不到用户 shell (`~/.zprofile`/`~/.profile` 里 —— 我们装 Node 时及 Homebrew 都写在这) 配的
+/// node/npm/claude 目录 → `which`/spawn 全落空。跑一次**登录 shell** 把真实 PATH 取回来。
+/// 用 `-lc`(登录、非交互): 读 `.zprofile`/`.profile`/`.bash_profile`, 不读 `.zshrc`, 既能拿到
+/// 我们写的 node 目录与 Homebrew, 又避开交互式 shell 无 tty 时可能的卡顿。
+#[cfg(not(windows))]
+fn login_shell_path() -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let mut cmd = Command::new(&shell);
+    cmd.args(["-lc", "printf %s \"$PATH\""]);
+    cmd.stdin(Stdio::null());
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if p.is_empty() {
+        None
+    } else {
+        Some(p)
+    }
+}
+
+/// 把登录 shell 的 PATH 里「进程 PATH 还没有的目录」并到进程 PATH 末尾 (系统目录仍优先,
+/// 仅补充用户目录, 不抢占)。让本进程之后 `which`/spawn 与终端里行为一致。
+#[cfg(not(windows))]
+fn merge_login_path_into_process(login_path: &str) {
+    use std::collections::HashSet;
+    let cur = std::env::var("PATH").unwrap_or_default();
+    let have: HashSet<String> = cur.split(':').map(|s| s.trim_end_matches('/').to_string()).collect();
+    let adds: Vec<&str> = login_path
+        .split(':')
+        .filter(|s| !s.is_empty() && !have.contains(&s.trim_end_matches('/').to_string()))
+        .collect();
+    if adds.is_empty() {
+        return;
+    }
+    let merged = if cur.is_empty() {
+        adds.join(":")
+    } else {
+        format!("{cur}:{}", adds.join(":"))
+    };
+    std::env::set_var("PATH", merged);
+}
+
 /// 预热的实际逻辑 (同步)。抽出来便于单测直接调用并断言, 公开入口只负责丢到后台线程。
 fn prime_path_for_claude_inner() {
+    // ⓪ macOS/Linux: 先并入登录 shell 的真实 PATH (Finder 启动只有极简 PATH), 再直接补上
+    // 本应用装 Node 的目录 —— 即便 shell 配置因故没生效, node/npm/claude 也都找得到。
+    #[cfg(not(windows))]
+    {
+        if let Some(lp) = login_shell_path() {
+            merge_login_path_into_process(&lp);
+        }
+        for dir in node_dir_candidates() {
+            if dir.exists() {
+                prepend_process_path(&dir.to_string_lossy());
+            }
+        }
+    }
     // ① claude 目录上进程 PATH
     if let Some(exe) = resolve_claude_exe() {
         if let Some(dir) = claude_dir_from_path(&exe) {

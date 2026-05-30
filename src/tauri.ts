@@ -107,6 +107,8 @@ export interface ChatSendArgs {
   goal?: string;
   /** 「请教毛主席」：注入毛选式客观分析指令，调用毛主席资料库，生成标注来源的 HTML。 */
   consultMao?: boolean;
+  /** 「动态编排」：多智能体编排——编排器拆 N 个独立子任务，Task 子代理并行扇出，每条流水线 实现→对抗式校验→修复，最后汇总。 */
+  dynamicWorkflow?: boolean;
 }
 
 export interface ChatStreamEvent {
