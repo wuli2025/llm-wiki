@@ -42,6 +42,8 @@ const busy = computed(() => busyKind.value !== "");
 
 // 本次会话只自动装一次 shell, 避免失败时每次复检都反复弹 UAC
 let autoPwshTried = false;
+// 想装 Claude 但缺 npm 时: 先自动装 Node.js, 装完链式继续装 Claude (一次点击装齐)
+let chainClaudeAfterNode = false;
 
 async function runCheck() {
   report.value = await envDoctor.check();
@@ -119,6 +121,7 @@ function onStream(ev: EnvStreamEvent) {
 }
 
 async function finishInstall(ok: boolean, message: string) {
+  const justFinished = busyKind.value; // 重置前先记住刚装完的是什么
   installReqId.value = null;
   busyKind.value = "";
   banner.value = { kind: ok ? "ok" : "err", text: message || (ok ? "完成。" : "未成功。") };
@@ -127,11 +130,29 @@ async function finishInstall(ok: boolean, message: string) {
   // 装好 / 更新完后重新检测版本, 让「更新」按钮翻成「已是最新」
   updateInfo.value = null;
   if (r.claude.found) checkClaudeUpdate();
-  // 刚装完 claude 但还缺 shell → 链式自动补上 PowerShell 7 (启动关)
+
+  // 链式①: 刚装完 Node.js 且本意是装 Claude → npm 就绪后自动继续装 Claude (一次点击装齐)
+  if (justFinished === "node" && chainClaudeAfterNode) {
+    chainClaudeAfterNode = false;
+    if (ok && r.npm.found && !r.claude.found) {
+      banner.value = { kind: "info", text: "Node.js 就绪，正在自动继续安装 Claude Code…" };
+      installClaude("npm");
+      return;
+    }
+  }
+
+  // 链式②: 刚装完 claude 但还缺 shell → 自动补上 PowerShell 7 (启动关, 仅 Windows)
   maybeAutoInstallShell(r);
 }
 
 async function installClaude(method: "native" | "npm") {
+  // npm 方式但缺 Node/npm → 先自动装 Node, 装完由 finishInstall 链式继续装 Claude。
+  // 这样用户一次点击即「Node.js + npm + Claude Code」一起装齐 (两端通用)。
+  if (method === "npm" && !npmReady.value) {
+    chainClaudeAfterNode = true;
+    await installNode();
+    return;
+  }
   banner.value = null;
   logs.value = [];
   busyKind.value = method === "npm" ? "claude-npm" : "claude";
@@ -316,15 +337,22 @@ const npmReady = computed(() => !!report.value?.npm.found);
                 >
                   {{ busyKind === "claude-npm" ? "安装中…" : "一键安装" }}
                 </button>
-                <!-- 无 npm: 先引导装 Node.js (Windows winget/MSI, macOS 走 npmmirror tar.gz) -->
+                <!-- 无 npm: 一次点击「Node.js + npm + Claude Code」一起装齐 —— 先自动装
+                     Node (Windows winget/MSI, macOS 走 npmmirror tar.gz), 装完链式继续装 Claude -->
                 <button
                   v-else
                   class="btn primary"
                   :disabled="busy"
-                  title="npm 安装方式需要 Node.js，先装 Node 再装 Claude Code"
-                  @click="installNode"
+                  title="缺 Node.js：自动先装 Node/npm，再继续用 npm(国内镜像)装 Claude Code"
+                  @click="installClaude('npm')"
                 >
-                  {{ busyKind === "node" ? "安装中…" : "先装 Node.js" }}
+                  {{
+                    busyKind === "node"
+                      ? "装 Node.js 中…"
+                      : busyKind === "claude-npm"
+                        ? "装 Claude 中…"
+                        : "一键安装（含 Node.js）"
+                  }}
                 </button>
               </template>
               <!-- 已装 Claude Code: 检查 / 一键更新 (走国内镜像) -->
