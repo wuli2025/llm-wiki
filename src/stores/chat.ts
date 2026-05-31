@@ -50,6 +50,9 @@ export const useChatStore = defineStore("chatRuntime", () => {
   const reqByConv = ref<Record<string, string>>({});
   const sendingByConv = ref<Record<string, boolean>>({});
   const loadedByConv = ref<Record<string, boolean>>({});
+  // 本地「最近活跃时间」：发送/结束时打点。后端 updatedAt 在会话内不变，
+  // 用它让刚交互过的对话在侧栏冒泡到最上（仿 Codex 最近对话置顶）。
+  const activeAtByConv = ref<Record<string, number>>({});
   let started = false;
 
   function bubblesFor(convId: string | null): Bubble[] {
@@ -58,6 +61,14 @@ export const useChatStore = defineStore("chatRuntime", () => {
   }
   function isSending(convId: string | null): boolean {
     return !!(convId && sendingByConv.value[convId]);
+  }
+  function activityAt(convId: string | null): number {
+    if (!convId) return 0;
+    return activeAtByConv.value[convId] ?? 0;
+  }
+  function touchActivity(convId: string) {
+    if (!convId) return;
+    activeAtByConv.value[convId] = Date.now();
   }
   function ensureArr(convId: string): Bubble[] {
     if (!byConv.value[convId]) byConv.value[convId] = [];
@@ -109,6 +120,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
       files: files && files.length ? files : undefined,
     });
     sendingByConv.value[convId] = true;
+    touchActivity(convId);
     sessions.start(convId, displayText.slice(0, 18));
     try {
       const reqId = await chatApi.send({
@@ -141,6 +153,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
     }
     sendingByConv.value[convId] = false;
     delete reqByConv.value[convId];
+    touchActivity(convId);
     sessions.finish(convId);
   }
 
@@ -186,6 +199,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
         // 终态：结束运行态 + 工位会话；若用户不在看该对话则打墨蓝未读点
         sendingByConv.value[cid] = false;
         delete reqByConv.value[cid];
+        touchActivity(cid);
         const app = useAppStore();
         const sessions = useSessionsStore();
         sessions.finish(cid);
@@ -198,6 +212,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
     byConv,
     bubblesFor,
     isSending,
+    activityAt,
     pushBubble,
     loadHistory,
     send,

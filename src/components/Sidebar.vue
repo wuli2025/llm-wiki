@@ -20,10 +20,12 @@ import {
   Archive,
 } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
+import { useChatStore } from "../stores/chat";
 import ProviderDock from "./ProviderDock.vue";
 import type { Conversation } from "../tauri";
 
 const app = useAppStore();
+const chat = useChatStore();
 
 type NavItem = { key: typeof app.view; label: string; icon: any };
 // 常驻主项（仿豆包：顶层精简）。统一用 lucide 线性图标，去掉杂乱的 Unicode 字符，求一致的高级线条感。
@@ -116,19 +118,27 @@ const DAY_MS = 86_400_000;
 function toMs(t: number): number {
   return t < 1e12 ? t * 1000 : t;
 }
-// 该时间戳属于「今天起算的第几天前」（0=今天, 1=昨天, ...）
-function daysAgo(t: number): number {
+// 有效活跃时间(ms)：取后端 updatedAt 与本地「最近交互」打点的较大值。
+// 这样刚发送/正在运行的对话会冒泡到最上，并落入「今天」分组（仿 Codex）。
+function effMs(c: Conversation): number {
+  return Math.max(toMs(c.updatedAt), chat.activityAt(c.id));
+}
+// 该时间(ms)属于「今天起算的第几天前」（0=今天, 1=昨天, ...）
+function daysAgoMs(ms: number): number {
   const now = new Date();
   const startToday = new Date(
     now.getFullYear(),
     now.getMonth(),
     now.getDate()
   ).getTime();
-  return Math.floor((startToday - toMs(t)) / DAY_MS);
+  return Math.floor((startToday - ms) / DAY_MS);
 }
 function convGroups(projectId: string): ConvGroup[] {
   const list = app.conversationsByProject[projectId] || [];
-  const byTimeDesc = (a: Conversation, b: Conversation) => b.updatedAt - a.updatedAt;
+  // 排序键：运行中的对话恒置最前，其余按有效活跃时间倒序（最新在上）。
+  const sortKey = (c: Conversation) =>
+    (chat.isSending(c.id) ? 1e15 : 0) + effMs(c);
+  const byTimeDesc = (a: Conversation, b: Conversation) => sortKey(b) - sortKey(a);
   const pinned = list.filter((c) => app.isPinned(c.id)).sort(byTimeDesc);
   const rest = list.filter((c) => !app.isPinned(c.id)).sort(byTimeDesc);
 
@@ -137,7 +147,8 @@ function convGroups(projectId: string): ConvGroup[] {
   const week: Conversation[] = [];
   const older: Conversation[] = [];
   for (const c of rest) {
-    const d = daysAgo(c.updatedAt);
+    // 运行中的对话强制归入「今天」，避免历史对话跑起来还留在「更早」
+    const d = chat.isSending(c.id) ? 0 : daysAgoMs(effMs(c));
     if (d <= 0) today.push(c);
     else if (d === 1) yest.push(c);
     else if (d <= 7) week.push(c);
@@ -316,7 +327,14 @@ function convGroups(projectId: string): ConvGroup[] {
                 class="cv-pin"
               />
               <span class="cv-name" :title="c.title">{{ c.title }}</span>
+              <!-- 运行中：转圈圈（仿 Codex）；空闲时该位置 hover 显示删除按钮 -->
+              <span
+                v-if="chat.isSending(c.id)"
+                class="cv-spin"
+                title="正在运行…"
+              ></span>
               <button
+                v-else
                 class="ca delete"
                 title="删除对话"
                 @click.stop="confirmDelete(c)"
@@ -722,6 +740,21 @@ function convGroups(projectId: string): ConvGroup[] {
   flex-shrink: 0;
   color: var(--gold);
   transform: rotate(35deg);
+}
+/* 运行中转圈圈：细灰环 + 一段墨色弧旋转（仿 Codex 进度指示） */
+.cv-spin {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--ink);
+  animation: cvSpin 0.7s linear infinite;
+}
+@keyframes cvSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .cv-name {
   flex: 1;
