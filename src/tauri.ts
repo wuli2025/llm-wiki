@@ -52,6 +52,16 @@ export interface KbGraph {
   nodes: KbNode[];
   edges: KbEdge[];
 }
+/** 「构建知识网」编译进度事件 (kb:compile) */
+export interface KbCompileEvent {
+  runId: string;
+  /** phase | tool | page | delta | done | error */
+  kind: string;
+  text?: string;
+  /** 仅 done: 编译后重扫的文档总数 */
+  docCount?: number;
+}
+
 /** 知识库拖拽上传的逐文件结果 */
 export interface KbUploadResult {
   name: string;
@@ -62,6 +72,8 @@ export interface KbUploadResult {
 
 export const kb = {
   scan: () => invoke<number>("kb_scan"),
+  /** 构建知识网：跑一个有写权限的 wiki 维护者 agent，摄入即编译。返回 runId，进度走 kb:compile 事件 */
+  compile: () => invoke<string>("kb_compile"),
   search: (q: string, topK = 8) =>
     invoke<KbHit[]>("kb_search", { query: q, topK }),
   list: (subdir: string | null = null) =>
@@ -496,6 +508,8 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
   switch (cmd) {
     case "kb_scan":
       return 0;
+    case "kb_compile":
+      return "kbc-stub";
     case "kb_search":
       return [];
     case "kb_list":

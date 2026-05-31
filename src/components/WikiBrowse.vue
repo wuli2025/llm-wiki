@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, onUnmounted, computed } from "vue";
 import { marked } from "marked";
 import { Upload, LoaderCircle, CheckCircle2, XCircle, X, Trash2 } from "@lucide/vue";
 import {
   kb,
+  listen,
   type KbHit,
+  type KbCompileEvent,
   artifacts as artifactsApi,
   type ArtifactSearchHit,
 } from "../tauri";
@@ -30,9 +32,20 @@ const scanned = ref<number | null>(null);
 const ingestPath = ref("");
 const ingestMsg = ref("");
 
+// ── 构建知识网 (摄入即编译) ──
+const compiling = ref(false);
+const compileLog = ref<string[]>([]);
+const compileMsg = ref("");
+let compileRunId = "";
+let unlistenCompile: (() => void) | null = null;
+
 onMounted(async () => {
   rootPath.value = await kb.root();
   await refreshList();
+});
+
+onUnmounted(() => {
+  if (unlistenCompile) unlistenCompile();
 });
 
 async function refreshList() {
@@ -55,6 +68,44 @@ async function openFile(p: string) {
 async function doScan() {
   scanned.value = await kb.scan();
   await refreshList();
+}
+
+// 构建知识网: 跑 wiki 维护者 agent (摄入即编译), 进度走 kb:compile 事件
+async function doCompile() {
+  if (compiling.value) return;
+  compiling.value = true;
+  compileMsg.value = "";
+  compileLog.value = [];
+  if (!unlistenCompile) {
+    unlistenCompile = await listen<KbCompileEvent>("kb:compile", (ev) => {
+      if (ev.runId !== compileRunId) return;
+      const t = ev.text ?? "";
+      if (ev.kind === "done") {
+        compiling.value = false;
+        compileMsg.value = t || "完成";
+        if (typeof ev.docCount === "number") scanned.value = ev.docCount;
+        refreshList();
+        return;
+      }
+      const icon =
+        ev.kind === "error"
+          ? "⚠ "
+          : ev.kind === "page"
+            ? "📄 "
+            : ev.kind === "phase"
+              ? "▸ "
+              : "· ";
+      compileLog.value.push(icon + t);
+      if (compileLog.value.length > 200)
+        compileLog.value.splice(0, compileLog.value.length - 200);
+    });
+  }
+  try {
+    compileRunId = await kb.compile();
+  } catch (e: any) {
+    compiling.value = false;
+    compileMsg.value = "启动失败:" + (e?.message ?? e);
+  }
 }
 
 async function doSearch() {
@@ -324,10 +375,34 @@ const { isOver: dropOver } = useFileDrop({
         </div>
         <div v-if="ingestMsg" class="ingest-msg">{{ ingestMsg }}</div>
       </div>
-      <div class="card">
-        <div class="card-title">索引重建</div>
+      <div class="card accent-card">
+        <div class="card-title">构建知识网 · 摄入即编译</div>
         <div class="card-body">
-          扫描 KB 根下所有 .md 文件,构建内存索引(MVP 不持久化,启动后自动扫描)
+          让 wiki 维护者读 <code>raw/</code> 原始资料,抽取实体与思想脉络,在
+          <code>wiki/</code> 写概念页并用 <code>[[双链]]</code> 互联 —— 把散落的资料
+          <strong>编译成一张有关系的知识网</strong>。原始资料只读不改。耗时分钟级。
+        </div>
+        <button class="primary-btn" :disabled="compiling" @click="doCompile">
+          <LoaderCircle
+            v-if="compiling"
+            :size="14"
+            :stroke-width="1.8"
+            class="spin"
+          />
+          <span>{{ compiling ? "正在构建知识网…" : "构建知识网" }}</span>
+        </button>
+        <span v-if="compileMsg" class="muted clear-msg">{{ compileMsg }}</span>
+        <div v-if="compileLog.length" class="compile-log">
+          <div v-for="(l, i) in compileLog" :key="i" class="compile-line">
+            {{ l }}
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">快速重扫 · 索引重建</div>
+        <div class="card-body">
+          只重扫 KB 根下所有 .md、刷新内存索引与图谱(秒级,不改文件、不生成知识)。
+          手动改完文件后用它刷新。
         </div>
         <button class="primary-btn" @click="doScan">立即扫描</button>
       </div>
@@ -620,6 +695,33 @@ const { isOver: dropOver } = useFileDrop({
 }
 .clear-msg {
   margin-top: 8px;
+}
+.accent-card {
+  border-left: 3px solid var(--accent, #b5462f);
+}
+.primary-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.primary-btn .spin {
+  margin-right: 6px;
+  vertical-align: -2px;
+}
+.compile-log {
+  margin-top: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  background: var(--code-bg, rgba(0, 0, 0, 0.04));
+  border-radius: 6px;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.compile-line {
+  color: var(--text-2, #4a4f57);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .placeholder {

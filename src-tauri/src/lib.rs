@@ -54,6 +54,7 @@ pub fn run() {
             kb::kb_default_root,
             kb::kb_set_root,
             kb::kb_scan,
+            kb::kb_compile,
             kb::kb_list,
             kb::kb_read,
             kb::kb_delete,

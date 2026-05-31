@@ -203,6 +203,10 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         final_prompt.push_str("\n---\n\n");
     }
 
+    // 1.5 回答风格约定 (Codex 式扁平) — 框定所有对话回复: 扁平/结构化/砍废话
+    final_prompt.push_str(&reply_style_directive());
+    final_prompt.push_str("\n\n---\n\n");
+
     // 2. 输出文件约定 (Polaris) — 让成品文件落到产物目录, 侧边栏即可预览
     final_prompt.push_str(&output_convention(&art_dir));
     final_prompt.push_str("\n\n---\n\n");
@@ -736,6 +740,20 @@ fn dir_snapshot(dir: &Path) -> HashMap<PathBuf, SystemTime> {
         }
     }
     m
+}
+
+/// 注入给 claude 的「回答风格约定」—— Codex 式扁平回答, 砍废话, 只留信号。
+/// 框定所有对话回复(普通问答 / 分析 / 计划), 不影响成品文件本身的丰富度。
+fn reply_style_directive() -> String {
+    "## 回答风格约定 (Polaris · Codex 式扁平)\n\n\
+你的对话回复必须扁平、结构化、切中要点 —— 学卡帕西/「山顶洞人」式只留信号:\n\n\
+1. **先给结论**。第一句就是答案或要做的事, 不要开场白、铺垫、寒暄。\n\
+2. **砍掉废话**。不写「让我来…」「总的来说…」「希望这能帮到你」这类过渡和总结句。\n\
+3. **能结构化就结构化**。用短列表、表格、代码块承载信息; 避免大段散文。\n\
+4. **短**。同样的信息用更少的字; 不重复用户的问题, 不解释你将要做什么。\n\
+5. **诚实**。不确定就说不确定, 别用热情的措辞掩盖。\n\n\
+例外: 用户明确要求详细展开、或需要分步教学时, 可适度展开 —— 但仍然先给结论、保持结构化。"
+        .to_string()
 }
 
 /// 注入给 claude 的「输出文件约定」, 引导成品落到产物目录
