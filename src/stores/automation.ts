@@ -70,6 +70,8 @@ export interface FlowDraft {
 
 const STORAGE_KEY = "polaris:automation-flows:v1";
 const SEED_KEY = "polaris:automation-flows-seeded:v1";
+// v2 增补「网页演示视频成片 / Harness 工程实践」两条（源自 ConardLi 教程）：对老用户也补一次，删除后不回种
+const SEED_V2_KEY = "polaris:automation-flows-seeded:v2";
 
 export const FLOW_COLORS = [
   "#2c4661", // 墨蓝
@@ -125,6 +127,70 @@ const bilibiliPrompt = `你是一名严谨的知识库维护者，本流程的�
    - **已覆盖**：知识库已有的点（避免重复）。
 3. **补全知识库**：对「可补全」的点，按知识库既有的条目格式与双链风格，新增/更新相应 Markdown 条目（放回知识库对应位置，建立双链），每条注明来源与补充日期；不要把「需存疑」的内容写进库。
 4. **小结**：列出本次新增/更新了哪些条目、跳过了哪些及原因，便于人工复核。${DRAFT_CONVENTION}`;
+
+// ── v2：源自 ConardLi 教程的两条流程 ──
+const videoPrompt = `你要把一段文稿做成「可录屏成片」的网页演示稿（不发布、不录屏，只产出可被我拿去录屏的成品文件）。这就是「视频效果怎么做的」那套：把稿子做成 16:9、点击逐页推进、像视频一样的网页演示。
+
+【本片内容/主题】__________（在这里贴文稿或写一句话主题）
+
+请按以下步骤完成：
+1. **脚本与大纲（一次产出 + 自检）**：产出 script.md（逐章口播稿，每章一个核心信息、口语可念、单页信息量克制）与 outline.md（章节切分、每章视觉意图、动画/图示点、素材清单）。自检：每页是否只讲一件事、开场 5 秒有无钩子、有无大段文字堆一屏；不达标先改稿。
+2. **取材与风格对齐**：阅读本项目知识库（PolarisKB，沿双链用 Read/Glob/Grep 自取）让选材与措辞贴合既有风格，必要时联网补最新信息并标来源。
+3. **做成自包含网页演示**：产出一份**单文件、可直接双击预览的 HTML**：固定 1920×1080 舞台、16:9，点击/方向键逐页推进（带页码与进度）；一页一个核心信息、文字少而大、留白充足、配色统一、动画为信息服务而非炫技。第 1 页定调（视觉锚点），其余页风格与之一致。做一次反「AI 廉价感」自检并据此打磨。
+4. **小结**：说明产出了哪些文件（script.md / outline.md / 演示.html），以及**我接下来需要做什么**——即用屏幕录制软件按 16:9 全屏录制点击翻页过程（如需旁白可后期配音，或先配 MiniMax key 再做配音版）。${DRAFT_CONVENTION}`;
+
+const harnessPrompt = `本流程目标：把「Claude Code 作为生产力 harness 的工程实践」调研清楚并沉淀成可用手册（参考 ConardLi 教程与下列资源），既补进本项目知识库，也产出一份草稿供我查阅。
+
+【关注角度】__________（可留空＝通用；或填你最想强化的一项：技能化/供应商切换/配音/编排）
+
+参考资源（请联网核实其当前用法与最新信息，并标注来源与时间）：
+- Claude Code 文档 https://code.claude.com/docs/zh-CN/overview
+- garden-skills（可复用 skill 合集）https://github.com/ConardLi/garden-skills
+- MiniMax CLI https://github.com/MiniMax-AI/cli
+- CC Switch（一键切 Claude Code 供应商配置）https://github.com/farion1231/cc-switch
+
+请按以下步骤完成：
+1. **调研（联网）**：围绕「harness = 把模型包成可靠生产力的工程层（提示词/技能、工具与权限、供应商与模型选择、编排与上下文）」，结合上面资源整理出当前的具体工程实践要点，每条标来源与时间。
+2. **对照本知识库找缺口**：通读 PolarisKB 相关条目（沿双链用 Read/Glob/Grep），产出三类结论：可补全 / 需存疑 / 已覆盖。
+3. **沉淀成手册并补库**：把「可补全」的要点按知识库既有条目格式与双链风格写成一份「Claude Code Harness 工程实践」手册条目（含：技能化沉淀、按任务切换供应商[CC Switch/供应商坞]、MiniMax CLI 接入、子代理编排与复盘四块，每块给可执行动作），放回知识库对应位置并建立双链，注明来源与日期；「需存疑」的不写入。
+4. **小结**：列出新增/更新了哪些条目、跳过了哪些及原因，便于人工复核。${DRAFT_CONVENTION}`;
+
+function seedFlowsV2(): AutomationFlow[] {
+  const now = Date.now();
+  const base = {
+    projectId: null,
+    execEnv: "local" as ExecEnv,
+    deepResearch: true,
+    loopCount: 1,
+    builtin: true,
+    createdAt: now,
+    updatedAt: now,
+  };
+  return [
+    {
+      ...base,
+      id: uid(),
+      name: "网页演示视频 · 生成可录屏稿（草稿）",
+      icon: "clapperboard",
+      color: FLOW_COLORS[4],
+      description:
+        "贴文稿 → 产脚本与大纲 → 仿风格 → 做成 16:9 可点击翻页的自包含 HTML 演示 → 存草稿箱待你录屏",
+      prompt: videoPrompt,
+      schedule: { kind: "manual" },
+    },
+    {
+      ...base,
+      id: uid(),
+      name: "Harness 工程实践 · 调研补全知识库",
+      icon: "cpu",
+      color: FLOW_COLORS[0],
+      description:
+        "联网调研 Claude Code harness 实践(技能化/供应商切换/MiniMax/编排) → 对照知识库找缺口 → 写成手册条目补库",
+      prompt: harnessPrompt,
+      schedule: { kind: "manual" },
+    },
+  ];
+}
 
 function seedFlows(): AutomationFlow[] {
   const now = Date.now();
@@ -194,6 +260,12 @@ export const useAutomationStore = defineStore("automation", () => {
     if (flows.value.length === 0 && !localStorage.getItem(SEED_KEY)) {
       flows.value = seedFlows();
       localStorage.setItem(SEED_KEY, "1");
+      persist();
+    }
+    // v2 增补「网页演示视频 / Harness 工程实践」两条：对老用户也补一次，删除后不回种
+    if (!localStorage.getItem(SEED_V2_KEY)) {
+      flows.value = [...seedFlowsV2(), ...flows.value];
+      localStorage.setItem(SEED_V2_KEY, "1");
       persist();
     }
   }

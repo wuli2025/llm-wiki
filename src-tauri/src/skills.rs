@@ -104,6 +104,23 @@ fn catalog() -> Vec<CatalogSkill> {
             preinstalled: false,
             system_prompt: include_str!("templates/skills/image-gen.md"),
         },
+        // ── 源自 ConardLi 教程的两套向导 ──
+        CatalogSkill {
+            id: "web-video-presentation-guide",
+            name: "网页演示视频制作向导",
+            description: "把文稿做成 16:9 可点击翻页的网页演示再录屏成片：逐检查点告诉你此刻该做什么，并引导引入 ConardLi 的 web-video-presentation 原 skill",
+            source: "third-party",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/web-video-presentation-guide.md"),
+        },
+        CatalogSkill {
+            id: "harness-practices",
+            name: "Harness 工程实践向导",
+            description: "把 Claude Code 调教成生产力 harness：盘点瓶颈 → 技能化/供应商切换(CC Switch)/MiniMax CLI/子代理编排，逐步告诉你现在该做什么",
+            source: "third-party",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/harness-practices.md"),
+        },
         // ── 默认浏览器插件（预装、默认开启，可随时移除） ──
         CatalogSkill {
             id: "cloak-browser",

@@ -10,6 +10,8 @@ import {
   BookMarked,
   Tv,
   Sparkles,
+  Clapperboard,
+  Cpu,
   Folder,
   Telescope,
   Repeat,
@@ -35,6 +37,8 @@ const ICONS: Record<string, any> = {
   "book-marked": BookMarked,
   tv: Tv,
   sparkles: Sparkles,
+  clapperboard: Clapperboard,
+  cpu: Cpu,
 };
 function iconOf(f: AutomationFlow) {
   return ICONS[f.icon] || Sparkles;

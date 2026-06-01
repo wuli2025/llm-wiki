@@ -38,6 +38,8 @@ const STORAGE_KEY = "polaris:workflow-packs:v1";
 const SEED_KEY = "polaris:workflow-packs-seeded:v1";
 // v2 增补的「写作 / 技术选型三件套」：对老用户也补一次，删除后不回种
 const SEED_V2_KEY = "polaris:workflow-packs-seeded:v2";
+// v3 增补「网页演示视频成片 / Claude Code Harness 工程实践」两套（源自 ConardLi 教程）
+const SEED_V3_KEY = "polaris:workflow-packs-seeded:v3";
 
 /** 墨蓝水墨主题取色 —— 每个包一抹强调色 */
 export const PACK_COLORS = [
@@ -239,6 +241,103 @@ function seedPacksV2(): WorkflowPack[] {
   ];
 }
 
+/**
+ * v3 增补：两套源自 ConardLi 教程的「全流程」工作流包。
+ * ① 网页演示视频成片：文稿 → 16:9 网页演示 → 点击翻页 →（可选 MiniMax 配音）→ 录屏成片，
+ *    这就是「视频效果到底怎么做的」那一半 —— 用 web-video-presentation 思路把稿子做成可录屏的网页。
+ * ② Claude Code Harness 工程实践：把 Claude Code 当成生产力 harness 来调教 ——
+ *    技能化沉淀、CC Switch / 供应商坞按任务切模型控成本、MiniMax CLI 接入、子代理编排与复盘。
+ * 相关资源：garden-skills(https://github.com/ConardLi/garden-skills)、
+ *           Claude Code 文档、MiniMax CLI、CC Switch。
+ */
+function seedPacksV3(): WorkflowPack[] {
+  const now = Date.now();
+  return [
+    {
+      id: uid(),
+      name: "网页演示视频 · 文稿到成片",
+      description:
+        "把文稿/文章做成 16:9 可点击翻页的网页演示，逐章打磨视觉，再录屏成「视频感」成片（可选配音）",
+      color: PACK_COLORS[4],
+      createdAt: now,
+      updatedAt: now,
+      steps: [
+        newStep(
+          "角色",
+          "你既是视频脚本作者，也是讲究审美的前端工程师。目标：把一段文稿/文章变成一套 16:9（1920×1080 固定舞台）、点击逐页推进、像视频一样的网页演示，最终用屏幕录制导出成片。参考 ConardLi 的 web-video-presentation 思路：内容先行、逐章打磨、反 AI 廉价感。"
+        ),
+        newStep(
+          "输入素材",
+          "本片要讲的内容：「__________」（贴上你的文稿/文章，或一句话主题）。\n先确认形态：是产品演示 / 技术分享 / 课程讲解 / 观点输出？目标时长几分钟？给谁看？\n如素材只是主题，请先补一版口播脚本再继续。"
+        ),
+        newStep(
+          "脚本与大纲（一次产出 + 自检）",
+          "一次性产出两份：\n· script.md —— 逐章口播稿（每章一个核心信息，口语、能直接念，控制单页信息量）。\n· outline.md —— 开发大纲（章节切分、每章视觉意图、动画/图示点、需要的素材清单）。\n产出后对照自检：每页是否只讲一件事？开场 5 秒有没有钩子？有没有大段文字堆在一屏？不达标先改稿，别急着写代码。"
+        ),
+        newStep(
+          "5 项对齐（硬检查点，别跳过）",
+          "在动手写代码前，和我逐项确认这 5 件事并定稿：\n1) 脚本 script.md 是否 OK；\n2) 大纲 outline.md 是否 OK；\n3) 主题/视觉风格（配色、字体、参考的设计调性）；\n4) 素材（要用到的图片/logo/数据/截图，从哪来）；\n5) 开发模式：A 逐章给我验收 / B 一口气做完统一审 / C 多子代理并行开发。\n这一步没对齐就不要往下做。"
+        ),
+        newStep(
+          "搭骨架 + 先做完第 1 章",
+          "用 Vite + React + TypeScript 搭一个固定 1920×1080 舞台、用一个 stepper（带持久化的翻页状态）控制点击推进的演示工程。\n先只把第 1 章做「完整、好看、定调」：它就是后面所有章节的视觉锚点和风格基准。做完让我先验收第 1 章的视觉、节奏、信息密度，通过了再继续。"
+        ),
+        newStep(
+          "逐章开发（按选定模式）",
+          "按对齐时选的模式开发第 2~N 章。每章遵守：一页一个核心信息、留白充足、动画为信息服务（不是炫技）、文字少而大（投影/录屏都看得清）、配色与第 1 章一致。\n每做完一章做一次反「AI 廉价感」自检：是否像随手生成的模板？是否有真实层次与细节？不像成片就重做该章。"
+        ),
+        newStep(
+          "配音（可选，MiniMax CLI）",
+          "若要带旁白：从各章抽出口播文本，逐段用 TTS 合成音频（首选 MiniMax CLI，其次 OpenAI/edge-tts）。\n配音模式下页面可支持自动播放（按音频时长自动翻页）；不配音就走手动点击、后期再配音轨。\n注意：MiniMax 需要 API key，没有就先跳过配音、只做手动翻页版。"
+        ),
+        newStep(
+          "录屏成片 + 自检",
+          "用屏幕录制软件按 16:9 全屏录制：自动模式让它自己播完，手动模式跟着脚本节奏点击翻页。\n成片自检：分辨率/比例对不对？有没有卡顿或错帧？节奏跟口播搭不搭？字幕/旁白齐不齐？\n最后说明产出了哪些文件（演示工程目录、脚本、录屏），以及还需我做什么（如手动录屏、配 key）。"
+        ),
+      ],
+    },
+    {
+      id: uid(),
+      name: "Claude Code Harness · 工程实践",
+      description:
+        "把 Claude Code 当生产力 harness 调教：技能化沉淀 + 供应商按任务切换(CC Switch) + MiniMax CLI 接入 + 子代理编排与复盘",
+      color: PACK_COLORS[5],
+      createdAt: now,
+      updatedAt: now,
+      steps: [
+        newStep(
+          "角色",
+          "你是「Agent Harness 工程师」。harness = 把模型包成可靠生产力的那层工程：提示词/技能、工具与权限、供应商与模型选择、编排与上下文管理。目标是帮我把 Claude Code 从「能聊」调教成「能稳定交付」。实事求是，给可执行的具体动作，不堆方法论。"
+        ),
+        newStep(
+          "现状盘点",
+          "先盘清我现在的用法：\n· 常做哪些重复任务（写稿/查资料/做演示/写代码…）？\n· 现在靠手敲提示词还是已有沉淀？\n· 用哪个供应商/模型、有没有成本压力？\n· 有没有用到技能(skill)、工作流、子代理？\n据此判断 harness 的最大瓶颈在哪（提示词没沉淀 / 模型选得不对 / 缺工具 / 没编排）。"
+        ),
+        newStep(
+          "技能化沉淀（skill）",
+          "把高频、可复用的提示词沉淀成 skill（一段可被注入的系统提示词 + 配套参考），而不是每次重敲。\n参考 ConardLi 的 garden-skills（https://github.com/ConardLi/garden-skills）：web-video-presentation（做演示视频）、web-design-engineer（前端审美）、gpt-image-2（生图）、kb-retriever（本地知识库检索）。\n给我列出：哪些任务值得做成 skill、每个 skill 的边界与触发场景、先做哪一个。"
+        ),
+        newStep(
+          "供应商按任务切换（CC Switch / 供应商坞）",
+          "harness 的关键一招是「按任务选模型」：贵任务用强模型、量大/省钱任务切便宜模型或国产供应商。\n工具：CC Switch（https://github.com/farion1231/cc-switch）一键切 Claude Code 的供应商配置；本 App 的「供应商坞」同理（切换写 ~/.claude/settings.json 的 env）。\n给我一套切换策略：哪类任务用哪个供应商/模型、怎么快速切、怎么避免切错环境。"
+        ),
+        newStep(
+          "MiniMax CLI 接入",
+          "MiniMax CLI（https://github.com/MiniMax-AI/cli）：可作为低成本推理通道，也常用于语音合成（给演示视频配音）。\n给我接入步骤：装什么、配哪个 key（认 api.minimaxi.com）、怎么在配音/批量任务里调用，以及和主供应商怎么分工。"
+        ),
+        newStep(
+          "编排与子代理",
+          "对复杂任务用编排而非一段长提示词：拆成子任务、用子代理并行扇出、每条流水线「实现→对抗式校验→修复→汇总」。\n参考 Claude Code 文档（https://code.claude.com/docs/zh-CN/overview）的 subagent / 工具用法。\n针对我盘点出的一个真实复杂任务，给一份具体的编排方案（拆几步、谁验谁、怎么收口）。"
+        ),
+        newStep(
+          "沉淀与复盘",
+          "把这次定下的东西落地成可复用资产：哪些进 skill、哪些进工作流包、哪些进自动化流、供应商切换策略记到哪。\n给我一份「harness 升级清单」：已做 / 待做 / 优先级，以及一个一句话复盘——这次最大的提效点是什么。"
+        ),
+      ],
+    },
+  ];
+}
+
 export const useWorkflowsStore = defineStore("workflows", () => {
   const packs = ref<WorkflowPack[]>([]);
 
@@ -267,6 +366,12 @@ export const useWorkflowsStore = defineStore("workflows", () => {
     if (!localStorage.getItem(SEED_V2_KEY)) {
       packs.value = [...seedPacksV2(), ...packs.value];
       localStorage.setItem(SEED_V2_KEY, "1");
+      persist();
+    }
+    // v3 增补「网页演示视频 / Harness 工程实践」两套：对老用户也补一次，删除后不回种
+    if (!localStorage.getItem(SEED_V3_KEY)) {
+      packs.value = [...seedPacksV3(), ...packs.value];
+      localStorage.setItem(SEED_V3_KEY, "1");
       persist();
     }
   }

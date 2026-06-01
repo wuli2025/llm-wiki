@@ -1,21 +1,22 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from "vue";
+import { ref, onMounted, computed, watch } from "vue";
+import { storeToRefs } from "pinia";
 import { marked } from "marked";
 import { Upload, LoaderCircle, CheckCircle2, XCircle, X, Trash2 } from "@lucide/vue";
 import {
   kb,
-  listen,
   type KbHit,
-  type KbCompileEvent,
   artifacts as artifactsApi,
   type ArtifactSearchHit,
 } from "../tauri";
 import { useAppStore } from "../stores/app";
 import { useArtifactsStore } from "../stores/artifacts";
+import { useKbStore } from "../stores/kb";
 import { useFileDrop } from "../composables/useFileDrop";
 
 const app = useAppStore();
 const artifactsStore = useArtifactsStore();
+const kbStore = useKbStore();
 
 type Tab = "overview" | "browse" | "manage";
 const tab = ref<Tab>("browse");
@@ -33,19 +34,23 @@ const ingestPath = ref("");
 const ingestMsg = ref("");
 
 // ── 构建知识网 (摄入即编译) ──
-const compiling = ref(false);
-const compileLog = ref<string[]>([]);
-const compileMsg = ref("");
-let compileRunId = "";
-let unlistenCompile: (() => void) | null = null;
+// 进度/正在跑/日志全部落在全局 kbStore: 离开 wiki 视图(组件卸载)后台照常累积,
+// 切回来即见进度,不会因组件销毁而清零或"看起来停了"。
+const { compiling, compileLog, compileMsg, lastDocCount, doneTick } =
+  storeToRefs(kbStore);
 
 onMounted(async () => {
   rootPath.value = await kb.root();
+  // 若离开期间已有正在运行/完成的编译,重挂时确保监听在位并同步计数
+  await kbStore.ensureListener();
+  if (lastDocCount.value != null) scanned.value = lastDocCount.value;
   await refreshList();
 });
 
-onUnmounted(() => {
-  if (unlistenCompile) unlistenCompile();
+// 编译完成(后台也可能在别的视图触发)→ 刷新文件列表与计数
+watch(doneTick, () => {
+  if (lastDocCount.value != null) scanned.value = lastDocCount.value;
+  refreshList();
 });
 
 async function refreshList() {
@@ -70,42 +75,9 @@ async function doScan() {
   await refreshList();
 }
 
-// 构建知识网: 跑 wiki 维护者 agent (摄入即编译), 进度走 kb:compile 事件
+// 构建知识网: 委托全局 store(摄入即编译, 进度走 kb:compile 事件, 脱离本组件生命周期)
 async function doCompile() {
-  if (compiling.value) return;
-  compiling.value = true;
-  compileMsg.value = "";
-  compileLog.value = [];
-  if (!unlistenCompile) {
-    unlistenCompile = await listen<KbCompileEvent>("kb:compile", (ev) => {
-      if (ev.runId !== compileRunId) return;
-      const t = ev.text ?? "";
-      if (ev.kind === "done") {
-        compiling.value = false;
-        compileMsg.value = t || "完成";
-        if (typeof ev.docCount === "number") scanned.value = ev.docCount;
-        refreshList();
-        return;
-      }
-      const icon =
-        ev.kind === "error"
-          ? "⚠ "
-          : ev.kind === "page"
-            ? "📄 "
-            : ev.kind === "phase"
-              ? "▸ "
-              : "· ";
-      compileLog.value.push(icon + t);
-      if (compileLog.value.length > 200)
-        compileLog.value.splice(0, compileLog.value.length - 200);
-    });
-  }
-  try {
-    compileRunId = await kb.compile();
-  } catch (e: any) {
-    compiling.value = false;
-    compileMsg.value = "启动失败:" + (e?.message ?? e);
-  }
+  await kbStore.startCompile();
 }
 
 async function doSearch() {
