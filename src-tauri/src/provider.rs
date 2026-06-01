@@ -40,6 +40,22 @@ const MANAGED_ENV_KEYS: &[&str] = &[
     "DISABLE_AUTOUPDATER",
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
     "CLAUDE_CODE_EFFORT_LEVEL",
+    // 模型钉选 —— 纳入受管, 切换时先清后套, 否则上一家的模型名会串到下一家
+    // (例: 切回 Claude 官方却残留 MiniMax-M3 → 官方拿去请求 Anthropic 直接报错)。
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+];
+
+/// 模型钉选的四档键 —— 第三方单模型供应商把这四档全设成同一个 model id,
+/// 后台小任务(走 HAIKU 档)就不会回落 Claude 默认名而被网关当未知模型处理。
+const MODEL_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 ];
 const MANAGED_TOP_KEYS: &[&str] = &["attribution", "includeCoAuthoredBy"];
 
@@ -233,19 +249,43 @@ fn seed_gift_minimax(store: &mut Store, data_dir: &Path) -> bool {
     if store.items.iter().any(|i| i.id == "minimax") {
         return false;
     }
+    // 钉 MiniMax-M3(官方 Claude Code 文档推荐):四档全设成 M3, 后台小任务也走 M3,
+    // 不再回落 Claude 默认 haiku 名被网关当未知模型。
+    let cfg = config_with_model(
+        default_config("https://api.minimaxi.com/anthropic", DEFAULT_TOKEN_FIELD, &key),
+        "MiniMax-M3",
+    );
     store.items.push(StoredProvider {
         id: "minimax".to_string(),
         name: "MiniMax".to_string(),
-        note: "粉丝福利 · 预置额度，开箱即用".to_string(),
+        note: "粉丝福利 · 预置额度，开箱即用 · MiniMax-M3".to_string(),
         website_url: "https://www.minimaxi.com".to_string(),
         token_field: DEFAULT_TOKEN_FIELD.to_string(),
-        settings_config: default_config(
-            "https://api.minimaxi.com/anthropic",
-            DEFAULT_TOKEN_FIELD,
-            &key,
-        ),
+        settings_config: cfg,
     });
     true
+}
+
+/// 往 settings_config 的 env 里钉模型:把 MODEL_ENV_KEYS 四档全设成同一个 model id。
+/// model 为空则原样返回(不钉)。
+fn config_with_model(mut cfg: Value, model: &str) -> Value {
+    let model = model.trim();
+    if model.is_empty() {
+        return cfg;
+    }
+    if !cfg.is_object() {
+        cfg = json!({});
+    }
+    let obj = cfg.as_object_mut().unwrap();
+    let env = obj.entry("env".to_string()).or_insert_with(|| json!({}));
+    if !env.is_object() {
+        *env = json!({});
+    }
+    let env = env.as_object_mut().unwrap();
+    for k in MODEL_ENV_KEYS {
+        env.insert((*k).to_string(), Value::String(model.to_string()));
+    }
+    cfg
 }
 
 pub fn init(_app: &AppHandle) -> Result<()> {

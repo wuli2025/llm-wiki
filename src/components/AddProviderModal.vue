@@ -24,9 +24,18 @@ const form = reactive({
   tokenField: "ANTHROPIC_AUTH_TOKEN",
   baseUrl: "",
   apiKey: "",
+  model: "",
   fullUrl: false,
   configJson: '{\n  "env": {}\n}',
 });
+
+// 一个「模型」字段 → 钉这四档(主 + opus/sonnet/haiku 三档默认),后台小任务也不回落
+const MODEL_KEYS = [
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+] as const;
 
 // 预设列表（排除自定义占位，自定义单独首位渲染）
 const presets = computed(() => store.providers.filter((p) => p.isPreset));
@@ -73,6 +82,11 @@ function applyProvider(p: ProviderView) {
   form.tokenField = p.tokenField || "ANTHROPIC_AUTH_TOKEN";
   form.baseUrl = p.baseUrl || "";
   form.apiKey = p.authToken || "";
+  form.model =
+    (p.settingsConfig &&
+      typeof p.settingsConfig === "object" &&
+      (p.settingsConfig as any)?.env?.ANTHROPIC_MODEL) ||
+    "";
   form.configJson = JSON.stringify(
     p.settingsConfig && typeof p.settingsConfig === "object"
       ? p.settingsConfig
@@ -92,6 +106,7 @@ function selectCustom() {
   form.tokenField = "ANTHROPIC_AUTH_TOKEN";
   form.baseUrl = "";
   form.apiKey = "";
+  form.model = "";
   form.configJson = '{\n  "env": {}\n}';
   localErr.value = null;
 }
@@ -128,6 +143,17 @@ function onApiKey() {
 }
 function onBaseUrl() {
   setEnv("ANTHROPIC_BASE_URL", form.baseUrl.trim());
+}
+function onModel() {
+  // 一个值钉四档:填了全写,清空全删
+  const cfg = parseCfg() ?? { env: {} };
+  if (!cfg.env || typeof cfg.env !== "object") cfg.env = {};
+  const m = form.model.trim();
+  for (const k of MODEL_KEYS) {
+    if (m) cfg.env[k] = m;
+    else delete cfg.env[k];
+  }
+  writeCfg(cfg);
 }
 function onTokenFieldSwitch(field: string) {
   // 切换字段：把旧字段的值搬到新字段
@@ -337,6 +363,19 @@ function dotColor(p: ProviderView) {
               </span>
               <input v-model="form.baseUrl" placeholder="https://your-api-endpoint.com" @input="onBaseUrl" />
               <p class="hint">💡 填写兼容 Claude API 的服务端点地址，不要以斜杠结尾</p>
+            </label>
+
+            <label class="field">
+              <span class="f-lab">模型</span>
+              <input
+                v-model="form.model"
+                placeholder="例如：MiniMax-M3（留空则用 Claude 默认模型名）"
+                @input="onModel"
+              />
+              <p class="hint">
+                💡 第三方供应商通常需指定自家模型名。填一个值会同时钉主模型与 Opus/Sonnet/Haiku
+                三档默认，连后台小任务也走它，避免回落到最低档。
+              </p>
             </label>
 
             <!-- 配置 JSON + 开关 -->
