@@ -16,7 +16,7 @@ import {
   BarChart3,
 } from "@lucide/vue";
 import { useProvidersStore } from "../stores/providers";
-import type { ProviderView, TokenBucket } from "../tauri";
+import type { ProviderView, TokenBucket, CodexDeviceLogin } from "../tauri";
 
 const props = defineProps<{ collapsed?: boolean }>();
 const store = useProvidersStore();
@@ -24,9 +24,14 @@ const store = useProvidersStore();
 const open = ref(false);
 const filter = ref("");
 
-// Codex 授权
+// Codex 授权 (原生 Device Code OAuth)
 const codexOpen = ref(false);
+const codexDevice = ref<CodexDeviceLogin | null>(null); // 授权进行中的设备码信息
+const codexBusy = ref(false); // 正在发起授权请求
+const codexErr = ref<string | null>(null);
+const codexCopied = ref(false);
 let codexTimer: number | null = null;
+let codexExpireAt = 0;
 
 // 用量周期
 type Period = "today" | "week" | "month" | "year";
@@ -50,7 +55,7 @@ watch(open, (v) => {
     nextTick(() => window.addEventListener("keydown", onEsc));
   } else {
     codexOpen.value = false;
-    stopCodexPoll();
+    resetCodexAuth();
     window.removeEventListener("keydown", onEsc);
   }
 });
@@ -104,6 +109,7 @@ const activeBucket = computed(() => bucketOf(period.value));
 
 async function onRowClick(p: ProviderView) {
   if (p.kind === "codex") {
+    resetCodexAuth();
     codexOpen.value = true;
     store.refreshCodex();
     return;
@@ -145,24 +151,75 @@ function openSite(url: string) {
   if (url) window.open(url, "_blank");
 }
 
-// Codex 授权
-async function doCodexLogin() {
-  const ok = await store.codexLogin();
-  if (ok) startCodexPoll();
+// Codex 授权 (原生 Device Code OAuth) —— 点授权即后端开浏览器, 应用内显示配对码并轮询
+async function startCodexAuth() {
+  codexErr.value = null;
+  codexCopied.value = false;
+  codexBusy.value = true;
+  const dev = await store.codexStartLogin();
+  codexBusy.value = false;
+  if (!dev) {
+    codexErr.value = store.error || "发起授权失败";
+    return;
+  }
+  codexDevice.value = dev;
+  codexExpireAt = Date.now() + dev.expiresIn * 1000;
+  startCodexPoll(dev);
 }
-function startCodexPoll() {
+
+function startCodexPoll(dev: CodexDeviceLogin) {
   stopCodexPoll();
-  let n = 0;
+  const intervalMs = Math.max(2, dev.interval) * 1000;
   codexTimer = window.setInterval(async () => {
-    n++;
-    await store.refreshCodex();
-    if (store.codex?.loggedIn || n > 40) stopCodexPoll();
-  }, 2000);
+    if (Date.now() > codexExpireAt) {
+      stopCodexPoll();
+      codexDevice.value = null;
+      codexErr.value = "授权超时, 请重试";
+      return;
+    }
+    try {
+      const st = await store.codexPollLogin(dev.deviceCode, dev.userCode);
+      if (st === "ok") {
+        stopCodexPoll();
+        codexDevice.value = null;
+      }
+    } catch (e) {
+      stopCodexPoll();
+      codexDevice.value = null;
+      codexErr.value = String(e);
+    }
+  }, intervalMs);
 }
+
 function stopCodexPoll() {
   if (codexTimer !== null) {
     clearInterval(codexTimer);
     codexTimer = null;
+  }
+}
+
+/** 关闭面板/切走时清干净进行中的授权 */
+function resetCodexAuth() {
+  stopCodexPoll();
+  codexDevice.value = null;
+  codexBusy.value = false;
+  codexErr.value = null;
+  codexCopied.value = false;
+}
+
+/** 浏览器没自动弹时手动打开验证页 */
+function openCodexVerify() {
+  if (codexDevice.value) window.open(codexDevice.value.verificationUri, "_blank");
+}
+
+async function copyUserCode() {
+  if (!codexDevice.value) return;
+  try {
+    await navigator.clipboard.writeText(codexDevice.value.userCode);
+    codexCopied.value = true;
+    setTimeout(() => (codexCopied.value = false), 1500);
+  } catch {
+    /* 剪贴板不可用时忽略, 用户可手抄 */
   }
 }
 </script>
@@ -290,28 +347,45 @@ function stopCodexPoll() {
               <Transition name="ed-fade">
                 <div v-if="codexOpen" class="editor codex">
                   <div class="ed-title">Codex (ChatGPT) 授权</div>
-                  <template v-if="!store.codex || store.codex.installed === false">
-                    <p class="codex-note">未检测到 <code>codex</code> CLI。安装后即可用 ChatGPT 账号授权:</p>
-                    <code class="codex-cmd">npm i -g @openai/codex</code>
+
+                  <!-- 授权进行中: 已开浏览器, 显示配对码 + 轮询转圈 -->
+                  <template v-if="codexDevice">
+                    <p class="codex-note">已为你打开 ChatGPT 授权页。在浏览器里确认设备码后回到这里,授权完成会自动识别:</p>
+                    <button class="codex-code" :title="codexCopied ? '已复制' : '点击复制'" @click="copyUserCode">
+                      {{ codexDevice.userCode }}
+                      <span class="code-copy">{{ codexCopied ? "已复制" : "复制" }}</span>
+                    </button>
+                    <p class="codex-poll"><span class="spinner" /> 等待浏览器中完成授权…</p>
                     <div class="ed-actions">
-                      <button class="ed-cancel" @click="codexOpen = false">关闭</button>
-                      <button class="ed-save" @click="store.refreshCodex()">重新检测</button>
+                      <button class="ed-cancel" @click="resetCodexAuth">取消</button>
+                      <button class="ed-save" @click="openCodexVerify"><ExternalLink :size="13" :stroke-width="2" /> 重新打开授权页</button>
                     </div>
                   </template>
-                  <template v-else-if="store.codex.loggedIn">
+
+                  <!-- 已授权 -->
+                  <template v-else-if="store.codex && store.codex.loggedIn">
                     <p class="codex-ok"><ShieldCheck :size="14" :stroke-width="2" /> 已授权 ChatGPT</p>
-                    <p class="codex-note">可在终端用 <code>codex</code> 直接对话。让 Claude Code 直接路由到 Codex 需 Anthropic↔OpenAI 翻译代理(轻量版未内置)。</p>
+                    <p class="codex-note">凭据已写入 <code>~/.codex/auth.json</code>,终端 <code>codex</code> 可直接对话。让 Claude Code 直接路由到 Codex 需 Anthropic↔OpenAI 翻译代理(轻量版未内置)。</p>
                     <div class="ed-actions">
                       <button class="ed-cancel" @click="codexOpen = false">关闭</button>
+                      <button class="ed-save" @click="startCodexAuth" :disabled="codexBusy"><RefreshCw :size="13" :stroke-width="2" /> 重新授权</button>
                     </div>
                   </template>
+
+                  <!-- 未授权: 点击即原生 OAuth, 后端拉起浏览器 -->
                   <template v-else>
-                    <p class="codex-note">已检测到 codex CLI,但尚未授权。点击下方按钮将打开浏览器完成 ChatGPT 登录。</p>
+                    <p class="codex-note">用 ChatGPT 账号授权(无需安装 codex CLI)。点击后将自动打开浏览器完成登录,凭据写入 <code>~/.codex/auth.json</code>。</p>
                     <div class="ed-actions">
                       <button class="ed-cancel" @click="codexOpen = false">关闭</button>
-                      <button class="ed-save login" @click="doCodexLogin"><LogIn :size="13" :stroke-width="2" /> 授权登录</button>
+                      <button class="ed-save login" @click="startCodexAuth" :disabled="codexBusy">
+                        <span v-if="codexBusy" class="spinner" />
+                        <LogIn v-else :size="13" :stroke-width="2" />
+                        {{ codexBusy ? "正在发起…" : "授权登录" }}
+                      </button>
                     </div>
                   </template>
+
+                  <p v-if="codexErr" class="codex-fail">{{ codexErr }}</p>
                 </div>
               </Transition>
 
@@ -455,6 +529,12 @@ function stopCodexPoll() {
 .codex-note code, .codex-cmd { font-family: var(--mono); font-size: 10.5px; background: var(--code-bg); color: var(--code-text); padding: 1px 5px; border-radius: 4px; }
 .codex-cmd { display: block; padding: 6px 8px; user-select: all; }
 .codex-ok { margin: 0; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: #10a37f; }
+.ed-save:disabled, .ed-cancel:disabled { opacity: 0.55; cursor: default; }
+.codex-code { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 17px; font-weight: 700; letter-spacing: 3px; color: #10a37f; background: #10a37f14; border: 1px dashed #10a37f66; border-radius: 7px; padding: 8px 12px; cursor: pointer; user-select: all; }
+.codex-code:hover { background: #10a37f22; }
+.code-copy { font-family: var(--sans); font-size: 10px; font-weight: 500; letter-spacing: 0; color: var(--muted); }
+.codex-poll { margin: 0; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); }
+.codex-fail { margin: 1px 0 0; font-size: 11px; color: var(--vermilion); background: var(--vermilion-soft); border-radius: 6px; padding: 6px 9px; line-height: 1.5; }
 .err-line { margin: 0 14px 9px; font-size: 11px; color: var(--vermilion); background: var(--vermilion-soft); border-radius: 6px; padding: 6px 9px; }
 
 .usage { border-top: 1px solid var(--border-soft); padding: 12px 14px 15px; }

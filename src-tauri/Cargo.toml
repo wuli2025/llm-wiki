@@ -9,7 +9,7 @@ resolver = "2"
 
 [package]
 name = "polaris-app"
-version = "0.2.16"
+version = "0.2.17"
 description = "Polaris - 本地优先 AI 工作台 (MVP)"
 authors = ["winner3388"]
 edition = "2021"
@@ -46,6 +46,9 @@ polaris-sandbox = { path = "crates/polaris-sandbox" }
 zip = "8.6.0"          # docx/pptx/xlsx 本质是 zip+xml，解压取 XML
 calamine = "0.35.0"    # xlsx/xls/ods 表格 → markdown
 pdf-extract = "0.10.0" # pdf 文本抽取（纯 Rust，panic 由 convert::guard 兜住）
+# Codex(ChatGPT) OAuth Device Code 流程 —— 同步阻塞 HTTP 客户端 (rustls, 无 tokio)。
+# 只用于授权三步: 取设备码 / 轮询 / code 换 token。比 cc-switch 的 reqwest+tokio 轻得多。
+ureq = { version = "2", features = ["json"] }
 
 [features]
 default = ["custom-protocol"]

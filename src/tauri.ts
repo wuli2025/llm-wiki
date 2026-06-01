@@ -425,6 +425,16 @@ export interface CodexStatus {
   loggedIn: boolean;
   authPath: string;
 }
+export interface CodexDeviceLogin {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  interval: number;
+  expiresIn: number;
+}
+export interface CodexPollResult {
+  status: "pending" | "ok";
+}
 
 export const provider = {
   list: () => invoke<ProviderListResult>("provider_list"),
@@ -434,7 +444,9 @@ export const provider = {
   delete: (id: string) => invoke<void>("provider_delete", { id }),
   usage: () => invoke<UsageSummary>("usage_summary"),
   codexStatus: () => invoke<CodexStatus>("codex_status"),
-  codexLogin: () => invoke<void>("codex_login"),
+  codexStartLogin: () => invoke<CodexDeviceLogin>("codex_start_login"),
+  codexPollLogin: (deviceCode: string, userCode: string) =>
+    invoke<CodexPollResult>("codex_poll_login", { deviceCode, userCode }),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -691,8 +703,16 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return undefined;
     case "codex_status":
       return { installed: false, loggedIn: false, authPath: "(browser-only)" };
-    case "codex_login":
-      return undefined;
+    case "codex_start_login":
+      return {
+        deviceCode: "stub-device",
+        userCode: "WXYZ-1234",
+        verificationUri: "https://auth.openai.com/codex/device",
+        interval: 5,
+        expiresIn: 900,
+      };
+    case "codex_poll_login":
+      return { status: "ok" };
     case "env_check": {
       const tool = (key: string, name: string, found: boolean, required = false): ToolStatus => ({
         key: key as ToolStatus["key"],

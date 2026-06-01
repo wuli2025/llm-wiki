@@ -6,6 +6,7 @@ import {
   type ProviderSaveInput,
   type UsageSummary,
   type CodexStatus,
+  type CodexDeviceLogin,
 } from "../tauri";
 
 export const useProvidersStore = defineStore("providers", () => {
@@ -71,16 +72,25 @@ export const useProvidersStore = defineStore("providers", () => {
     }
   }
 
-  /** 启动 codex login(开浏览器 OAuth);随后由调用方轮询 refreshCodex */
-  async function codexLogin(): Promise<boolean> {
+  /** ① 启动原生 Device Code 授权:后端会自动开浏览器,返回配对码供 UI 展示 */
+  async function codexStartLogin(): Promise<CodexDeviceLogin | null> {
     error.value = null;
     try {
-      await providerApi.codexLogin();
-      return true;
+      return await providerApi.codexStartLogin();
     } catch (e) {
       error.value = String(e);
-      return false;
+      return null;
     }
+  }
+
+  /** ② 轮询一次授权状态;成功(ok)时顺带刷新 codex 状态。抛错交给调用方处理 */
+  async function codexPollLogin(
+    deviceCode: string,
+    userCode: string
+  ): Promise<"pending" | "ok"> {
+    const r = await providerApi.codexPollLogin(deviceCode, userCode);
+    if (r.status === "ok") await refreshCodex();
+    return r.status;
   }
 
   /** 切换供应商；返回是否成功（失败时 error 已设置，常见为缺 key） */
@@ -140,7 +150,8 @@ export const useProvidersStore = defineStore("providers", () => {
     refresh,
     refreshUsage,
     refreshCodex,
-    codexLogin,
+    codexStartLogin,
+    codexPollLogin,
     switchTo,
     save,
     remove,

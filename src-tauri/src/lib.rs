@@ -111,7 +111,8 @@ pub fn run() {
             provider::provider_delete,
             provider::usage_summary,
             provider::codex_status,
-            provider::codex_login,
+            provider::codex_start_login,
+            provider::codex_poll_login,
             // 环境医生 (环境监测 + 配置安装)
             doctor::env_check,
             doctor::env_fix_path,

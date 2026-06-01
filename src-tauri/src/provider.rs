@@ -772,7 +772,25 @@ pub fn provider_delete(id: String) -> Result<(), String> {
     Ok(())
 }
 
-// ───────────────────────── Commands: Codex 授权 ─────────────────────────
+// ───────────────────────── Commands: Codex 授权 (原生 Device Code OAuth) ─────────────────────────
+//
+// 抄自 cc-switch 新版 `codex_oauth_auth.rs` 的 OpenAI Device Code 流程, 但**不背它的翻译代理**:
+// Polaris 不路由 Codex, 拿到的 token 按官方 codex CLI 的 `~/.codex/auth.json` 格式落盘, 让外部
+// `codex` CLI 直接复用。这样「点授权」彻底不依赖 codex CLI 是否已装, 后端直接拉起浏览器授权页。
+//
+// 三步: ① POST usercode 取 device_auth_id + user_code, 同时开浏览器到验证页;
+//        ② 前端按 interval 轮询 token 端点 (403/404=等待用户授权);
+//        ③ 用户授权后返回 authorization_code + code_verifier, 换 access/refresh/id_token 落盘。
+
+/// OpenAI OAuth 客户端 ID (与官方 Codex CLI 相同)
+const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_DEVICE_USERCODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
+const CODEX_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+const CODEX_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const CODEX_DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
+/// Device Code 流程约定的 redirect_uri (OpenAI 服务端固定)
+const CODEX_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
+const CODEX_USER_AGENT: &str = "polaris-codex-oauth";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -797,7 +815,11 @@ pub fn codex_status() -> Result<CodexStatus, String> {
         .map(|s| s.success())
         .unwrap_or(false);
     let auth_path = codex_auth_path();
-    let logged_in = auth_path.as_ref().map(|p| p.exists()).unwrap_or(false);
+    // 授权与否只看 ~/.codex/auth.json 是否有 ChatGPT tokens —— 与 codex CLI 是否已装解耦。
+    let logged_in = auth_path
+        .as_ref()
+        .map(|p| codex_auth_has_tokens(p))
+        .unwrap_or(false);
     Ok(CodexStatus {
         installed,
         logged_in,
@@ -805,17 +827,310 @@ pub fn codex_status() -> Result<CodexStatus, String> {
     })
 }
 
+/// auth.json 存在且带 ChatGPT OAuth tokens (区别于纯 API key 登录)
+fn codex_auth_has_tokens(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("tokens")
+                .and_then(|t| t.get("access_token"))
+                .and_then(|a| a.as_str())
+                .map(|s| !s.is_empty())
+        })
+        .unwrap_or(false)
+}
+
+/// `codex_start_login` 返回给前端的设备授权信息
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexDeviceLogin {
+    /// device_auth_id, 轮询时回传
+    pub device_code: String,
+    /// 展示给用户的配对码
+    pub user_code: String,
+    /// 浏览器验证页 (已自动打开, UI 也显示便于手动打开)
+    pub verification_uri: String,
+    /// 建议轮询间隔 (秒)
+    pub interval: u64,
+    /// 设备码有效期 (秒)
+    pub expires_in: u64,
+}
+
+/// `codex_poll_login` 返回: status = "pending" | "ok"
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexPollResult {
+    pub status: String,
+}
+
+#[derive(Deserialize)]
+struct CodexDeviceCodeResp {
+    device_auth_id: String,
+    user_code: String,
+    #[serde(default)]
+    interval: Option<Value>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct CodexDevicePollSuccess {
+    authorization_code: String,
+    code_verifier: String,
+}
+
+#[derive(Deserialize)]
+struct CodexTokenResp {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    id_token: Option<String>,
+}
+
+/// 提取 ureq 错误里的状态码/文案, 拼成可读消息
+fn codex_http_err(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, resp) => {
+            let body = resp.into_string().unwrap_or_default();
+            let body = body.chars().take(300).collect::<String>();
+            format!("HTTP {code} - {body}")
+        }
+        ureq::Error::Transport(t) => format!("网络错误: {t}"),
+    }
+}
+
+/// 解析 interval 字段 (服务端可能给数字或字符串), 加 3 秒安全余量
+fn codex_parse_interval(v: Option<&Value>) -> u64 {
+    let raw = match v {
+        Some(Value::Number(n)) => n.as_u64().unwrap_or(5),
+        Some(Value::String(s)) => s.parse::<u64>().unwrap_or(5),
+        _ => 5,
+    };
+    raw.max(1) + 3
+}
+
+/// ① 启动 Device Code 流程并打开浏览器验证页
 #[tauri::command]
-pub fn codex_login() -> Result<(), String> {
-    Command::new("codex")
-        .arg("login")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            format!("无法启动 codex login (是否已安装 codex CLI? `npm i -g @openai/codex`): {e}")
-        })?;
+pub fn codex_start_login() -> Result<CodexDeviceLogin, String> {
+    let resp = ureq::post(CODEX_DEVICE_USERCODE_URL)
+        .set("Content-Type", "application/json")
+        .set("User-Agent", CODEX_USER_AGENT)
+        .send_json(json!({ "client_id": CODEX_CLIENT_ID }))
+        .map_err(|e| format!("发起 ChatGPT 设备授权失败: {}", codex_http_err(e)))?;
+
+    let device: CodexDeviceCodeResp = resp
+        .into_json()
+        .map_err(|e| format!("解析设备码响应失败: {e}"))?;
+
+    let interval = codex_parse_interval(device.interval.as_ref());
+    let expires_in = device.expires_in.unwrap_or(900);
+
+    // 自动拉起浏览器到验证页 (失败不致命, UI 仍展示链接 + 配对码供手动打开)
+    let _ = codex_open_browser(CODEX_DEVICE_VERIFY_URL);
+
+    Ok(CodexDeviceLogin {
+        device_code: device.device_auth_id,
+        user_code: device.user_code,
+        verification_uri: CODEX_DEVICE_VERIFY_URL.to_string(),
+        interval,
+        expires_in,
+    })
+}
+
+/// ② 轮询授权状态; 成功则换 token 并落盘 ~/.codex/auth.json
+#[tauri::command]
+pub fn codex_poll_login(device_code: String, user_code: String) -> Result<CodexPollResult, String> {
+    let pending = || Ok(CodexPollResult { status: "pending".into() });
+
+    let resp = match ureq::post(CODEX_DEVICE_TOKEN_URL)
+        .set("Content-Type", "application/json")
+        .set("User-Agent", CODEX_USER_AGENT)
+        .send_json(json!({ "device_auth_id": device_code, "user_code": user_code }))
+    {
+        Ok(r) => r,
+        // 403/404 = 用户尚未在浏览器完成授权, 继续轮询
+        Err(ureq::Error::Status(403, _)) | Err(ureq::Error::Status(404, _)) => return pending(),
+        Err(ureq::Error::Status(410, _)) => {
+            return Err("设备码已过期, 请重新发起授权".into())
+        }
+        Err(e) => return Err(format!("轮询授权状态失败: {}", codex_http_err(e))),
+    };
+
+    let success: CodexDevicePollSuccess = resp
+        .into_json()
+        .map_err(|e| format!("解析授权响应失败: {e}"))?;
+
+    // ③ authorization_code + code_verifier 换 access/refresh/id_token
+    let tokens = codex_exchange_code(&success.authorization_code, &success.code_verifier)?;
+    let refresh_token = tokens
+        .refresh_token
+        .clone()
+        .ok_or_else(|| "授权响应缺少 refresh_token".to_string())?;
+    let account_id = codex_account_id(&tokens);
+
+    codex_write_auth_json(&tokens, &refresh_token, account_id.as_deref())?;
+    Ok(CodexPollResult { status: "ok".into() })
+}
+
+/// 用 authorization_code + code_verifier 换 token
+fn codex_exchange_code(code: &str, code_verifier: &str) -> Result<CodexTokenResp, String> {
+    let resp = ureq::post(CODEX_OAUTH_TOKEN_URL)
+        .set("User-Agent", CODEX_USER_AGENT)
+        .send_form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", CODEX_DEVICE_REDIRECT_URI),
+            ("client_id", CODEX_CLIENT_ID),
+            ("code_verifier", code_verifier),
+        ])
+        .map_err(|e| format!("换取 Token 失败: {}", codex_http_err(e)))?;
+    resp.into_json()
+        .map_err(|e| format!("解析 Token 响应失败: {e}"))
+}
+
+/// 从 id_token / access_token (JWT) 中提取 chatgpt_account_id
+fn codex_account_id(tokens: &CodexTokenResp) -> Option<String> {
+    let from = |jwt: &str| -> Option<String> {
+        let claims = codex_jwt_claims(jwt)?;
+        claims
+            .get("chatgpt_account_id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| {
+                claims
+                    .get("https://api.openai.com/auth")
+                    .and_then(|a| a.get("chatgpt_account_id"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .or_else(|| {
+                claims
+                    .get("organizations")
+                    .and_then(|o| o.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|o| o.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+    };
+    tokens
+        .id_token
+        .as_deref()
+        .and_then(from)
+        .or_else(|| from(&tokens.access_token))
+}
+
+/// 解析 JWT 的 payload (第二段) 为 JSON
+fn codex_jwt_claims(token: &str) -> Option<Value> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = codex_b64url_decode(payload)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// base64url (无填充) 解码 —— 不引第三方 base64 crate
+fn codex_b64url_decode(input: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for c in input.bytes() {
+        if c == b'=' {
+            break;
+        }
+        acc = (acc << 6) | val(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// 按官方 codex CLI 格式写 ~/.codex/auth.json, 外部 `codex` CLI 可直接复用
+fn codex_write_auth_json(
+    tokens: &CodexTokenResp,
+    refresh_token: &str,
+    account_id: Option<&str>,
+) -> Result<(), String> {
+    let path = codex_auth_path().ok_or_else(|| "无法定位用户主目录".to_string())?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建 ~/.codex 目录失败: {e}"))?;
+    }
+
+    let auth = json!({
+        "OPENAI_API_KEY": Value::Null,
+        "tokens": {
+            "id_token": tokens.id_token.clone().unwrap_or_default(),
+            "access_token": tokens.access_token,
+            "refresh_token": refresh_token,
+            "account_id": account_id.unwrap_or_default(),
+        },
+        "last_refresh": codex_rfc3339_now(),
+    });
+
+    let content = serde_json::to_string_pretty(&auth)
+        .map_err(|e| format!("序列化 auth.json 失败: {e}"))?;
+    fs::write(&path, content).map_err(|e| format!("写入 ~/.codex/auth.json 失败: {e}"))?;
+    Ok(())
+}
+
+/// 当前 UTC 时间的 RFC3339 字符串 (codex CLI 解析 last_refresh 用), 不引 chrono
+fn codex_rfc3339_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // Howard Hinnant 的 civil_from_days 算法
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// 打开系统默认浏览器到指定 URL (跨平台)
+fn codex_open_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW(0x0800_0000): 别闪黑窗
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(url).spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open").arg(url).spawn().map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

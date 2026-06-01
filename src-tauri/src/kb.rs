@@ -671,15 +671,27 @@ pub fn kb_context_block() -> String {
 三层目录: `raw/`(只读原始资料, 严禁写入) · `output/`(生成的成品) · `wiki/`(人工确认的知识层)。\n\n"
     ));
 
-    // wiki/ 知识层: 全文注入 (很小, 是导航的起点; 顺着里面的双链继续展开)
-    let mut wiki_docs: Vec<&KbDoc> = idx
+    // wiki/ 知识层: 只注入「导航文件」(顶层 index.md + 各子目录 _index.md),
+    // 不再全文注入每篇 wiki —— 46 篇全文 42k 字符直接撞 Windows 命令行 32k 上限(206)。
+    // 模型要细看哪篇, 用 `Read` 沿双链或路径自取 —— 索引里把路径写清楚就行。
+    let mut nav_docs: Vec<&KbDoc> = idx
         .iter()
-        .filter(|d| norm(&d.rel_path).starts_with("wiki/"))
+        .filter(|d| {
+            let rp = norm(&d.rel_path);
+            // 顶层 index.md / 顶层元页(方法论/说明/log)
+            rp == "wiki/index.md"
+                || rp == "wiki/karpathy-wiki方法论.md"
+                || rp == "wiki/wiki-knowledge-base.md"
+                // 各子目录 _index.md
+                || rp.ends_with("/_index.md")
+        })
         .collect();
-    wiki_docs.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    if !wiki_docs.is_empty() {
-        out.push_str("#### wiki/ 知识层 (已全文注入, 请顺着其中的双链继续展开)\n\n");
-        for d in &wiki_docs {
+    nav_docs.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    if !nav_docs.is_empty() {
+        out.push_str(
+            "#### wiki/ 知识层 (仅注入导航页: 顶层 index + 各子目录 _index, 全文请用 Read 沿双链/路径自取)\n\n"
+        );
+        for d in &nav_docs {
             out.push_str(&format!(
                 "##### [[{}]] · `{}`\n\n{}\n\n",
                 stem(&d.rel_path),
@@ -687,6 +699,16 @@ pub fn kb_context_block() -> String {
                 d.body.trim()
             ));
         }
+        // 提示: 其他 40+ 篇 wiki 的目录清单在 wiki/index.md / 概念/_index.md / 实体/_index.md 里
+        let wiki_total = idx
+            .iter()
+            .filter(|d| norm(&d.rel_path).starts_with("wiki/") && norm(&d.rel_path).ends_with(".md"))
+            .count();
+        out.push_str(&format!(
+            "*(wiki/ 共 {} 篇, 此处仅注入 {} 篇导航页;要看某篇正文请用 Read 打开对应 .md)*\n\n",
+            wiki_total,
+            nav_docs.len()
+        ));
     }
 
     // 知识库地图: raw/ output/ 等按文件夹分组, 列标题清单 (供沿双链/路径用 Read/Grep 自取)

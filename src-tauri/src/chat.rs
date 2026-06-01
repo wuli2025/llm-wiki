@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use directories::UserDirs;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -270,6 +270,15 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
 
     // 默认走宿主机执行（沙箱可选，但默认关闭）；动态编排时放行 Task 子代理
     let mut child = spawn_on_host(&final_prompt, perm, &art_dir, args.dynamic_workflow)?;
+
+    // prompt 经 stdin 喂给 claude (而非命令行参数): 大 prompt 不会撞 Windows 命令行
+    // 长度上限, 也不会因 prompt 以 `-` 开头被当成 flag。spawn 后立刻写 + drop, claude 读到 EOF 就开始处理。
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        // 失败不致命: claude 还有 fallback; 但 99% 写 KB 级别的 prompt 不会失败。
+        let _ = stdin.write_all(final_prompt.as_bytes());
+        // drop 在作用域结束时自动关, 不需要显式调用
+    }
 
     let stdout = child
         .stdout
@@ -667,7 +676,11 @@ fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path, with_task: bool) -> R
     args.push("--allowedTools".into());
     args.push(allowed_tools_for(perm, with_task));
     args.push(perm_flag);
-    args.push(prompt.to_string());
+    // ⚠️ prompt 不再塞 argv 末尾 —— 走 stdin。
+    // Windows CreateProcessW 的 lpCommandLine 上限 32767 字符, 你 KB 全文 + 多轮对话历史
+    // 拼一起轻松爆, 直接抛 206 ERROR_FILENAME_TOO_LONG 拒 spawn (实测 33k 字符就 100% 复现)。
+    // 改 stdin 后 prompt 长度无限制。kb.rs 的 spawn_in_sandbox 早就这么干了 (注释在那)。
+    let _ = prompt; // 函数签名仍保留 prompt 参数, 调用方写 stdin
 
     // 解析 claude 可执行文件的全路径再 spawn, 而非裸名 "claude":
     // npm 装只在 PATH 放 `claude.cmd`, 而 Windows CreateProcessW 解析裸名只补 `.exe`、不查 PATHEXT
@@ -679,7 +692,7 @@ fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path, with_task: bool) -> R
     let mut cmd = Command::new(&claude_bin);
     cmd.args(&args)
         .current_dir(&cwd)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped()) // 接 prompt 用, 调用方 spawn 后 write + drop
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Windows: claude 跑 Bash 工具要靠 Git Bash。启动期 prime 通常已设好 CLAUDE_CODE_GIT_BASH_PATH,
@@ -691,10 +704,11 @@ fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path, with_task: bool) -> R
         }
     }
     no_window(&mut cmd); // 隐藏式: 每次发消息不再弹出黑色终端窗口
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("调起宿主机 claude CLI 失败: {}", e))?;
-    Ok(child)
+
+    cmd.spawn().map_err(|e| {
+        // 错误只在 spawn 本身失败 (e.g. exe 找不到), 不再是 prompt 太长
+        format!("调起宿主机 claude CLI 失败: {}", e)
+    })
 }
 
 // ───────────────────────── Artifacts (产物预览) ─────────────────────────
