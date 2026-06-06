@@ -2,6 +2,8 @@
 import { ref, onMounted, computed, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { marked } from "marked";
+import { RecycleScroller } from "vue-virtual-scroller";
+import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { Upload, LoaderCircle, CheckCircle2, XCircle, X, Trash2 } from "@lucide/vue";
 import {
   kb,
@@ -36,8 +38,15 @@ const ingestMsg = ref("");
 // ── 构建知识网 (摄入即编译) ──
 // 进度/正在跑/日志全部落在全局 kbStore: 离开 wiki 视图(组件卸载)后台照常累积,
 // 切回来即见进度,不会因组件销毁而清零或"看起来停了"。
-const { compiling, compileLog, compileMsg, lastDocCount, doneTick } =
-  storeToRefs(kbStore);
+const {
+  compiling,
+  compileLog,
+  compileMsg,
+  lastDocCount,
+  doneTick,
+  linting,
+  lintReport,
+} = storeToRefs(kbStore);
 
 onMounted(async () => {
   rootPath.value = await kb.root();
@@ -61,6 +70,11 @@ async function refreshList() {
   }
 }
 
+// 虚拟滚动适配: string[] → 带稳定 id 的对象数组
+const fileItems = computed(() =>
+  files.value.map((f, i) => ({ id: i, path: f }))
+);
+
 async function openFile(p: string) {
   selected.value = p;
   try {
@@ -78,6 +92,18 @@ async function doScan() {
 // 构建知识网: 委托全局 store(摄入即编译, 进度走 kb:compile 事件, 脱离本组件生命周期)
 async function doCompile() {
   await kbStore.startCompile();
+}
+
+// 维护知识网 (借鉴 llm_wiki「AI 出决策、代码执行」): 自动补双链 / 智能去重
+async function doEnrich() {
+  await kbStore.startMaintain("enrich");
+}
+async function doDedup() {
+  await kbStore.startMaintain("dedup");
+}
+// wiki 质量检查 (纯规则, 同步返回报告)
+async function doLint() {
+  await kbStore.runLint();
 }
 
 async function doSearch() {
@@ -304,23 +330,31 @@ const { isOver: dropOver } = useFileDrop({
           </div>
         </div>
         <div class="section-title">所有文件</div>
-        <div
-          v-for="f in files"
-          :key="f"
-          class="file"
-          :class="{ active: selected === f }"
-          @click="openFile(f)"
+        <RecycleScroller
+          v-if="files.length"
+          class="file-scroller"
+          :items="fileItems"
+          :item-size="28"
+          key-field="id"
         >
-          <span class="file-name">{{ f }}</span>
-          <button
-            class="file-del"
-            title="删除这份资料"
-            @click.stop="doDelete(f)"
-          >
-            <X :size="13" :stroke-width="2" />
-          </button>
-        </div>
-        <div v-if="files.length === 0" class="muted empty">
+          <template #default="{ item }">
+            <div
+              class="file"
+              :class="{ active: selected === item.path }"
+              @click="openFile(item.path)"
+            >
+              <span class="file-name">{{ item.path }}</span>
+              <button
+                class="file-del"
+                title="删除这份资料"
+                @click.stop="doDelete(item.path)"
+              >
+                <X :size="13" :stroke-width="2" />
+              </button>
+            </div>
+          </template>
+        </RecycleScroller>
+        <div v-else class="muted empty">
           KB 为空 —— 把文件直接拖到本页面即可入库,或在「管理」tab 手动 ingest
         </div>
       </div>
@@ -368,6 +402,53 @@ const { isOver: dropOver } = useFileDrop({
           <div v-for="(l, i) in compileLog" :key="i" class="compile-line">
             {{ l }}
           </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">维护知识网 · AI 出决策 / 代码执行</div>
+        <div class="card-body">
+          知识网构建后会越积越乱。这三件事保持它整洁:
+          <strong>补双链</strong>(只读 AI 找出该互联却漏链的词,<em>替换由代码执行,正文不乱改</em>)、
+          <strong>去重</strong>(规则粗筛同名页 → AI 判真重复 → 合并并重写全库双链)、
+          <strong>体检</strong>(扫死链/缺 type/孤儿页,纯规则秒级)。
+        </div>
+        <div class="maintain-row">
+          <button class="primary-btn" :disabled="compiling" @click="doEnrich">
+            <LoaderCircle
+              v-if="compiling"
+              :size="14"
+              :stroke-width="1.8"
+              class="spin"
+            />
+            <span>自动补双链</span>
+          </button>
+          <button class="primary-btn" :disabled="compiling" @click="doDedup">
+            <span>智能去重</span>
+          </button>
+          <button class="primary-btn" :disabled="linting" @click="doLint">
+            <span>{{ linting ? "体检中…" : "质量检查" }}</span>
+          </button>
+        </div>
+        <div v-if="lintReport" class="lint-report">
+          <div class="lint-summary">
+            共 {{ lintReport.totalPages }} 页 ·
+            死链 <b :class="{ bad: lintReport.deadLinks }">{{ lintReport.deadLinks }}</b> ·
+            缺type <b :class="{ bad: lintReport.missingType }">{{ lintReport.missingType }}</b> ·
+            孤儿 <b :class="{ bad: lintReport.orphans }">{{ lintReport.orphans }}</b> ·
+            危险路径 <b :class="{ bad: lintReport.unsafePaths }">{{ lintReport.unsafePaths }}</b>
+          </div>
+          <div v-if="lintReport.issues.length" class="lint-issues">
+            <div
+              v-for="(it, i) in lintReport.issues.slice(0, 50)"
+              :key="i"
+              class="lint-line"
+            >
+              <span class="lint-kind">{{ it.kind }}</span>
+              <span class="lint-path">{{ it.path }}</span>
+              <span class="lint-detail">{{ it.detail }}</span>
+            </div>
+          </div>
+          <div v-else class="muted">未发现问题,知识网很健康 ✓</div>
         </div>
       </div>
       <div class="card">
@@ -512,8 +593,14 @@ const { isOver: dropOver } = useFileDrop({
   border: 1px solid var(--hairline);
   border-radius: 4px;
   padding: 10px;
-  overflow-y: auto;
   background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.file-scroller {
+  flex: 1;
+  min-height: 0;
 }
 .right {
   border: 1px solid var(--hairline);
@@ -694,6 +781,56 @@ const { isOver: dropOver } = useFileDrop({
   color: var(--text-2, #4a4f57);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.maintain-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lint-report {
+  margin-top: 12px;
+}
+.lint-summary {
+  font-size: 13px;
+  color: var(--text-2, #4a4f57);
+  margin-bottom: 8px;
+}
+.lint-summary b {
+  color: var(--accent, #2f6df0);
+}
+.lint-summary b.bad {
+  color: #d24b4b;
+}
+.lint-issues {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  background: var(--code-bg, rgba(0, 0, 0, 0.04));
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.lint-line {
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.lint-kind {
+  flex: none;
+  color: #c47f00;
+  font-family: var(--mono, monospace);
+}
+.lint-path {
+  flex: none;
+  color: var(--text-1, #1f2733);
+  font-family: var(--mono, monospace);
+}
+.lint-detail {
+  color: var(--dim, #888);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .placeholder {

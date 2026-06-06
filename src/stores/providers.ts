@@ -7,6 +7,7 @@ import {
   type UsageSummary,
   type CodexStatus,
   type CodexDeviceLogin,
+  type CodexProxyInfo,
 } from "../tauri";
 
 export const useProvidersStore = defineStore("providers", () => {
@@ -14,6 +15,7 @@ export const useProvidersStore = defineStore("providers", () => {
   const currentId = ref<string>("claude-official");
   const usage = ref<UsageSummary | null>(null);
   const codex = ref<CodexStatus | null>(null);
+  const codexProxy = ref<CodexProxyInfo | null>(null);
   const loading = ref(false);
   const switching = ref<string | null>(null);
   const error = ref<string | null>(null);
@@ -67,6 +69,14 @@ export const useProvidersStore = defineStore("providers", () => {
   async function refreshCodex() {
     try {
       codex.value = await providerApi.codexStatus();
+    } catch (e) {
+      error.value = String(e);
+    }
+  }
+
+  async function refreshCodexProxy() {
+    try {
+      codexProxy.value = await providerApi.codexProxyInfo();
     } catch (e) {
       error.value = String(e);
     }
@@ -136,6 +146,7 @@ export const useProvidersStore = defineStore("providers", () => {
     currentId,
     usage,
     codex,
+    codexProxy,
     loading,
     switching,
     error,
@@ -150,6 +161,7 @@ export const useProvidersStore = defineStore("providers", () => {
     refresh,
     refreshUsage,
     refreshCodex,
+    refreshCodexProxy,
     codexStartLogin,
     codexPollLogin,
     switchTo,

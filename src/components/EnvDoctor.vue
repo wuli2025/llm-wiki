@@ -79,14 +79,16 @@ onMounted(async () => {
     return;
   }
 
-  unlisten = await listen<EnvStreamEvent>("env:stream", onStream);
-
-  const r = await runCheck();
-  if (props.gate && r.ready && localStorage.getItem(READY_FLAG)) {
-    // 老用户、环境仍健康 → 无感放行
+  // 已通过一次环境检测 → 后续每次启动不再检测, 直接放行。
+  // (用户要求: 只第一次打开时检测; 想复检走侧栏「环境」页 gate=false)
+  if (props.gate && localStorage.getItem(READY_FLAG)) {
     emit("done");
     return;
   }
+
+  unlisten = await listen<EnvStreamEvent>("env:stream", onStream);
+
+  const r = await runCheck();
   if (r.ready) localStorage.setItem(READY_FLAG, "1");
   // claude 在但缺 shell → 自动补装 PowerShell 7 (进入流式日志), 不再放任用户进去后对话报错
   if (maybeAutoInstallShell(r)) return;

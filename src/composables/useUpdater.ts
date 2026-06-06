@@ -20,6 +20,8 @@ export const updateError = ref("");
 export const checking = ref(false); // 正在检查（手动检查的转圈反馈）
 export const upToDate = ref(false); // 手动检查的结果：已是最新
 export const lastCheckedAt = ref<number | null>(null); // 上次检查时间戳(ms)
+export const checkFailed = ref(false); // 自动检查失败（非静默，用户可感知）
+export const remoteVersion = ref<string | null>(null); // 远程最新版本号（无论是否已安装）
 // 弹窗被「以后再说」关掉：仅隐藏中央对话框，「更新」板块仍可操作
 export const dialogDismissed = ref(false);
 
@@ -40,9 +42,11 @@ async function runCheck(): Promise<boolean> {
   await ensureCurrentVersion();
   const u = await check();
   lastCheckedAt.value = Date.now();
+  checkFailed.value = false;
   if (u) {
     pending = u;
     updateVersion.value = u.version;
+    remoteVersion.value = u.version;
     updateNotes.value = u.body ?? "";
     upToDate.value = false;
     return true;
@@ -53,16 +57,17 @@ async function runCheck(): Promise<boolean> {
   return false;
 }
 
-/** 启动时调用一次：静默检查是否有新版本（出错不打扰）。 */
+/** 启动时调用一次：检查是否有新版本。失败时记录状态供 UpdatePanel 展示，不弹中央对话框打扰。 */
 export async function checkForUpdate(): Promise<void> {
   if (autoChecked) return;
   autoChecked = true;
   await ensureCurrentVersion();
   try {
     await runCheck();
-  } catch (e) {
-    // 静默：开发态 / 无网 / 未发布 release 时不弹错
-    console.warn("[updater] auto check skipped:", e);
+  } catch (e: any) {
+    checkFailed.value = true;
+    updateError.value = e?.message ?? String(e);
+    console.warn("[updater] auto check failed:", e);
   }
 }
 
@@ -71,11 +76,13 @@ export async function manualCheck(): Promise<void> {
   if (checking.value || updating.value) return;
   checking.value = true;
   updateError.value = "";
+  checkFailed.value = false;
   upToDate.value = false;
   dialogDismissed.value = false; // 手动检查后允许中央对话框再次出现
   try {
     await runCheck();
   } catch (e: any) {
+    checkFailed.value = true;
     updateError.value = e?.message ?? String(e);
   } finally {
     checking.value = false;

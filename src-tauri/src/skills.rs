@@ -13,6 +13,34 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// ───────── 「网页演示视频」打包技能（ConardLi · Polaris 集成）─────────
+// 这是个多文件技能包：安装时 git clone 原仓库整目录到用户技能目录，再叠加
+// 三个 Polaris 助手脚本（这里编译期内嵌），最后拼出 skill.md。
+const WVP_ID: &str = "web-video-presentation";
+const WVP_REPO: &str = "https://github.com/ConardLi/garden-skills";
+const WVP_ADDENDUM: &str = include_str!("templates/skills/web-video-presentation/addendum.md");
+const WVP_MINIMAX_TTS: &str =
+    include_str!("templates/skills/web-video-presentation/minimax-tts.mjs");
+const WVP_SCAFFOLD: &str = include_str!("templates/skills/web-video-presentation/scaffold.mjs");
+const WVP_BOOTSTRAP: &str = include_str!("templates/skills/web-video-presentation/bootstrap.mjs");
+
+// ───────── 「课件视频工坊」多文件技能（Polaris 自研，编译期内嵌，启动落盘）─────────
+// 支撑「生成课件类视频」UI 的基础设施技能：含 SKILL.md + 三个脚本 + 链路文档。
+// 不像 WVP 走 git clone，这套全自研，所有文件编译期内嵌、启动时确保落到 ~/Polaris/skills，
+// 以便：① 全新安装即可用；② 改了脚本后随 App 更新下发（靠 PVS_VERSION 比对覆盖）。
+const PVS_ID: &str = "polaris-video-studio";
+// 改动内嵌脚本/SKILL.md 后必须 +1，让已安装用户在下次启动时拿到更新。
+const PVS_VERSION: &str = "2";
+const PVS_SKILL_MD: &str = include_str!("templates/skills/polaris-video-studio/SKILL.md");
+const PVS_MANIFEST: &str = include_str!("templates/skills/polaris-video-studio/manifest.json");
+const PVS_INSTALL_DEPS: &str =
+    include_str!("templates/skills/polaris-video-studio/scripts/install-deps.mjs");
+const PVS_RUN: &str = include_str!("templates/skills/polaris-video-studio/scripts/run.mjs");
+const PVS_RECORD: &str =
+    include_str!("templates/skills/polaris-video-studio/scripts/pipeline/03-record.mjs");
+const PVS_WORKFLOW: &str =
+    include_str!("templates/skills/polaris-video-studio/references/WORKFLOW.md");
+
 // ═══════════════════════════════════════════════════════════════
 // 统一目录 Catalog（编译期，只读）
 // ═══════════════════════════════════════════════════════════════
@@ -103,6 +131,15 @@ fn catalog() -> Vec<CatalogSkill> {
             source: "third-party",
             preinstalled: false,
             system_prompt: include_str!("templates/skills/image-gen.md"),
+        },
+        // ── 源自 ConardLi 教程：完整可跑的网页演示视频技能包 ──
+        CatalogSkill {
+            id: WVP_ID,
+            name: "网页演示视频制作（ConardLi·Polaris集成）",
+            description: "把文稿做成 16:9 可点击翻页的网页演示再录屏成片。安装即下载完整脚手架+23主题+音频流水线，依赖自动装；配音自动调用 Polaris 内置 MiniMax（无需 mmx-cli / 登录 / GroupId）。Windows 走 Node 版一键跑通。",
+            source: "third-party",
+            preinstalled: false,
+            system_prompt: WVP_ADDENDUM,
         },
         // ── 源自 ConardLi 教程的两套向导 ──
         CatalogSkill {
@@ -536,6 +573,10 @@ pub fn create_skill(args: CreateSkillArgs) -> Result<(), String> {
 /// 安装即拥有，立即出现在技能中心（前端负责自动激活）。
 #[tauri::command]
 pub fn install_skill(id: String) -> Result<(), String> {
+    // 多文件打包技能走专用安装路径（clone 整包 + 叠加 Polaris 助手 + 拼 skill.md）。
+    if id == WVP_ID {
+        return install_web_video_presentation();
+    }
     let c = find_catalog(&id).ok_or_else(|| format!("市场中没有技能 '{}'", id))?;
     write_skill_file(
         c.id,
@@ -545,6 +586,139 @@ pub fn install_skill(id: String) -> Result<(), String> {
         "registry",
         c.system_prompt,
     )
+}
+
+/// 递归复制目录树。
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let ty = entry.file_type().map_err(|e| e.to_string())?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            fs::copy(&from, &to).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// 去掉 markdown 开头的 YAML frontmatter（`---\n…\n---\n`），返回正文。
+fn strip_frontmatter(s: &str) -> String {
+    let s = s.trim_start_matches('\u{feff}');
+    if let Some(rest) = s.strip_prefix("---") {
+        if let Some(idx) = rest.find("\n---") {
+            // 跳过 "\n---" 后到该行结尾
+            let after = &rest[idx + 4..];
+            let after = after.strip_prefix('\n').unwrap_or(after);
+            return after.trim_start_matches('\r').trim_start().to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// 安装「网页演示视频」打包技能：clone 原仓库整目录 → 叠加 Polaris 助手脚本
+/// → 拼 skill.md（Polaris 增强说明 + 原 SKILL 正文）→ 跑一次依赖自检。
+fn install_web_video_presentation() -> Result<(), String> {
+    let Some(root) = skills_dir() else {
+        return Err("无法获取用户目录".into());
+    };
+    let dest = root.join(WVP_ID);
+
+    // 1. clone 到临时目录
+    let tmp = make_temp_dir()?;
+    let repo = tmp.join("repo");
+    let repo_s = repo.to_string_lossy();
+    let clone_res = run_cmd(
+        "git",
+        &["clone", "--depth", "1", WVP_REPO, repo_s.as_ref()],
+    );
+    if let Err(e) = clone_res {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(format!("下载技能包失败（需要 git + 联网）：{}", e));
+    }
+    let src = repo.join("skills").join("web-video-presentation");
+    if !src.exists() {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err("仓库中未找到 skills/web-video-presentation".into());
+    }
+
+    // 2. 全新覆盖目标目录并复制整包
+    if dest.exists() {
+        fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
+    }
+    let copy_res = copy_dir_all(&src, &dest);
+    let _ = fs::remove_dir_all(&tmp);
+    copy_res?;
+
+    // 3. 叠加 Polaris 助手脚本（编译期内嵌）
+    let pol = dest.join("polaris");
+    fs::create_dir_all(&pol).map_err(|e| e.to_string())?;
+    fs::write(pol.join("minimax-tts.mjs"), WVP_MINIMAX_TTS).map_err(|e| e.to_string())?;
+    fs::write(pol.join("scaffold.mjs"), WVP_SCAFFOLD).map_err(|e| e.to_string())?;
+    fs::write(pol.join("bootstrap.mjs"), WVP_BOOTSTRAP).map_err(|e| e.to_string())?;
+
+    // 4. 拼 skill.md = frontmatter + Polaris 增强说明(替换 PKG 路径) + 原 SKILL 正文
+    let orig = fs::read_to_string(dest.join("SKILL.md")).map_err(|e| e.to_string())?;
+    let body = strip_frontmatter(&orig);
+    let pkg_str = dest.to_string_lossy().to_string();
+    let addendum = WVP_ADDENDUM.replace("__PKG_DIR__", &pkg_str);
+    let fm = format!(
+        "---\nid: {}\nname: 网页演示视频制作（ConardLi·Polaris集成）\ndescription: 把文稿做成16:9可点击翻页的网页演示再录屏成片，配音自动调用 Polaris 内置 MiniMax。完整脚手架+23主题+音频流水线，Windows 走 Node 版一键跑通。\nsource: third-party\nauthor: ConardLi/Polaris\ncreated_at: {}\n---\n\n",
+        WVP_ID,
+        now_secs()
+    );
+    let skill = format!("{}{}\n\n{}", fm, addendum, body);
+    fs::write(dest.join("skill.md"), skill).map_err(|e| e.to_string())?;
+
+    // 5. 依赖自检（best-effort，不阻断安装）
+    let _ = Command::new("node").arg(pol.join("bootstrap.mjs")).output();
+
+    Ok(())
+}
+
+/// 启动时确保「课件视频工坊」技能在 ~/Polaris/skills 落盘（多文件，含可执行脚本）。
+///
+/// 这是支撑「生成课件类视频」UI 的基础设施技能，所以是「确保存在」而非「尊重删除」：
+/// - 目录缺失（含被用户删除）→ 重新落盘
+/// - 已落盘但版本旧（`.polaris_version` < `PVS_VERSION`）→ 覆盖更新（让脚本修复随更新下发）
+/// - 已是最新 → 跳过
+///
+/// best-effort：任何失败都只是让该 UI 功能暂不可用，不应阻断 App 启动。
+pub fn seed_video_studio_skill() {
+    let Some(root) = skills_dir() else {
+        return;
+    };
+    let dest = root.join(PVS_ID);
+    let ver_file = dest.join(".polaris_version");
+    let stored = fs::read_to_string(&ver_file).unwrap_or_default();
+    let present = dest.join("skill.md").exists();
+    if present && stored.trim() == PVS_VERSION {
+        return; // 已是最新，无需重写
+    }
+    if write_video_studio_files(&dest).is_ok() {
+        let _ = fs::write(&ver_file, PVS_VERSION);
+    }
+}
+
+/// 把内嵌的「课件视频工坊」全部文件写到目标目录（建好子目录树）。
+/// 技能正文写成小写 `skill.md` —— 与 `scan_user_skills` / `write_skill_file` 的约定一致，
+/// 避免大小写敏感文件系统（Linux/macOS 构建）下扫描不到。
+fn write_video_studio_files(dest: &Path) -> Result<(), String> {
+    let scripts = dest.join("scripts");
+    let pipeline = scripts.join("pipeline");
+    let refs = dest.join("references");
+    fs::create_dir_all(&pipeline).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&refs).map_err(|e| e.to_string())?;
+    fs::write(dest.join("skill.md"), PVS_SKILL_MD).map_err(|e| e.to_string())?;
+    fs::write(dest.join("manifest.json"), PVS_MANIFEST).map_err(|e| e.to_string())?;
+    fs::write(scripts.join("install-deps.mjs"), PVS_INSTALL_DEPS).map_err(|e| e.to_string())?;
+    fs::write(scripts.join("run.mjs"), PVS_RUN).map_err(|e| e.to_string())?;
+    fs::write(pipeline.join("03-record.mjs"), PVS_RECORD).map_err(|e| e.to_string())?;
+    fs::write(refs.join("WORKFLOW.md"), PVS_WORKFLOW).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════

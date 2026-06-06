@@ -33,6 +33,7 @@ import {
   Workflow,
   PanelRightOpen,
   PanelRightClose,
+  BookOpen,
 } from "@lucide/vue";
 import {
   chat,
@@ -236,6 +237,14 @@ const orchestrateMode = ref(false);
 function toggleOrchestrate() {
   orchestrateMode.value = !orchestrateMode.value;
   if (orchestrateMode.value) nextTick(() => inputEl.value?.focus());
+}
+
+// ─────────── 知识库严格搜索（KB）模式开关 ───────────
+// 默认关闭：不注入大段 KB 导航，节省 token。打开后注入结构化 wiki + 双链地图。
+const kbMode = ref(false);
+function toggleKb() {
+  kbMode.value = !kbMode.value;
+  if (kbMode.value) nextTick(() => inputEl.value?.focus());
 }
 
 // ─────────── 工作流包「使用」→ 填入输入框 ───────────
@@ -457,6 +466,7 @@ async function send() {
     goal: goalMode.value && text ? text : undefined,
     consultMao: consult || undefined,
     dynamicWorkflow: orchestrateMode.value || undefined,
+    useKb: kbMode.value || undefined,
   });
 }
 
@@ -711,9 +721,21 @@ async function deleteCurrentConv() {
         </template>
         <template v-else>
           <div class="hero">你说,北极星画</div>
-          <div class="hero-sub">
-            本地优先 · 调用 Claude Code · 维基知识库 KB-first 召回
-          </div>
+          <!-- KB-first 的工作机制(沿双链取证/脚注溯源)是后台行为, 不在空对话页直接铺给用户;
+               需要时挂在下面这行折叠摘要里, 默认收起。 -->
+          <details class="hero-note">
+            <summary>知识库优先 · 怎么工作的</summary>
+            <div class="hero-sub">
+              <strong>知识库优先</strong> · 先沿 <code>Read / Glob / Grep</code> 在 PolarisKB
+              wiki 沿 <code>[[双链]]</code> 取证 · 命中标脚注来源 · 查不到才允许自由作答
+            </div>
+            <div class="hero-meta">
+              <span class="hm-pill">📚 知识库写死优先</span>
+              <span class="hm-pill">🔗 沿 <code>[[双链]]</code> 续读</span>
+              <span class="hm-pill">📑 命中标脚注 <code>[^1]</code> 来源</span>
+              <span class="hm-pill">⚠️ 查不到就标「资料不足」</span>
+            </div>
+          </details>
         </template>
       </div>
 
@@ -975,6 +997,22 @@ async function deleteCurrentConv() {
                   多智能体编排：拆成多个独立子任务并行干，每条 实现→校验→修复
                   <div class="btn-tooltip-sub">
                     适合可拆分 + 可验证的任务（批量改写 / 多维审查 / 调研）· 比单轮更贵
+                  </div>
+                </div>
+              </div>
+            </button>
+            <button
+              class="toolbar-btn"
+              :class="{ active: kbMode }"
+              @click="toggleKb"
+            >
+              <BookOpen :size="14" :stroke-width="1.8" />
+              <span>知识库</span>
+              <div class="btn-tooltip">
+                <div class="btn-tooltip-inner">
+                  打开后注入完整 KB 结构化 wiki + 双链地图（消耗大量 token）
+                  <div class="btn-tooltip-sub">
+                    默认关闭以节省上下文；只在需要严格搜索知识库时打开
                   </div>
                 </div>
               </div>
@@ -1256,6 +1294,46 @@ async function deleteCurrentConv() {
   color: var(--muted);
   font-size: 13px;
   letter-spacing: 0.5px;
+}
+.hero-sub strong {
+  color: var(--primary);
+  font-weight: 700;
+}
+.hero-sub code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  color: var(--primary-deep);
+  background: var(--bg-soft);
+  border: 1px solid var(--border-soft);
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+.hero-meta {
+  margin-top: 22px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+.hm-pill {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--primary-deep);
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-soft);
+  border-radius: 999px;
+  padding: 5px 11px;
+  letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.hm-pill code {
+  font-size: 0.92em;
+  color: var(--primary-deep);
+  background: transparent;
+  border: none;
+  padding: 0;
 }
 /* ── 毛主席项目彩蛋空状态 ── */
 .mao-hero {

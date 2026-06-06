@@ -288,6 +288,28 @@ fn config_with_model(mut cfg: Value, model: &str) -> Value {
     cfg
 }
 
+/// Codex 路由配置: 把 base_url 指到本地翻译代理, 钉模型为 gpt-5-codex(含小任务档),
+/// AUTH_TOKEN 给个占位串(代理只认 ~/.codex/auth.json, 不看这个), 让 claude 愿意发请求。
+fn codex_route_config(port: u16) -> Value {
+    let mut env = Map::new();
+    env.insert(
+        "ANTHROPIC_BASE_URL".into(),
+        Value::String(format!("http://127.0.0.1:{port}")),
+    );
+    env.insert(
+        "ANTHROPIC_AUTH_TOKEN".into(),
+        Value::String("polaris-codex-proxy".into()),
+    );
+    for k in MODEL_ENV_KEYS {
+        env.insert((*k).into(), Value::String("gpt-5-codex".into()));
+    }
+    env.insert(
+        "ANTHROPIC_SMALL_FAST_MODEL".into(),
+        Value::String("gpt-5-codex".into()),
+    );
+    json!({ "env": Value::Object(env) })
+}
+
 pub fn init(_app: &AppHandle) -> Result<()> {
     let user = UserDirs::new().ok_or_else(|| anyhow::anyhow!("no user dir"))?;
     let dir = user.home_dir().join("Polaris").join("data");
@@ -353,6 +375,18 @@ pub fn init(_app: &AppHandle) -> Result<()> {
     *STORE.write() = store;
     if migrated || gifted {
         persist();
+    }
+
+    // 若上次退出时正路由到 Codex(本地代理), 重启后端口可能变 → 重新拉起代理并校正
+    // ANTHROPIC_BASE_URL, 否则 settings.json 里残留的旧端口会让 claude 连不上。
+    {
+        let store = STORE.read().clone();
+        let views = build_views(&store);
+        if detect_current(&views, &store) == "codex" {
+            if let Ok(port) = crate::codex_proxy::ensure_running() {
+                let _ = apply_settings_config(&codex_route_config(port));
+            }
+        }
     }
     Ok(())
 }
@@ -700,19 +734,46 @@ pub fn provider_switch(id: String) -> Result<String, String> {
         .find(|v| v.id == id)
         .ok_or_else(|| format!("供应商不存在: {id}"))?;
 
-    if v.kind == "codex" || v.kind == "copilot" {
-        return Err("该供应商说 OpenAI 协议, 需翻译代理才能直连 (轻量版未内置)".to_string());
-    }
-    if v.kind != "official" && v.auth_token.trim().is_empty() {
-        return Err("该供应商尚未配置 API Key, 请先在弹窗中填写".to_string());
+    if v.kind == "copilot" {
+        return Err("GitHub Copilot 说 OpenAI 协议, 翻译代理暂未覆盖".to_string());
     }
 
-    let cfg = if v.kind == "official" {
+    let cfg = if v.kind == "codex" {
+        // Codex(ChatGPT) → 路由到本地翻译代理: 先确认已授权, 再拉起代理并把
+        // ANTHROPIC_BASE_URL 指到 127.0.0.1:port, claude 即透明用上 ChatGPT 订阅。
+        let authed = codex_auth_path()
+            .map(|p| codex_auth_has_tokens(&p))
+            .unwrap_or(false);
+        if !authed {
+            return Err("请先授权 ChatGPT (Codex), 再切换到它".to_string());
+        }
+        let port = crate::codex_proxy::ensure_running()?;
+        codex_route_config(port)
+    } else if v.kind == "official" {
         json!({ "env": {} })
     } else {
+        if v.auth_token.trim().is_empty() {
+            return Err("该供应商尚未配置 API Key, 请先在弹窗中填写".to_string());
+        }
         v.settings_config.clone()
     };
     apply_settings_config(&cfg)?;
+
+    // 同步当前进程 env: spawn 出去的 claude 子进程会继承父进程 env, 而进程 env 通常**优先于**
+    // settings.json 的 env(实测), 不在此处先清后置就会出现:
+    //   ① 切到 M3 → 进程被 set 了 ANTHROPIC_BASE_URL=minimaxi
+    //   ② 切回官方 → 只清了 settings, 父进程残留仍把 claude 拖到 minimaxi → 一直只能用 M3
+    // 先按 MANAGED_ENV_KEYS 全清, 再把新 cfg.env 写进当前进程 —— 切换结果确定。
+    for k in MANAGED_ENV_KEYS {
+        std::env::remove_var(k);
+    }
+    if let Some(src_env) = cfg.get("env").and_then(|e| e.as_object()) {
+        for (k, val) in src_env {
+            if let Some(s) = val.as_str() {
+                std::env::set_var(k, s);
+            }
+        }
+    }
 
     STORE.write().current_id = id.clone();
     persist();
@@ -783,10 +844,10 @@ pub fn provider_delete(id: String) -> Result<(), String> {
 //        ③ 用户授权后返回 authorization_code + code_verifier, 换 access/refresh/id_token 落盘。
 
 /// OpenAI OAuth 客户端 ID (与官方 Codex CLI 相同)
-const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub(crate) const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_DEVICE_USERCODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const CODEX_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
-const CODEX_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+pub(crate) const CODEX_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
 /// Device Code 流程约定的 redirect_uri (OpenAI 服务端固定)
 const CODEX_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
@@ -800,7 +861,7 @@ pub struct CodexStatus {
     pub auth_path: String,
 }
 
-fn codex_auth_path() -> Option<PathBuf> {
+pub(crate) fn codex_auth_path() -> Option<PathBuf> {
     UserDirs::new().map(|u| u.home_dir().join(".codex").join("auth.json"))
 }
 
@@ -828,7 +889,7 @@ pub fn codex_status() -> Result<CodexStatus, String> {
 }
 
 /// auth.json 存在且带 ChatGPT OAuth tokens (区别于纯 API key 登录)
-fn codex_auth_has_tokens(path: &Path) -> bool {
+pub(crate) fn codex_auth_has_tokens(path: &Path) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
     };
@@ -1032,7 +1093,7 @@ fn codex_jwt_claims(token: &str) -> Option<Value> {
 }
 
 /// base64url (无填充) 解码 —— 不引第三方 base64 crate
-fn codex_b64url_decode(input: &str) -> Option<Vec<u8>> {
+pub(crate) fn codex_b64url_decode(input: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u32> {
         match c {
             b'A'..=b'Z' => Some((c - b'A') as u32),
@@ -1089,7 +1150,7 @@ fn codex_write_auth_json(
 }
 
 /// 当前 UTC 时间的 RFC3339 字符串 (codex CLI 解析 last_refresh 用), 不引 chrono
-fn codex_rfc3339_now() -> String {
+pub(crate) fn codex_rfc3339_now() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

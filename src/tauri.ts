@@ -5,7 +5,11 @@
  * detecting absence of __TAURI_INTERNALS__ and returning empty / stub data.
  */
 import { invoke as rawInvoke } from "@tauri-apps/api/core";
-import { listen as rawListen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  listen as rawListen,
+  emit as rawEmit,
+  type UnlistenFn,
+} from "@tauri-apps/api/event";
 
 export const isTauri =
   typeof window !== "undefined" &&
@@ -27,6 +31,39 @@ export async function listen<T>(
   if (!isTauri) return () => {};
   return rawListen<T>(event, (e) => cb(e.payload));
 }
+
+export async function emit(event: string, payload?: unknown): Promise<void> {
+  if (!isTauri) return;
+  await rawEmit(event, payload);
+}
+
+// ──────────────────────────────────────────────────────────────
+// 飞书网关 module (板块⑭ 阶段 A)
+// ──────────────────────────────────────────────────────────────
+export interface FeishuConfig {
+  enabled: boolean;
+  appId: string;
+  appSecret: string;
+  /** "feishu"(国内) | "lark"(国际) */
+  domain: string;
+  /** "open" | "allowlist" | "disabled" */
+  dmPolicy: string;
+  groupRequireMention: boolean;
+  allowFrom: string[];
+}
+export interface FeishuTestResult {
+  ok: boolean;
+  botName: string;
+  botOpenId: string;
+  message: string;
+}
+
+export const feishu = {
+  getConfig: () => invoke<FeishuConfig>("feishu_get_config"),
+  setConfig: (config: FeishuConfig) =>
+    invoke<void>("feishu_set_config", { config }),
+  test: () => invoke<FeishuTestResult>("feishu_test_connection"),
+};
 
 // ──────────────────────────────────────────────────────────────
 // KB module
@@ -70,10 +107,44 @@ export interface KbUploadResult {
   message: string;
 }
 
+/** wiki 质量检查 (kb_lint) 单条问题 */
+export interface KbLintIssue {
+  /** dead-link | missing-type | orphan | unsafe-path */
+  kind: string;
+  path: string;
+  detail: string;
+}
+/** wiki 质量检查报告 */
+export interface KbLintReport {
+  totalPages: number;
+  deadLinks: number;
+  missingType: number;
+  orphans: number;
+  unsafePaths: number;
+  issues: KbLintIssue[];
+}
+
+/** 「维护知识网」(enrich / dedup) 进度事件 (kb:enrich / kb:dedup) */
+export interface KbMaintainEvent {
+  runId: string;
+  /** phase | tool | delta | done | error */
+  kind: string;
+  text?: string;
+  /** 仅 done: enrich=applied 补链数 / dedup=merged 合并数 */
+  applied?: number;
+  merged?: number;
+}
+
 export const kb = {
   scan: () => invoke<number>("kb_scan"),
   /** 构建知识网：跑一个有写权限的 wiki 维护者 agent，摄入即编译。返回 runId，进度走 kb:compile 事件 */
   compile: () => invoke<string>("kb_compile"),
+  /** wiki 质量检查：死双链/缺 type/孤儿页/不安全路径，纯规则即时返回 */
+  lint: () => invoke<KbLintReport>("kb_lint"),
+  /** 自动补双链：只读 claude 出 {term,target} 建议，Rust 执行替换。返回 runId，进度走 kb:enrich */
+  enrichLinks: () => invoke<string>("kb_enrich_links"),
+  /** 智能去重：规则粗筛 + AI 细判 + 代码合并。返回 runId，进度走 kb:dedup */
+  dedup: () => invoke<string>("kb_dedup"),
   search: (q: string, topK = 8) =>
     invoke<KbHit[]>("kb_search", { query: q, topK }),
   list: (subdir: string | null = null) =>
@@ -121,6 +192,8 @@ export interface ChatSendArgs {
   consultMao?: boolean;
   /** 「动态编排」：多智能体编排——编排器拆 N 个独立子任务，Task 子代理并行扇出，每条流水线 实现→对抗式校验→修复，最后汇总。 */
   dynamicWorkflow?: boolean;
+  /** 「知识库严格搜索」：打开时才把 KB 结构化 wiki + 双链地图注入上下文。默认 false。 */
+  useKb?: boolean;
 }
 
 export interface ChatStreamEvent {
@@ -217,6 +290,35 @@ export interface ArtifactSearchHit {
 }
 
 // ──────────────────────────────────────────────────────────────
+// Project module — 可运行项目（一键启动前后端 + 内嵌预览）
+// ──────────────────────────────────────────────────────────────
+export interface ProjectInfo {
+  /** 项目根绝对路径（正斜杠）——唯一标识 */
+  root: string;
+  name: string;
+  /** 预览 URL（前端起来后内嵌 iframe 加载） */
+  open?: string | null;
+  /** 是否正在运行 */
+  running: boolean;
+  /** 服务名列表（展示用） */
+  services: string[];
+}
+
+export const project = {
+  /** 列出某会话产物里的可运行项目（带 polaris.project.json 的文件夹） */
+  list: (conversationId?: string) =>
+    invoke<ProjectInfo[]>("project_list", {
+      conversationId: conversationId ?? null,
+    }),
+  /** 该项目是否正在运行 */
+  status: (root: string) => invoke<boolean>("project_status", { root }),
+  /** 一键运行：装依赖 + 起前后端，进度走 project:log / project:ready / project:exit 事件 */
+  run: (root: string) => invoke<void>("project_run", { root }),
+  /** 停止：kill 整个进程树 */
+  stop: (root: string) => invoke<void>("project_stop", { root }),
+};
+
+// ──────────────────────────────────────────────────────────────
 // Skills module
 // ──────────────────────────────────────────────────────────────
 export interface Skill {
@@ -284,6 +386,10 @@ export interface Project {
   name: string;
   createdAt: number;
   archived: boolean;
+  /** 板块⑫ 套用的预设人格 id（自定义为 null） */
+  personaId?: string | null;
+  /** 该人格绑定的专属知识库 scope（KB 根下相对子目录，null/空=全局） */
+  kbScope?: string | null;
 }
 
 export interface Conversation {
@@ -308,6 +414,8 @@ type RawProject = {
   name: string;
   created_at: number;
   archived: boolean;
+  persona_id?: string | null;
+  kb_scope?: string | null;
 };
 type RawConv = {
   id: string;
@@ -329,6 +437,8 @@ const p = (r: RawProject): Project => ({
   name: r.name,
   createdAt: r.created_at,
   archived: r.archived,
+  personaId: r.persona_id ?? null,
+  kbScope: r.kb_scope ?? null,
 });
 const c = (r: RawConv): Conversation => ({
   id: r.id,
@@ -363,6 +473,30 @@ export const convApi = {
     invoke<void>("conv_rename_conversation", { conversationId, title }),
   getMessages: async (conversationId: string) =>
     (await invoke<RawMsg[]>("conv_get_messages", { conversationId })).map(m),
+  /** 板块⑫: 设置项目的知识库 scope（人格工坊下拉） */
+  setKbScope: (projectId: string, kbScope: string | null) =>
+    invoke<void>("conv_set_project_kb_scope", { projectId, kbScope }),
+};
+
+// ──────────────────────────────────────────────────────────────
+// 人格模块 module (板块⑫) — 预设人格库 + 应用到项目
+// ──────────────────────────────────────────────────────────────
+export interface PersonaPreset {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  /** 建议绑定的知识库 scope（KB 根下相对子目录，空=全局） */
+  kbScope: string;
+  /** 人格正文（写入项目 CLAUDE.md 的内容） */
+  body: string;
+}
+
+export const persona = {
+  list: () => invoke<PersonaPreset[]>("persona_list"),
+  /** 把预设人格应用到项目（写 CLAUDE.md + 绑定 scope）；已有内容需 overwrite=true */
+  apply: (projectId: string, personaId: string, overwrite = false) =>
+    invoke<void>("persona_apply", { projectId, personaId, overwrite }),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -435,6 +569,11 @@ export interface CodexDeviceLogin {
 export interface CodexPollResult {
   status: "pending" | "ok";
 }
+export interface CodexProxyInfo {
+  running: boolean;
+  port: number;
+  lastError: string;
+}
 
 export const provider = {
   list: () => invoke<ProviderListResult>("provider_list"),
@@ -447,6 +586,7 @@ export const provider = {
   codexStartLogin: () => invoke<CodexDeviceLogin>("codex_start_login"),
   codexPollLogin: (deviceCode: string, userCode: string) =>
     invoke<CodexPollResult>("codex_poll_login", { deviceCode, userCode }),
+  codexProxyInfo: () => invoke<CodexProxyInfo>("codex_proxy_info"),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -608,6 +748,13 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return [];
     case "artifact_search":
       return [];
+    case "project_list":
+      return [];
+    case "project_status":
+      return false;
+    case "project_run":
+    case "project_stop":
+      return undefined;
     case "list_skills":
       return [
         { id: "deep-research", name: "深度搜索", description: "使用 LLM 大规模联网搜索相关内容，自动检索、汇总、交叉验证多来源信息", source: "third-party", installed: true, removable: false },
@@ -675,6 +822,38 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       return "_(browser stub)_  本文件需要 Tauri 后端读取。";
     case "claude_md_write":
       return undefined;
+    case "conv_set_project_kb_scope":
+    case "persona_apply":
+      return undefined;
+    case "feishu_get_config":
+      return {
+        enabled: false,
+        appId: "",
+        appSecret: "",
+        domain: "feishu",
+        dmPolicy: "open",
+        groupRequireMention: true,
+        allowFrom: [],
+      };
+    case "feishu_set_config":
+      return undefined;
+    case "feishu_test_connection":
+      return {
+        ok: false,
+        botName: "",
+        botOpenId: "",
+        message: "浏览器模式无法连接飞书，请在桌面应用中测试。",
+      };
+    case "persona_list":
+      return [
+        { id: "stock-expert", name: "股票助手", icon: "📈", description: "A 股深度分析 / 公告监控 / 行情查询。", kbScope: "raw/股票", body: "(browser stub)" },
+        { id: "content-writer", name: "内容创作", icon: "✍️", description: "公众号/自媒体写手：选题、撰写、5 种风格。", kbScope: "raw/创作", body: "(browser stub)" },
+        { id: "lesson-planner", name: "备课出卷", icon: "📚", description: "K12 教案/试卷/答案解析。", kbScope: "raw/教学", body: "(browser stub)" },
+        { id: "content-summarizer", name: "内容总结", icon: "📋", description: "网页/文档/会议纪要结构化摘要。", kbScope: "", body: "(browser stub)" },
+        { id: "health-interpreter", name: "医疗健康解读", icon: "🏥", description: "体检报告/化验单通俗解读。", kbScope: "raw/健康", body: "(browser stub)" },
+        { id: "pet-care", name: "萌宠管家", icon: "🐾", description: "猫狗行为/健康/营养。", kbScope: "raw/萌宠", body: "(browser stub)" },
+        { id: "mao", name: "毛主席", icon: "☭", description: "毛选式客观分析。", kbScope: "raw/毛主席", body: "(browser stub)" },
+      ];
     case "provider_list": {
       const mk = (id: string, name: string, baseUrl: string, category: string, color: string, kind: string, hasKey: boolean, authToken = "") => ({
         id, name, note: "", baseUrl, tokenField: "ANTHROPIC_AUTH_TOKEN", category, websiteUrl: baseUrl, color, kind, isPreset: true, hasKey, authToken,
@@ -713,6 +892,8 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
       };
     case "codex_poll_login":
       return { status: "ok" };
+    case "codex_proxy_info":
+      return { running: false, port: 0, lastError: "" };
     case "env_check": {
       const tool = (key: string, name: string, found: boolean, required = false): ToolStatus => ({
         key: key as ToolStatus["key"],

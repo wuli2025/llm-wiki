@@ -1,9 +1,13 @@
 mod chat;
 mod claude_md;
+mod codex_proxy;
 mod conv;
 mod convert;
 mod doctor;
+mod feishu;
 mod kb;
+mod persona;
+mod project;
 mod provider;
 mod skills;
 
@@ -43,6 +47,9 @@ pub fn run() {
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             provider::init(h)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            // 确保「课件视频工坊」技能落盘（支撑「生成课件类视频」UI 的基础设施技能，
+            // 编译期内嵌 → 全新安装即可用、脚本修复随 App 更新下发）。best-effort，不阻断启动。
+            skills::seed_video_studio_skill();
             // 环境预热: 后台把 claude / pwsh 目录塞进进程 PATH + 设 Git Bash 路径,
             // 让之后 spawn 的 claude CLI 直接「找得到、有 shell」, 无需重启 (见 doctor.rs)。
             doctor::prime_path_for_claude();
@@ -63,6 +70,9 @@ pub fn run() {
             kb::kb_ingest,
             kb::kb_upload_files,
             kb::kb_graph,
+            kb::kb_lint,
+            kb::kb_enrich_links,
+            kb::kb_dedup,
             // Sandbox (板块⑤ 已抽离为 polaris-sandbox crate, 命令名不变)
             polaris_sandbox::commands::sandbox_status,
             polaris_sandbox::commands::sandbox_build_image,
@@ -83,6 +93,14 @@ pub fn run() {
             conv::conv_delete_conversation,
             conv::conv_rename_conversation,
             conv::conv_get_messages,
+            conv::conv_set_project_kb_scope,
+            // 人格模块 (板块⑫)
+            persona::persona_list,
+            persona::persona_apply,
+            // 飞书网关 (板块⑭ 阶段 A)
+            feishu::feishu_get_config,
+            feishu::feishu_set_config,
+            feishu::feishu_test_connection,
             // Chat
             chat::chat_send,
             chat::chat_cancel,
@@ -92,6 +110,11 @@ pub fn run() {
             chat::artifact_reveal,
             chat::artifact_list,
             chat::artifact_search,
+            // 可运行项目 (板块⑮): 一键启动前后端 + 内嵌预览
+            project::project_list,
+            project::project_status,
+            project::project_run,
+            project::project_stop,
             // CLAUDE.md
             claude_md::claude_md_list_projects,
             claude_md::claude_md_kb_info,
@@ -113,6 +136,7 @@ pub fn run() {
             provider::codex_status,
             provider::codex_start_login,
             provider::codex_poll_login,
+            codex_proxy::codex_proxy_info,
             // 环境医生 (环境监测 + 配置安装)
             doctor::env_check,
             doctor::env_fix_path,

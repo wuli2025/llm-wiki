@@ -110,6 +110,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
       goal?: string;
       consultMao?: boolean;
       dynamicWorkflow?: boolean;
+      useKb?: boolean;
     }
   ) {
     const sessions = useSessionsStore();
@@ -130,6 +131,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
         goal: opts.goal,
         consultMao: opts.consultMao,
         dynamicWorkflow: opts.dynamicWorkflow,
+        useKb: opts.useKb,
         conversationId: convId,
       });
       reqByConv.value[convId] = reqId;

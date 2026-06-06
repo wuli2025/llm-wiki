@@ -1,0 +1,10 @@
+{
+  "id": "polaris-video-studio",
+  "name": "Polaris 视频工坊（课件/口播/演示一键成片）",
+  "version": "1.0.0",
+  "category": "Video Production / Presentation",
+  "description": "把文案、课件、口播稿一键做成 16:9 网页演示视频并输出 MP4。完整链路：文案→口播稿→网页开发→MiniMax 配音→逐帧对齐录屏→MP4。零手动录屏，全程自动化。",
+  "author": "Polaris",
+  "source": "official",
+  "compat": ["claude-code", "claude-ai"]
+}

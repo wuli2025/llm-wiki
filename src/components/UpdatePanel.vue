@@ -20,6 +20,7 @@ import {
   updateError,
   checking,
   upToDate,
+  checkFailed,
   lastCheckedAt,
   manualCheck,
   applyUpdate,
@@ -112,6 +113,16 @@ const lastChecked = computed(() => {
         <div v-else-if="upToDate" class="ok">
           <CheckCircle2 :size="18" :stroke-width="1.8" />
           <span>已是最新版本</span>
+        </div>
+
+        <!-- 自动检查失败（非静默，引导用户手动检查） -->
+        <div v-else-if="checkFailed && !updateVersion" class="err">
+          <div>自动检查更新失败: {{ updateError || "网络或服务端异常" }}</div>
+          <div style="margin-top:4px;font-size:11px;color:var(--dim)">
+            可点击上方「检查更新」重试，或前往
+            <a href="https://github.com/wuli2025/polaris_coworker/releases" target="_blank" style="color:var(--primary)">GitHub Releases</a>
+            手动下载
+          </div>
         </div>
 
         <!-- 错误 -->

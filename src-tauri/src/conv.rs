@@ -22,6 +22,12 @@ pub struct Project {
     pub created_at: i64,
     #[serde(default)]
     pub archived: bool,
+    /// 板块⑫ 人格模块：该项目套用的预设人格 id（自定义为 None）。仅用于前端显示图标/便于更新。
+    #[serde(default)]
+    pub persona_id: Option<String>,
+    /// 该人格绑定的专属知识库范围（KB 根下相对子目录，None/空=全局 PolarisKB）。
+    #[serde(default)]
+    pub kb_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,14 +96,17 @@ pub fn init(_app: &AppHandle) -> Result<()> {
             name: "默认项目".into(),
             created_at: now,
             archived: false,
+            persona_id: None,
+            kb_scope: None,
         });
     }
 
     // 首启一次性: 赠送「毛主席」项目 + 写入毛主席人格 CLAUDE.md。
     // 插到最前, 作为默认进入的项目, 让对话框彩蛋空状态可见。
     if !state.seeded_mao {
-        match state.projects.iter().find(|p| p.name == MAO_PROJECT_NAME) {
-            Some(p) => write_mao_persona(&p.id),
+        // 找到/新建毛主席项目，写入人格并绑定其专属资料库 scope（raw/毛主席）。
+        let mao_pid = match state.projects.iter().position(|p| p.name == MAO_PROJECT_NAME) {
+            Some(i) => state.projects[i].id.clone(),
             None => {
                 let pid = new_id("p");
                 state.projects.insert(
@@ -107,9 +116,20 @@ pub fn init(_app: &AppHandle) -> Result<()> {
                         name: MAO_PROJECT_NAME.into(),
                         created_at: now_ms(),
                         archived: false,
+                        persona_id: Some("mao".into()),
+                        kb_scope: Some("raw/毛主席".into()),
                     },
                 );
-                write_mao_persona(&pid);
+                pid
+            }
+        };
+        write_mao_persona(&mao_pid);
+        if let Some(p) = state.projects.iter_mut().find(|p| p.id == mao_pid) {
+            if p.persona_id.is_none() {
+                p.persona_id = Some("mao".into());
+            }
+            if p.kb_scope.is_none() {
+                p.kb_scope = Some("raw/毛主席".into());
             }
         }
         state.seeded_mao = true;
@@ -173,6 +193,34 @@ pub fn project_id_of_conversation(conversation_id: &str) -> Option<String> {
         .map(|c| c.project_id.clone())
 }
 
+/// 取某对话的全部消息(按时间升序)。chat::send 注入「对话历史」时用,
+/// 避免外部直接锁 STATE。等价于 `conv_get_messages` 命令的内部版。
+pub fn get_messages(conversation_id: &str) -> Vec<Message> {
+    let mut list: Vec<Message> = STATE
+        .read()
+        .messages
+        .iter()
+        .filter(|m| m.conversation_id == conversation_id)
+        .cloned()
+        .collect();
+    list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    list
+}
+
+/// 列出某项目下的全部对话(按 updated_at 倒序, 最近的在前)。
+/// chat::send 构建「跨对话产物地图」时用。
+pub fn conversations_of_project(project_id: &str) -> Vec<Conversation> {
+    let mut list: Vec<Conversation> = STATE
+        .read()
+        .conversations
+        .iter()
+        .filter(|c| c.project_id == project_id)
+        .cloned()
+        .collect();
+    list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    list
+}
+
 /// 列出所有未归档的项目 (claude_md 模块用,避免直接锁 STATE)
 pub fn list_active_projects() -> Vec<Project> {
     STATE
@@ -182,6 +230,33 @@ pub fn list_active_projects() -> Vec<Project> {
         .filter(|p| !p.archived)
         .cloned()
         .collect()
+}
+
+/// 该项目绑定的知识库 scope（板块⑫；空/None=全局）。claude_md::render_for_project 注入时用。
+pub fn project_kb_scope(project_id: &str) -> Option<String> {
+    STATE
+        .read()
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .and_then(|p| p.kb_scope.clone())
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// 设置项目的人格与知识库 scope（persona::persona_apply 用）。
+pub fn set_project_persona(
+    project_id: &str,
+    persona_id: Option<String>,
+    kb_scope: Option<String>,
+) {
+    {
+        let mut st = STATE.write();
+        if let Some(p) = st.projects.iter_mut().find(|p| p.id == project_id) {
+            p.persona_id = persona_id;
+            p.kb_scope = kb_scope;
+        }
+    }
+    persist();
 }
 
 pub fn append_message(conversation_id: &str, role: &str, content: &str) -> Result<String> {
@@ -245,10 +320,25 @@ pub fn conv_create_project(name: String) -> Result<Project, String> {
         },
         created_at: now_ms(),
         archived: false,
+        persona_id: None,
+        kb_scope: None,
     };
     STATE.write().projects.push(p.clone());
     persist();
     Ok(p)
+}
+
+/// 手动设置项目的知识库 scope（人格工坊里的下拉）。persona_id 维持不变。
+#[tauri::command]
+pub fn conv_set_project_kb_scope(project_id: String, kb_scope: Option<String>) -> Result<(), String> {
+    let persona = STATE
+        .read()
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .and_then(|p| p.persona_id.clone());
+    set_project_persona(&project_id, persona, kb_scope.filter(|s| !s.trim().is_empty()));
+    Ok(())
 }
 
 /// 该项目在磁盘上的工作目录 `~/Polaris/projects/<id>/`(须与 write_mao_persona / claude_md 一致)。
@@ -353,15 +443,7 @@ pub fn conv_delete_conversation(conversation_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn conv_get_messages(conversation_id: String) -> Vec<Message> {
-    let mut list: Vec<Message> = STATE
-        .read()
-        .messages
-        .iter()
-        .filter(|m| m.conversation_id == conversation_id)
-        .cloned()
-        .collect();
-    list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-    list
+    get_messages(&conversation_id)
 }
 
 #[tauri::command]

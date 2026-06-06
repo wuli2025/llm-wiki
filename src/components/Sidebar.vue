@@ -7,7 +7,8 @@ import {
   Clock,
   Puzzle,
   CloudDownload,
-  FileText,
+  Drama,
+  MessageCircle,
   Stethoscope,
   Server,
   Settings,
@@ -18,6 +19,7 @@ import {
   FolderOpen,
   MoreHorizontal,
   Archive,
+  Clapperboard,
 } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 import { useChatStore } from "../stores/chat";
@@ -37,11 +39,14 @@ const primaryNav: NavItem[] = [
   // 沙箱入口已隐藏：进入沙箱视图首挂载较重、点击有卡顿，且当前非核心路径。
   // 视图与路由（App.vue / SandboxStatus）保留，未来需要时把这一项加回即可。
   { key: "skill_center", label: "技能中心", icon: Puzzle },
-  { key: "update", label: "更新", icon: CloudDownload },
+  // 板块⑫: 「人格」升至顶层（原「目录说明」改造而来），与「更新」对调
+  { key: "claude_md", label: "人格", icon: Drama },
 ];
-// 收纳进「更多」的次要项（目录说明 / 环境 / MCP / 设置）
+// 收纳进「更多」的次要项（更新 / 飞书 / 环境 / MCP / 设置）
 const moreNav: NavItem[] = [
-  { key: "claude_md", label: "目录说明", icon: FileText },
+  { key: "video_course", label: "生成课件类视频", icon: Clapperboard },
+  { key: "update", label: "更新", icon: CloudDownload },
+  { key: "feishu", label: "飞书", icon: MessageCircle },
   { key: "env_doctor", label: "环境", icon: Stethoscope },
   { key: "mcp", label: "MCP", icon: Server },
   { key: "settings", label: "设置", icon: Settings },

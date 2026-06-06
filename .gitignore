@@ -28,5 +28,11 @@ conversations/
 .shot-*.png
 .dev-screenshot-*.png
 .dev-server.log
+.dev-run.log
 /workspace/
 PolarisKB/.polaris_seeded
+
+# 本地工作/产物草稿目录（运行时生成，不进仓库）
+/career-map-work/
+/polaris-video-work/
+/polaris-video-work-kbwiki/

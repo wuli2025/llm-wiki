@@ -17,7 +17,9 @@ export type ViewKey =
   | "env_doctor"
   | "mcp"
   | "update"
-  | "settings";
+  | "feishu"
+  | "settings"
+  | "video_course";
 
 export const useAppStore = defineStore("app", () => {
   const view = ref<ViewKey>("chat");

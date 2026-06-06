@@ -22,16 +22,45 @@ import {
   Workflow,
   PanelRightClose,
   PanelRightOpen,
+  Rocket,
+  Play,
+  Square,
+  RotateCw,
+  Boxes,
+  Terminal,
 } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 import { useArtifactsStore } from "../stores/artifacts";
 import { useWorkflowsStore, type WorkflowPack } from "../stores/workflows";
-import { artifacts as artifactsApi, type ArtifactEntry } from "../tauri";
+import { useProjectsStore } from "../stores/projects";
+import { useChatStore } from "../stores/chat";
+import {
+  artifacts as artifactsApi,
+  type ArtifactEntry,
+  type ProjectInfo,
+} from "../tauri";
 
 const app = useAppStore();
 const artifacts = useArtifactsStore();
 const workflows = useWorkflowsStore();
-const activeTab = ref<"artifacts" | "ref" | "workflow">("artifacts");
+const projects = useProjectsStore();
+const chat = useChatStore();
+const activeTab = ref<"artifacts" | "ref" | "project" | "workflow">("artifacts");
+
+// ───── 可运行项目：列表 + 一键运行 ─────
+async function loadProjects() {
+  await projects.refresh(app.currentConvId ?? undefined);
+}
+function onRunProject(p: ProjectInfo) {
+  projects.run(p);
+}
+function onStopActive() {
+  if (projects.activeRoot) projects.stop(projects.activeRoot);
+}
+function onOpenPreviewExternal() {
+  // 用系统默认浏览器打开运行中的应用（artifact_open_external 对 URL 同样适用）
+  if (projects.previewUrl) artifactsApi.openExternal(projects.previewUrl);
+}
 
 // ───── 工作流包：三点菜单 + 使用 ─────
 const wfMenuOpen = ref<string | null>(null);
@@ -81,8 +110,25 @@ watch(
   () => [activeTab.value, app.currentConvId] as const,
   ([tab]) => {
     if (tab === "ref") loadRefFiles();
+    if (tab === "project") loadProjects();
   },
   { immediate: true }
+);
+// 切对话时, 后台静默刷新一次项目列表 (即使没停在「项目」tab), 让 tab 计数及时反映新项目
+watch(
+  () => app.currentConvId,
+  () => loadProjects()
+);
+// 本对话一轮回复刚结束 (sending: true→false): 模型可能刚打包好一个新项目, 静默刷新列表,
+// 让「项目」tab 立刻出现可点「运行」的卡片 —— 用户无需手动刷新。
+watch(
+  () => chat.isSending(app.currentConvId ?? null),
+  (now, prev) => {
+    if (prev && !now) {
+      loadProjects();
+      if (activeTab.value === "ref") loadRefFiles();
+    }
+  }
 );
 // 预览关闭后回到抽屉时，若停在参考资料则刷新一次（可能刚生成新文件）
 watch(
@@ -142,12 +188,86 @@ function fmtSize(n: number): string {
   <aside
     class="dr"
     :class="{
-      collapsed: app.drawerCollapsed && !artifacts.current,
-      preview: !!artifacts.current,
+      collapsed: app.drawerCollapsed && !artifacts.current && !projects.activeRoot,
+      preview: !!artifacts.current || !!projects.activeRoot,
     }"
   >
+    <!-- ───────── 运行预览模式（一键启动的项目，内嵌 iframe 看应用 + 日志台） ───────── -->
+    <template v-if="projects.activeRoot">
+      <div class="pv-head">
+        <Boxes :size="15" :stroke-width="1.7" class="pv-ficon" />
+        <span class="pv-name" :title="projects.active?.root">
+          {{ projects.active?.name ?? "项目" }}
+        </span>
+        <span v-if="projects.starting" class="pj-badge starting">启动中</span>
+        <span v-else-if="projects.ready" class="pj-badge ready">运行中</span>
+        <div class="pv-actions">
+          <button
+            class="pv-btn"
+            title="重新载入预览"
+            :disabled="!projects.ready"
+            @click="projects.reloadFrame()"
+          >
+            <RotateCw :size="14" :stroke-width="1.8" />
+          </button>
+          <button
+            class="pv-btn"
+            :title="projects.logsOpen ? '隐藏日志' : '显示日志'"
+            :class="{ on: projects.logsOpen }"
+            @click="projects.toggleLogs()"
+          >
+            <Terminal :size="15" :stroke-width="1.8" />
+          </button>
+          <button
+            class="pv-btn"
+            title="用默认浏览器打开"
+            :disabled="!projects.previewUrl"
+            @click="onOpenPreviewExternal()"
+          >
+            <Globe :size="15" :stroke-width="1.8" />
+          </button>
+          <button class="pv-btn danger" title="停止运行" @click="onStopActive()">
+            <Square :size="13" :stroke-width="2" />
+          </button>
+          <button class="pv-btn" title="关闭预览" @click="projects.closePreview()">
+            <X :size="15" :stroke-width="2" />
+          </button>
+        </div>
+      </div>
+
+      <div class="pv-body pj-body">
+        <!-- 应用就绪 → iframe 看真实运行的前后端 -->
+        <iframe
+          v-if="projects.ready && projects.previewUrl"
+          :key="projects.frameNonce"
+          class="pv-frame"
+          :src="projects.previewUrl"
+          referrerpolicy="no-referrer"
+        />
+        <!-- 还在装依赖 / 起服务 → 状态提示（日志在下方滚动） -->
+        <div v-else class="pv-state">
+          <Loader :size="22" :stroke-width="1.6" class="spin" />
+          <span>正在装依赖、启动前后端…</span>
+          <span class="pj-hint">首次运行要下载依赖，可能需要一会儿，下面是实时日志</span>
+        </div>
+
+        <!-- 日志台 -->
+        <div v-if="projects.logsOpen" class="pj-logs">
+          <div
+            v-for="(l, i) in projects.logs"
+            :key="i"
+            class="pj-log"
+            :class="l.stream"
+          >
+            {{ l.line }}
+          </div>
+          <div v-if="!projects.logs.length" class="pj-log info">等待输出…</div>
+        </div>
+      </div>
+    </template>
+
     <!-- ───────── 成品预览模式 ───────── -->
-    <template v-if="artifacts.current">
+    <template v-else-if="artifacts.current">
       <div class="pv-head">
         <component :is="headIcon" :size="15" :stroke-width="1.7" class="pv-ficon" />
         <span class="pv-name" :title="artifacts.current.path">
@@ -265,6 +385,7 @@ function fmtSize(n: number): string {
             v-for="t in [
               { k: 'artifacts', l: '输出产物' },
               { k: 'ref', l: '参考资料' },
+              { k: 'project', l: '项目' },
               { k: 'workflow', l: '工作流包' },
             ]"
             :key="t.k"
@@ -315,6 +436,54 @@ function fmtSize(n: number): string {
               <div class="empty-text">
                 本对话还没有产出文件。<br />
                 生成 HTML / 报告 / PPT 等成品后,会按时间出现在这里,点开即预览。
+              </div>
+            </div>
+          </template>
+
+          <!-- 可运行项目：模型打包好的前后端，点「运行」一键启动并内嵌预览 -->
+          <template v-else-if="activeTab === 'project'">
+            <div class="ref-head">
+              <span class="ref-count">本对话 · {{ projects.list.length }} 个项目</span>
+              <button class="dh-btn" title="刷新" @click="loadProjects">
+                <RefreshCw :size="13" :stroke-width="1.8" />
+              </button>
+            </div>
+            <div v-if="projects.loading" class="ref-loading">
+              <Loader :size="18" :stroke-width="1.6" class="spin" />
+            </div>
+            <ul v-else-if="projects.list.length" class="pj-list">
+              <li v-for="p in projects.list" :key="p.root" class="pj-card">
+                <div class="pj-card-main">
+                  <div class="pj-card-name">
+                    <Boxes :size="15" :stroke-width="1.7" class="pj-card-ic" />
+                    <span>{{ p.name }}</span>
+                    <span v-if="p.running" class="pj-dot" title="运行中" />
+                  </div>
+                  <div class="pj-card-svcs" :title="p.services.join(' · ')">
+                    {{ p.services.length }} 个服务<template v-if="p.services.length">
+                      · {{ p.services.join(" · ") }}</template
+                    >
+                  </div>
+                </div>
+                <button
+                  class="pj-run"
+                  :class="{ running: p.running }"
+                  @click="onRunProject(p)"
+                >
+                  <component
+                    :is="p.running ? Play : Rocket"
+                    :size="13"
+                    :stroke-width="2"
+                  />
+                  <span>{{ p.running ? "查看" : "运行" }}</span>
+                </button>
+              </li>
+            </ul>
+            <div v-else class="empty">
+              <div class="empty-glyph">◳</div>
+              <div class="empty-text">
+                本对话还没有可运行的项目。<br />
+                让我生成一个「能跑起来的应用」(前端 + 后端)后,会打包成项目出现在这里,点「运行」即可一键启动并内嵌预览。
               </div>
             </div>
           </template>
@@ -925,6 +1094,155 @@ function fmtSize(n: number): string {
 }
 .wf-mi.danger:hover {
   background: var(--vermilion-soft);
+}
+
+/* ───────── 可运行项目 ───────── */
+.pv-btn.danger:hover {
+  background: var(--vermilion-soft);
+  color: var(--vermilion);
+}
+.pv-btn.on {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+.pv-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.pv-btn:disabled:hover {
+  background: transparent;
+  color: var(--muted);
+}
+.pj-badge {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  letter-spacing: 0.3px;
+}
+.pj-badge.starting {
+  background: var(--primary-soft);
+  color: var(--primary-deep);
+}
+.pj-badge.ready {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+/* 运行预览体：iframe + 底部日志台 */
+.pj-body {
+  position: relative;
+}
+.pj-hint {
+  font-size: 11.5px;
+  color: var(--dim);
+  max-width: 320px;
+  line-height: 1.5;
+}
+.pj-logs {
+  flex-shrink: 0;
+  max-height: 38%;
+  overflow-y: auto;
+  background: #1a1a1a;
+  color: #d4d4d4;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-strong);
+}
+.pj-log {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.pj-log.stderr {
+  color: #ff9e9e;
+}
+.pj-log.info {
+  color: #7fb0ff;
+}
+
+/* 项目列表卡片 */
+.pj-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pj-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.pj-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow);
+}
+.pj-card-main {
+  flex: 1;
+  min-width: 0;
+}
+.pj-card-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.pj-card-name > span:not(.pj-dot) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pj-card-ic {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+.pj-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2e7d32;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 3px #e8f5e9;
+}
+.pj-card-svcs {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pj-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 6px 13px;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s, background 0.15s;
+}
+.pj-run:hover {
+  filter: brightness(1.08);
+}
+.pj-run.running {
+  background: var(--primary-soft);
+  color: var(--primary-deep);
 }
 
 </style>

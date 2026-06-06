@@ -20,7 +20,9 @@ import SplashScreen from "./components/SplashScreen.vue";
 import Onboarding from "./components/Onboarding.vue";
 import EnvDoctor from "./components/EnvDoctor.vue";
 import UpdatePanel from "./components/UpdatePanel.vue";
+import FeishuSettings from "./components/FeishuSettings.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
+import VideoCourseStudio from "./components/VideoCourseStudio.vue";
 import { checkForUpdate } from "./composables/useUpdater";
 import { useAppStore, type ViewKey } from "./stores/app";
 import { useArtifactsStore } from "./stores/artifacts";
@@ -77,8 +79,6 @@ function onViewReady(v: ViewKey) {
 // 这样切走/未挂载 ChatPanel 时后台任务仍持续流式推进、完成有提醒。
 onMounted(() => {
   chatStore.init();
-  // 启动后静默检查 GitHub Releases 是否有新版本（无网/未发布会被静默吞掉）
-  checkForUpdate();
 });
 
 // 启动流程：splash(每次) → onboarding(仅首次) → env(环境检测,健康则无感放行) → ready
@@ -94,6 +94,8 @@ function onOnboardingDone() {
 }
 function onEnvDone() {
   phase.value = "ready";
+  // splash → onboarding → env 全部完成后，再检查更新（避免弹窗被盖住）
+  checkForUpdate();
 }
 
 // 预览成品文件时把右侧抽屉拓宽；展开模式更宽，让观看更好看
@@ -132,8 +134,10 @@ const layoutCols = computed(
         <SkillCenter v-else-if="mountedView === 'skill_center'" />
         <EnvDoctor v-else-if="mountedView === 'env_doctor'" />
         <UpdatePanel v-else-if="mountedView === 'update'" />
+        <FeishuSettings v-else-if="mountedView === 'feishu'" />
         <McpConfigModal v-else-if="mountedView === 'mcp'" inline @close="app.setView('chat')" />
         <Settings v-else-if="mountedView === 'settings'" />
+        <VideoCourseStudio v-else-if="mountedView === 'video_course'" />
       </KeepAlive>
 
       <!-- 点击重视图即刻浮现的快速加载条（盖住挂载/建图卡顿） -->

@@ -20,6 +20,21 @@ use tauri::AppHandle;
 pub const PLACEHOLDER_MARKER: &str = "polaris:placeholder";
 
 const TEMPLATE: &str = include_str!("templates/project_claude.md");
+/// L1 全局身份（板块⑫ 人格分层注入；置位 placeholder 或空则不注入）
+const IDENTITY: &str = include_str!("templates/identity.md");
+
+/// L5 当前时间上下文：让模型准确处理「明天/1 小时后」等相对时间。
+fn local_time_context() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!(
+        "### 当前时间\n- Unix 毫秒时间戳: {}\n- 处理「明天 / 1 小时后 / 下周」等相对时间时, 以本机当前时间为准。\n\n",
+        unix_ms
+    )
+}
 
 pub fn init(_app: &AppHandle) -> Result<()> {
     Ok(())
@@ -178,26 +193,42 @@ pub fn claude_md_write(
 /// 设计 (忠于 Karpathy llmwiki): 不做关键词召回硬塞, 也不让模型去调不存在的 kb_search;
 /// 而是注入结构化 wiki + 双链地图 + KB 根路径, 让模型用 Read/Glob/Grep 沿双链自取。
 /// (`_user_prompt` 不再用于关键词召回, 保留参数仅为不动调用方签名。)
-pub fn render_for_project(project_id: Option<&str>, _user_prompt: &str) -> String {
+/// 主上下文渲染 (一次给 chat::send 全部内容):
+/// - 知识库块: 只在 `use_kb=true` 时注入完整结构化 wiki + 双链地图；
+///   false 时只保留 KB 根路径提示（<50 token），日常任务不再吃掉上下文预算。
+/// - 项目块:  当前项目 CLAUDE.md (若激活)
+pub fn render_for_project(project_id: Option<&str>, _user_prompt: &str, use_kb: bool) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    // ① 知识库块: 行为指南 (若激活) + 结构化 wiki 上下文 (只要 KB 有内容就注入)
+    // ① 知识库块
     let mut kb_block = String::new();
-    if let Some(p) = kb_claude_md_path() {
-        if let Ok(content) = fs::read_to_string(&p) {
-            if !content.contains(PLACEHOLDER_MARKER) && !content.trim().is_empty() {
-                kb_block.push_str(&format!(
-                    "### [知识库行为指南] `{}`\n\n{}\n\n",
-                    p.display(),
-                    content.trim()
-                ));
+    if use_kb {
+        // 「严格搜索」模式：注入完整行为指南 + 结构化 wiki + 双链地图
+        if let Some(p) = kb_claude_md_path() {
+            if let Ok(content) = fs::read_to_string(&p) {
+                if !content.contains(PLACEHOLDER_MARKER) && !content.trim().is_empty() {
+                    kb_block.push_str(&format!(
+                        "### [知识库行为指南] `{}`\n\n{}\n\n",
+                        p.display(),
+                        content.trim()
+                    ));
+                }
             }
         }
-    }
-    // 结构化 wiki + 双链地图 —— 与上面的行为指南解耦, 删了/留空 CLAUDE.md 也照样注入
-    let wiki_ctx = kb::kb_context_block();
-    if !wiki_ctx.is_empty() {
-        kb_block.push_str(&wiki_ctx);
+        let scope = project_id.and_then(conv::project_kb_scope);
+        let wiki_ctx = kb::kb_context_block_scoped(scope.as_deref());
+        if !wiki_ctx.is_empty() {
+            kb_block.push_str(&wiki_ctx);
+        }
+    } else {
+        // 默认模式：只留 KB 根路径极简提示（<50 token），不占上下文预算
+        let root = kb::kb_root();
+        if !root.is_empty() {
+            kb_block.push_str(&format!(
+                "知识库根: `{}` (可用 Read/Glob/Grep 沿双链自取)\n\n",
+                root.replace('\\', "/")
+            ));
+        }
     }
     if !kb_block.is_empty() {
         kb_block.push_str("---\n\n");
@@ -223,7 +254,15 @@ pub fn render_for_project(project_id: Option<&str>, _user_prompt: &str) -> Strin
         return String::new();
     }
 
-    let mut out = String::from("\n\n## 主上下文 (CLAUDE.md + 维基库 一体注入)\n\n");
+    let mut out = String::from("\n\n## 主上下文 (身份 + 人格 + 维基库 一体注入)\n\n");
+    // L1 全局身份（占位/空则跳过）
+    if !IDENTITY.contains(PLACEHOLDER_MARKER) && !IDENTITY.trim().is_empty() {
+        out.push_str("### Polaris 身份\n\n");
+        out.push_str(IDENTITY.trim());
+        out.push_str("\n\n");
+    }
+    // L5 当前时间
+    out.push_str(&local_time_context());
     out.push_str(
         "以下是 Polaris 为你准备的行为指南与**结构化维基库**。知识库就在你的工作目录下, \
          你可以用 Read/Glob/Grep 沿双链直接打开任意页面取证 —— 这就是本库「调用知识库」的方式, \

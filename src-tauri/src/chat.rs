@@ -8,6 +8,7 @@
 //! - 整合 conv 模块, 自动写 user/assistant 消息
 
 use crate::claude_md;
+use crate::convert;
 use crate::conv;
 use crate::kb;
 use crate::skills;
@@ -119,6 +120,10 @@ pub struct ChatSendArgs {
     /// 用 Task 子代理并行扇出，每条流水线 实现→对抗式校验→修复，最后汇总。
     #[serde(default)]
     pub dynamic_workflow: bool,
+    /// 「知识库严格搜索」：打开时才把 KB 结构化 wiki + 双链地图注入上下文。
+    /// 默认 false 以节省 token，日常任务不注入大段 KB 导航。
+    #[serde(default)]
+    pub use_kb: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,9 +175,18 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         .conversation_id
         .as_deref()
         .and_then(conv::project_id_of_conversation);
-    let cm_ctx = claude_md::render_for_project(current_project_id.as_deref(), &args.prompt);
+    let cm_ctx = claude_md::render_for_project(current_project_id.as_deref(), &args.prompt, args.use_kb);
 
     let mut final_prompt = String::new();
+
+    // 0. KB-first 顶层指令 (写死, 优先级最高)
+    // 任何后续指令(目标模式 / 请教毛主席 / 动态编排 / 风格约定)都不能凌驾它之上;
+    // 它是产品立场: 知识库是真相源, 模型必须先用 KB 取证再作答。
+    // 这条指令会出现在 prompt 最前面, 离用户问题最远——但因 Claude 的"system 指令优先"特性,
+    // 它仍然约束着整轮回复。配合 `claude_md::render_for_project` 注入的结构化 wiki,
+    // 模型就能沿 Read/Glob/Grep + [[双链]] 自主取证。
+    final_prompt.push_str(&kb_first_directive());
+    final_prompt.push_str("\n\n---\n\n");
 
     // 1. Skill system prompts —— 显式点选 + 按任务意图自动激活（去重）
     let mut injected: Vec<String> = Vec::new();
@@ -209,6 +223,11 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
 
     // 2. 输出文件约定 (Polaris) — 让成品文件落到产物目录, 侧边栏即可预览
     final_prompt.push_str(&output_convention(&art_dir));
+    final_prompt.push_str("\n\n---\n\n");
+
+    // 2.1 可运行项目约定 (板块⑮) — 要跑起来的应用(尤其前后端)打包成带运行清单的项目文件夹,
+    //     用户在右侧点「运行」即一键启动前后端并内嵌预览, 不必再拖文件、再说「打开项目」。
+    final_prompt.push_str(&project_convention(&art_dir));
     final_prompt.push_str("\n\n---\n\n");
 
     // 2.5 目标模式: 用户设了完成条件时, 注入「持续推进直到达成」指令
@@ -256,13 +275,35 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         None
     };
 
-    // 3. CLAUDE.md 上下文
+    // 3. CLAUDE.md 上下文 (KB 地图 + 项目人格)
     if !cm_ctx.is_empty() {
         final_prompt.push_str(&cm_ctx);
-        final_prompt.push_str("\n\n## 用户问题\n\n");
+        final_prompt.push_str("\n\n---\n\n");
+    }
+
+    // 3.5 跨对话产物地图: 本项目其它对话生成过、仍在磁盘上的文件(绝对路径)。
+    //     让模型可直接 Read「上次那个文件」, 用户不用重新拖拽。当前对话排除(它的文件
+    //     已在下面的对话历史里出现)。
+    if let Some(pid) = current_project_id.as_deref() {
+        let amap = project_artifacts_block(pid, args.conversation_id.as_deref(), ARTIFACT_MAP_BUDGET);
+        if !amap.is_empty() {
+            final_prompt.push_str(&amap);
+            final_prompt.push_str("\n\n---\n\n");
+        }
+    }
+
+    // 3.6 对话历史: 本对话最近若干轮原文(预算封顶), 让同一对话能接上文 ——
+    //     此前每轮都是无状态新进程, claude 看不到上一句, 这里补上。
+    if let Some(cid) = args.conversation_id.as_deref() {
+        let hist = history_block(cid, HISTORY_CTX_BUDGET);
+        if !hist.is_empty() {
+            final_prompt.push_str(&hist);
+            final_prompt.push_str("\n\n---\n\n");
+        }
     }
 
     // 4. 用户原始问题
+    final_prompt.push_str("## 用户问题\n\n");
     final_prompt.push_str(&args.prompt);
 
     let perm = args.permission_mode.cli_value();
@@ -734,7 +775,8 @@ fn conversation_dir(conv_id: Option<&str>) -> PathBuf {
 }
 
 /// 产物(成品)目录: 会话目录下的 `outputs/`。claude 把成品写到这里 → 侧边栏可预览。
-fn artifacts_dir(conv_id: Option<&str>) -> PathBuf {
+/// `pub(crate)`: 板块⑮「可运行项目」(project.rs) 也要按同一规则定位产物目录, 去扫项目清单。
+pub(crate) fn artifacts_dir(conv_id: Option<&str>) -> PathBuf {
     conversation_dir(conv_id).join("outputs")
 }
 
@@ -754,6 +796,212 @@ fn dir_snapshot(dir: &Path) -> HashMap<PathBuf, SystemTime> {
         }
     }
     m
+}
+
+// ───────────────────────── 对话记忆 (历史 + 跨对话产物地图) ─────────────────────────
+//
+// 设计: 此前每轮 chat_send 都是无状态新进程, claude 看不到上一句、也读不到别的对话生成的
+// 文件。这里补两块, 都顺着 llmwiki「注地图不注全文」的哲学:
+//   ① history_block          —— 本对话最近若干轮原文(预算封顶) → 同一对话能接上文
+//   ② project_artifacts_block —— 本项目其它对话生成过、仍在磁盘上的文件(绝对路径+描述)
+//                                 → 用户说「上次那个文件」时模型直接 Read, 不用重新拖拽
+// 两块都从已持久化的消息派生(产物路径早已存在 assistant 正文的 ARTIFACT marker 里), 零新存储。
+
+/// 单块历史预算(字符): 超了就丢最旧的几轮。stdin 喂 prompt, 不受命令行 32k 限制,
+/// 但仍要控总 context, 故封顶。
+const HISTORY_CTX_BUDGET: usize = 8000;
+/// 单条消息正文上限(字符): 太长的回答只留开头, 避免一条吃掉整个预算。
+const HISTORY_MSG_CAP: usize = 1500;
+/// 跨对话产物地图预算(字符)。
+const ARTIFACT_MAP_BUDGET: usize = 4000;
+
+/// 按字符(非字节)截断, 中文安全; 超长加省略标记。
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{}…(略)", head)
+    }
+}
+
+/// 从 assistant 正文里剥出产物清单 marker: 返回 (去掉 marker 的正文, 产物绝对路径列表)。
+/// marker 形如 `<!--POLARIS_ARTIFACTS:["C:/a.html","C:/b.md"]-->`(见 ARTIFACT_MARKER_PREFIX)。
+fn split_artifacts(content: &str) -> (String, Vec<String>) {
+    if let Some(idx) = content.find(ARTIFACT_MARKER_PREFIX) {
+        let after = &content[idx + ARTIFACT_MARKER_PREFIX.len()..];
+        if let Some(end) = after.find("-->") {
+            let paths: Vec<String> = serde_json::from_str(&after[..end]).unwrap_or_default();
+            let clean = content[..idx].trim_end().to_string();
+            return (clean, paths);
+        }
+    }
+    (content.trim().to_string(), Vec::new())
+}
+
+/// epoch 毫秒 → "YYYY-MM-DD"(UTC, 仅供模型粗略排序「上次/之前」参考)。
+/// 无依赖实现 (Howard Hinnant civil_from_days)。
+fn ymd(ms: i64) -> String {
+    let days = ms.div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// ① 对话历史块: 本对话最近若干轮原文, 从最新往回累计到预算上限, 再翻回时间正序。
+/// 末尾那条 user 消息是「本轮问题」(chat_send 进来时刚 append), 已单独注入 → 去掉避免重复。
+fn history_block(conv_id: &str, budget: usize) -> String {
+    let mut msgs = conv::get_messages(conv_id);
+    if matches!(msgs.last(), Some(m) if m.role == "user") {
+        msgs.pop();
+    }
+    if msgs.is_empty() {
+        return String::new();
+    }
+
+    let mut picked: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for m in msgs.iter().rev() {
+        let line = match m.role.as_str() {
+            "user" => format!("**用户**：{}", truncate_chars(m.content.trim(), HISTORY_MSG_CAP)),
+            "assistant" => {
+                let (clean, files) = split_artifacts(&m.content);
+                let body = truncate_chars(clean.trim(), HISTORY_MSG_CAP);
+                if files.is_empty() {
+                    format!("**助手**：{}", body)
+                } else {
+                    format!("**助手**：{}\n〔本轮生成文件：{}〕", body, files.join(" · "))
+                }
+            }
+            _ => continue, // tool 等其它角色不进历史
+        };
+        let cost = line.chars().count() + 2;
+        if used + cost > budget && !picked.is_empty() {
+            break;
+        }
+        used += cost;
+        picked.push(line);
+    }
+    if picked.is_empty() {
+        return String::new();
+    }
+    picked.reverse();
+    format!(
+        "## 对话历史 (本对话最近若干轮, 供你接上文)\n\n\
+下面是本对话之前的往返。继续作答时**默认用户在接着上文聊**, 别把已经聊过的当成全新问题重头解释。\n\n{}",
+        picked.join("\n\n")
+    )
+}
+
+/// ② 跨对话产物地图: 遍历本项目其它对话, 把每条带产物的 assistant 消息的文件路径,
+/// 配上「前一条 user 问题」当描述, 列成一张地图。只列仍存在于磁盘的文件(去悬空), 去重, 预算封顶。
+/// 排除当前对话(它的文件已在 history_block 里出现, 避免重复)。
+fn project_artifacts_block(project_id: &str, exclude_conv: Option<&str>, budget: usize) -> String {
+    let convs = conv::conversations_of_project(project_id); // 最近在前
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut used = 0usize;
+
+    'outer: for c in &convs {
+        if Some(c.id.as_str()) == exclude_conv {
+            continue;
+        }
+        // 正序遍历记住「最近的 user 问题」, 给随后的产物当描述
+        let mut last_user: Option<String> = None;
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for m in conv::get_messages(&c.id) {
+            match m.role.as_str() {
+                "user" => last_user = Some(m.content.trim().to_string()),
+                "assistant" => {
+                    let (_clean, files) = split_artifacts(&m.content);
+                    let desc = last_user.clone().unwrap_or_default();
+                    for f in files {
+                        entries.push((f, desc.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // 该对话内新产物在前
+        for (path, desc) in entries.into_iter().rev() {
+            if seen.contains(&path) || !Path::new(&path).exists() {
+                continue;
+            }
+            seen.insert(path.clone());
+            let desc_short = truncate_chars(desc.trim(), 60);
+            let date = ymd(c.updated_at);
+            let line = if desc_short.is_empty() {
+                format!("- `{}` — 来自对话「{}」· {}", path, c.title, date)
+            } else {
+                format!("- `{}` — 来自对话「{}」({}) · 当时请求: {}", path, c.title, date, desc_short)
+            };
+            let cost = line.chars().count() + 1;
+            if used + cost > budget && !lines.is_empty() {
+                break 'outer;
+            }
+            used += cost;
+            lines.push(line);
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "## 本项目已生成的文件 (产物地图)\n\n\
+下面是**本项目其它对话**里生成过、现在仍在磁盘上的成品文件(绝对路径)。\n\
+当用户说「上次那个 / 之前生成的 X / 接着改那个文件」时, **直接用 `Read` 打开对应路径即可, \
+不需要用户重新拖拽文件**; 路径对不上再问用户。\n\n{}",
+        lines.join("\n")
+    )
+}
+
+/// KB-first 顶层指令 (写死) —— 这一条优先级最高, 任何后续指令都不能凌驾。
+///
+/// 设计: 模型每一轮回答前, 必须先按本指令 4 步沿双链在知识库里「调查取证」;
+/// 取不到证据(且问题属于事实/可考证领域)时, 显式说「资料不足」, 不准凭预训练兜底。
+/// 配合 `claude_md::render_for_project` 注入的结构化 wiki + 双链地图使用。
+///
+/// 结构遵循通用 llmwiki (Karpathy 式): 三层 `raw/ output/ wiki/`, 扁平 `wiki/*.md`,
+/// 入口 `wiki/index.md`, 双链写 wiki 根相对名/title, 引用走脚注 —— 不含任何
+/// 项目特定结构 (无 SQL/位次工具、无 概念/实体 子目录约定)。
+///
+/// 适用场景: 所有对话(包括普通问答、请教毛主席、目标模式、动态编排、偶像对话)——
+/// 这是产品立场, 不让用户开关。
+fn kb_first_directive() -> String {
+    "## ⚡ 知识库优先 (KB-First · 写死, 不可关闭)\n\n\
+你的工作目录下挂着一棵**结构化维基知识库** (PolarisKB), 信奉 Karpathy \
+「结构化 wiki + 长上下文 > 平铺文档 + 向量检索」, 分三层: `raw/`(只读原始层)、\
+`output/`(生成的文章/Lint 报告)、`wiki/`(知识层, 扁平 `wiki/*.md`)。导航入口是 \
+`wiki/index.md`。它就在你的工作目录下, 已随本轮以长上下文方式预先注入。\n\n\
+**本轮回答问题之前, 必须按下述 4 步沿双链在知识库里调查取证, 不准凭空作答:**\n\n\
+1. **定位 (Locate)** —— 先用 `Glob` 找出与问题最相关的页面 (如 `wiki/*.md`、`raw/**`), \
+别一上来就 `Read` 全库。\n\
+2. **命中 (Grep)** —— 用 `Grep` 在定位到的范围里搜关键词, 拿到候选页的精确列表 \
+(标题/正文里出现过目标概念)。\n\
+3. **取证 (Read)** —— 对每个候选页 `Read` 完整正文, **不要切片, 整页读**。\n\
+4. **沿双链 (Trace)** —— 顺着页面里的 `[[双链]]` 续读 (双链只写 wiki 根相对名或 \
+frontmatter 的 title, 如 `[[index]]`、`[[CLAUDE]]`), 把相关页面串成证据链。\n\n\
+**反幻想护栏 (强制, 不可省):**\n\n\
+- 命中库内容时**必须以脚注标注来源**: 正文处 `[^1]`, 文末 `[^1]: [[file-name]]`; \
+**模型自己脑补出来的话术不算证据**。\n\
+- 知识库查不到、且问题属于事实/可考证领域 → 用 `💡` 标明这是推断/仿写, \
+**明确说缺什么**, 严禁用预训练知识冒充检索结果, 也不要伪造引文; 通用闲聊/生活常识类除外。\n\n\
+**与其它指令的优先级 (重要):**\n\n\
+- 本指令的优先级**高于**后续所有指令 (回答风格、目标模式、请教毛主席、动态编排、偶像对话)。\
+任何指令与本条冲突时, 以本条为准。\n\
+- 本指令**不限制**你的判断与表达自由, 只约束你「事实必须可溯源、不能凭印象胡诌」。\n\n\
+> 入口: 知识库根目录在工作目录下的 `PolarisKB/`。先看 `wiki/index.md` 找到主导航, \
+再按上面 4 步沿 `[[双链]]` 用 Read/Glob/Grep 取证 —— **不要等别人把答案喂你**。\
+这里不存在也不需要 kb_search 之类的召回工具。"
+        .to_string()
 }
 
 /// 注入给 claude 的「回答风格约定」—— Codex 式扁平回答, 砍废话, 只留信号。
@@ -778,8 +1026,49 @@ fn output_convention(art_dir: &Path) -> String {
 当你生成任何可供用户**查看或下载的成品文件**(HTML 网页 / 数据可视化 / 报告 / Markdown / 图片 / CSV / PDF 等)时,请遵守:\n\n\
 1. 把成品文件保存到这个已授权可写的目录(用绝对路径):\n   `{dir}`\n\
 2. 网页类成品请优先生成**单文件、自包含的 HTML**(把 CSS/JS 内联进去),以便在侧边栏直接预览。\n\
-3. 在回答末尾用一句话点明你生成了哪些文件(文件名即可)。\n\n\
+3. 在回答末尾**用绝对路径列出你生成/修改的成品文件**(不要只写文件名),例如:\n   `已生成: {dir}/report.html`\n   \
+这样路径会被记进本项目的「产物地图」,下次对话里用户说「上次那个文件」时,模型能直接 Read,不必重新拖拽。\n\n\
 普通问答无需创建文件。",
+        dir = dir
+    )
+}
+
+/// 可运行项目约定 (Polaris · 板块⑮) —— 这是本轮目标的核心。
+///
+/// 当用户要的是一个**能跑起来的应用/项目**(尤其同时有前端 + 后端, 或需要 dev server、
+/// 多文件协作运行)时, **不要把文件散落一地**, 而是打包成 **一个自带运行清单的项目文件夹**,
+/// 让用户在右侧抽屉点一下「运行」就能一键启动整套前后端、并内嵌预览 —— 无需用户再拖文件、
+/// 也无需再说一句「打开这个项目」。
+fn project_convention(art_dir: &Path) -> String {
+    let dir = art_dir.to_string_lossy().replace('\\', "/");
+    format!(
+        "## 可运行项目约定 (Polaris · 一键启动) —— 关键\n\n\
+当用户要的是一个**能运行起来的应用 / 项目**(典型: 同时有前端和后端、或要起 dev server、\
+或多个文件要一起跑才能体验), 请**严格**这样做, **不要把前后端文件散落成一堆零散文件**:\n\n\
+1. **整个项目放进一个文件夹**(用一个简短英文 slug 命名), 就在这个可写目录下(用绝对路径):\n   `{dir}/<项目slug>/`\n\
+   前端、后端各自一个子目录(如 `web/`、`server/`), 别把前后端揉在一起、也别散到外面。\n\
+2. 在**项目文件夹根**写一份运行清单 `polaris.project.json`, 声明怎么装依赖、怎么起、端口、预览地址。格式:\n\
+```json\n\
+{{\n\
+  \"name\": \"待办清单\",\n\
+  \"services\": [\n\
+    {{ \"name\": \"backend\",  \"dir\": \"server\", \"install\": \"npm install\", \"run\": \"node index.js\", \"port\": 3001 }},\n\
+    {{ \"name\": \"frontend\", \"dir\": \"web\",    \"install\": \"npm install\", \"run\": \"npm run dev -- --port 5173\", \"port\": 5173 }}\n\
+  ],\n\
+  \"open\": \"http://localhost:5173\"\n\
+}}\n\
+```\n\
+   - `services` 按声明顺序启动(后端在前); 每个服务 `dir` 相对项目根, `install` 仅在依赖缺失时跑, `run` 是长驻命令, `port` 用于「起来了没」探测。\n\
+   - `open` 是用户内嵌预览要打开的 URL(通常是前端地址)。\n\
+   - 纯前端(无后端)也可以只放一个 service; 但凡有后端, 就前后端各一个 service。\n\
+3. **依赖要少、要能离线起得来**: 前端优先用 Vite 这类零配置脚手架, 后端优先用运行时自带能力\
+(Node 内置 `http`/`express`、Python 标准库)。能不引重依赖就不引, 让 `npm install` 快、\
+让用户点一下就能看到东西。**前端要连后端时, 用相对路径或 `localhost:<后端端口>`**, 别写死外网地址。\n\
+4. 真把文件写全、写对: `package.json`、源码、必要的静态资源都要齐, 确保 `install` + `run` 跑下来\
+真能起来(端口别和清单写的不一致)。\n\
+5. 回答末尾**一句话**告诉用户: 项目已打包好, 在右侧「项目」里点「运行」即可一键启动前后端并预览。\n\n\
+若用户只是要一个**单页静态成品**(一张 HTML 海报 / 一份报告 / 一张图), 按上面的「输出文件约定」\
+走单文件即可, **不用**套这个项目清单。只有「要跑起来的应用」才打包成项目。",
         dir = dir
     )
 }
@@ -1366,14 +1655,74 @@ fn push_attach(dir: &Path, src: &Path, out: &mut Vec<AttachedFile>) {
     let size = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
     let dst = unique_upload_path(dir, &name);
     match std::fs::copy(src, &dst) {
-        Ok(_) => out.push(AttachedFile {
-            name,
-            path: dst.to_string_lossy().replace('\\', "/"),
-            kind: attach_kind(src).into(),
-            size,
-            ok: true,
-            error: None,
-        }),
+        Ok(_) => {
+            // PDF / Office 文件: Claude Read 工具读不了二进制, 先提取文本成 .md,
+            // 只把 .md 路径传给 Claude (原文件仍留 uploads 目录供用户自行查看)。
+            let ext = src
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let convertible = matches!(
+                ext.as_str(),
+                "pdf" | "docx" | "doc" | "xlsx" | "xls" | "xlsm"
+                    | "xlsb" | "pptx" | "ppt" | "ods" | "odt" | "odp"
+            );
+            if convertible {
+                match convert::convert_to_markdown(src) {
+                    Ok(Some(text)) => {
+                        let stem = src
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| name.clone());
+                        let md_name = format!("{}.extracted.md", stem);
+                        let md_dst = unique_upload_path(dir, &md_name);
+                        if std::fs::write(&md_dst, text.as_bytes()).is_ok() {
+                            out.push(AttachedFile {
+                                name: md_name,
+                                path: md_dst.to_string_lossy().replace('\\', "/"),
+                                kind: "text".into(),
+                                size: text.len() as u64,
+                                ok: true,
+                                error: None,
+                            });
+                            return;
+                        }
+                        // write 失败 → 回退到原文件(带错误)
+                        out.push(AttachedFile {
+                            name,
+                            path: String::new(),
+                            kind: attach_kind(src).into(),
+                            size,
+                            ok: false,
+                            error: Some("PDF/Office 文本提取成功但写入失败".into()),
+                        });
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        out.push(AttachedFile {
+                            name,
+                            path: String::new(),
+                            kind: attach_kind(src).into(),
+                            size,
+                            ok: false,
+                            error: Some(format!("文本提取失败: {e}")),
+                        });
+                        return;
+                    }
+                }
+            }
+            // 图片 / 纯文本 / 无需转换的二进制 → 原样返回
+            out.push(AttachedFile {
+                name,
+                path: dst.to_string_lossy().replace('\\', "/"),
+                kind: attach_kind(src).into(),
+                size,
+                ok: true,
+                error: None,
+            });
+        }
         Err(e) => out.push(AttachedFile {
             name,
             path: String::new(),
@@ -1417,5 +1766,48 @@ fn attach_kind(path: &Path) -> &'static str {
         | "htm" | "log" | "rs" | "js" | "ts" | "py" | "go" | "java" | "c" | "cpp" | "css"
         | "vue" | "sh" | "toml" | "ini" => "text",
         _ => "binary",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_artifacts_parses_marker_and_strips_body() {
+        let content = "已生成报告。\n\n<!--POLARIS_ARTIFACTS:[\"D:/a/r.html\",\"D:/a/r.md\"]-->";
+        let (clean, paths) = split_artifacts(content);
+        assert_eq!(clean, "已生成报告。");
+        assert_eq!(paths, vec!["D:/a/r.html".to_string(), "D:/a/r.md".to_string()]);
+    }
+
+    #[test]
+    fn split_artifacts_no_marker_returns_trimmed_body() {
+        let (clean, paths) = split_artifacts("  普通回答  ");
+        assert_eq!(clean, "普通回答");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn split_artifacts_malformed_marker_is_safe() {
+        // 有前缀但没有闭合 --> : 不应 panic, 当作无产物处理
+        let (clean, paths) = split_artifacts("x<!--POLARIS_ARTIFACTS:[\"a\"");
+        assert!(paths.is_empty());
+        assert!(clean.contains("POLARIS_ARTIFACTS"));
+    }
+
+    #[test]
+    fn truncate_chars_is_char_safe_for_cjk() {
+        assert_eq!(truncate_chars("中文", 5), "中文");
+        let t = truncate_chars("一二三四五六", 3);
+        assert!(t.starts_with("一二三"));
+        assert!(t.ends_with("(略)"));
+    }
+
+    #[test]
+    fn ymd_converts_known_epochs() {
+        assert_eq!(ymd(0), "1970-01-01");
+        // 2021-01-01T00:00:00Z = 1609459200000 ms
+        assert_eq!(ymd(1_609_459_200_000), "2021-01-01");
     }
 }
