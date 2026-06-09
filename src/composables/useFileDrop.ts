@@ -10,7 +10,7 @@
  */
 import { ref, onMounted, onUnmounted } from "vue";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { isTauri } from "../tauri";
+import { isTauri, uploadToBackend } from "../tauri";
 
 export interface UseFileDropOptions {
   /** 仅当返回 true 时才响应(通常绑定「当前视图是否为本组件」) */
@@ -24,7 +24,45 @@ export function useFileDrop(opts: UseFileDropOptions) {
   let unlisten: (() => void) | null = null;
 
   onMounted(async () => {
-    if (!isTauri) return;
+    if (!isTauri) {
+      // Docker/Web 模式：用 HTML5 document 级拖拽。浏览器拿不到 OS 路径，
+      // 改为上传文件内容到服务端（/api/upload），拿回服务端绝对路径再走同一 onDrop —
+      // 因此 ChatPanel/WikiBrowse/各工坊的拖拽上传在浏览器里一并可用。
+      const guard = () => (opts.active ? opts.active() : true);
+      const onDragOver = (e: DragEvent) => {
+        if (!guard()) return;
+        if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
+          e.preventDefault();
+          isOver.value = true;
+        }
+      };
+      const onDragLeave = () => {
+        isOver.value = false;
+      };
+      const onDropEv = async (e: DragEvent) => {
+        if (!guard()) return;
+        const files = e.dataTransfer?.files;
+        if (!files || !files.length) return;
+        e.preventDefault();
+        isOver.value = false;
+        try {
+          const uploaded = await uploadToBackend(files);
+          const paths = uploaded.map((u) => u.path).filter(Boolean);
+          if (paths.length) opts.onDrop(paths);
+        } catch (err) {
+          console.error("[useFileDrop] 上传到服务端失败", err);
+        }
+      };
+      document.addEventListener("dragover", onDragOver);
+      document.addEventListener("dragleave", onDragLeave);
+      document.addEventListener("drop", onDropEv);
+      unlisten = () => {
+        document.removeEventListener("dragover", onDragOver);
+        document.removeEventListener("dragleave", onDragLeave);
+        document.removeEventListener("drop", onDropEv);
+      };
+      return;
+    }
     try {
       unlisten = await getCurrentWebview().onDragDropEvent((event) => {
         const payload = event.payload as {
