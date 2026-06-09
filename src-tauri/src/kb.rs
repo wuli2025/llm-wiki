@@ -25,7 +25,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager};
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use walkdir::WalkDir;
 
 // ───────────────────────── State ─────────────────────────
@@ -68,11 +71,17 @@ pub fn init(app: &AppHandle) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| default_kb_root().unwrap_or_else(|_| PathBuf::from(".")));
     ensure_skeleton(&root)?;
-    // 首启一次性播种「默认资料库」(随安装包打进来的毛主席资料库)
-    seed_default_kb(app, &root);
     *KB_ROOT.write() = root.clone();
-    let docs = scan_all(&root);
-    *INDEX.write() = docs;
+    // 把「播种默认库 + 全量扫描解析」挪到后台线程，别拖住窗口出现。
+    // 这俩是启动卡顿主因：seed_default_kb 首启要拷贝整套默认资料库；scan_all 会 WalkDir
+    // 递归读+解析每篇 .md（KB 越大越慢）。而 INDEX 只被 KB 视图/命令按需用，首屏根本不读它，
+    // 所以启动即设好 KB_ROOT（其它板块要它、且很轻），重活丢后台几百 ms 内填好 INDEX。
+    let app = app.clone();
+    std::thread::spawn(move || {
+        seed_default_kb(&app, &root);
+        let docs = scan_all(&root);
+        *INDEX.write() = docs;
+    });
     Ok(())
 }
 
@@ -295,19 +304,19 @@ fn parse_doc(abs_path: &Path, rel: &Path) -> Option<KbDoc> {
 
 // ───────────────────────── Tauri commands ────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_root() -> String {
     KB_ROOT.read().to_string_lossy().to_string()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_default_root() -> String {
     default_kb_root()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_set_root(new_path: String) -> Result<usize, String> {
     let trimmed = new_path.trim().to_string();
     if trimmed.is_empty() {
@@ -325,7 +334,7 @@ pub fn kb_set_root(new_path: String) -> Result<usize, String> {
     Ok(n)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_scan() -> Result<usize, String> {
     let root = KB_ROOT.read().clone();
     let docs = scan_all(&root);
@@ -425,7 +434,7 @@ fn compile_no_window(cmd: &mut Command) {
 
 /// 「构建知识网」: 启动一个有写权限的 headless claude 当 wiki 维护者, 把 raw/ 编译进 wiki/。
 /// 立即返回 run_id; 进度通过 `kb:compile` 事件流式推送, 完成时发 `done` (附重扫后的文档数)。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_compile(app: AppHandle) -> Result<String, String> {
     let root = KB_ROOT.read().clone();
     if root.as_os_str().is_empty() || !root.exists() {
@@ -899,7 +908,7 @@ fn frontmatter_end_char_idx(chars: &[char]) -> usize {
 
 /// 「自动补双链」: 只读 claude 给出 `[{page,term,target}]` 建议, Rust 执行替换。
 /// 立即返回 run_id; 进度走 `kb:enrich` 事件, 完成发 `done` (附实际应用条数)。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
     let root = KB_ROOT.read().clone();
     if root.as_os_str().is_empty() || !root.exists() {
@@ -1124,7 +1133,7 @@ fn split_link_inner(inner: &str) -> (String, String) {
 
 /// 「智能去重」: 规则粗筛 + 只读 claude 细判 + Rust 合并。
 /// 立即返回 run_id; 进度走 `kb:dedup`, 完成发 `done` (附合并页数)。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_dedup(app: AppHandle) -> Result<String, String> {
     let root = KB_ROOT.read().clone();
     if root.as_os_str().is_empty() || !root.exists() {
@@ -1335,7 +1344,7 @@ fn merge_duplicate_page(root: &Path, canonical: &str, dup: &str) -> Result<(), S
     Ok(())
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_list(subdir: Option<String>) -> Vec<String> {
     let idx = INDEX.read();
     idx.iter()
@@ -1605,13 +1614,41 @@ fn resolve_within_kb(root: &Path, rel_path: &str) -> Result<PathBuf, String> {
     let canon_full = full
         .canonicalize()
         .map_err(|_| "文件不存在或无法访问".to_string())?;
-    if !canon_full.starts_with(&canon_root) {
+    if !path_contains(&canon_root, &canon_full) {
         return Err("路径越界, 拒绝访问".into());
     }
     Ok(canon_full)
 }
 
-#[tauri::command]
+/// 跨平台「子树包含」判断 —— 专治 Windows 上两类**误判越界**:
+/// 1. `std::fs::canonicalize` 在 Windows 会加 `\\?\`(及 `\\?\UNC\`)扩展长度前缀。
+///    若比较两端一端有前缀、一端没有(例如某端 canonicalize 失败回退原值),裸
+///    `Path::starts_with` 必为假,合法路径被当成越界。
+/// 2. Windows 文件系统大小写不敏感,但 `Path::starts_with` 大小写敏感;根目录存储时
+///    的大小写与 canonicalize 返回的真实大小写不一致即误判。
+///
+/// 故先剥扩展长度前缀、再按平台规整大小写,最后用**组件级** `starts_with` 比较
+/// (组件级可避免 `C:\foobar` 命中 `C:\foo` 这种伪前缀)。
+pub fn path_contains(base: &Path, child: &Path) -> bool {
+    fn norm(p: &Path) -> PathBuf {
+        let s = p.to_string_lossy().to_string();
+        let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+            rest.to_string()
+        } else {
+            s
+        };
+        if cfg!(windows) {
+            PathBuf::from(s.to_lowercase())
+        } else {
+            PathBuf::from(s)
+        }
+    }
+    norm(child).starts_with(norm(base))
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_read(rel_path: String) -> Result<String, String> {
     let root = KB_ROOT.read().clone();
     let full = resolve_within_kb(&root, &rel_path)?;
@@ -1620,7 +1657,7 @@ pub fn kb_read(rel_path: String) -> Result<String, String> {
 
 /// 删除资料库里的一份资料(浏览页每条右侧 × 用)。
 /// 仅允许删除 KB root 子树内的文件; 删除后重扫索引, 返回剩余文件数。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_delete(rel_path: String) -> Result<usize, String> {
     let root = KB_ROOT.read().clone();
     // 防越界: 规范化后必须仍在 KB root 下 (与 kb_read 共用同一护栏)
@@ -1639,7 +1676,7 @@ pub fn kb_delete(rel_path: String) -> Result<usize, String> {
 /// 清空资料库(管理页「清空资料库」用): 删除 `raw/` 下全部资料并重建空 `raw/`,
 /// 保留三层骨架与 CLAUDE.md / wiki。返回清空后剩余索引文件数。
 /// 注: 不删 `<root>/.polaris_seeded` marker, 所以重启 **不会** 重新播种默认资料库。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_clear() -> Result<usize, String> {
     let root = KB_ROOT.read().clone();
     let raw = root.join("raw");
@@ -1662,7 +1699,7 @@ pub struct KbHit {
 }
 
 /// PRD §8.8 关键词加权评分: 标题 +10 / category +8 / 正文 +1
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_search(query: String, top_k: Option<usize>) -> Vec<KbHit> {
     let q = query.to_lowercase();
     let terms: Vec<&str> = q.split_whitespace().collect();
@@ -1756,7 +1793,7 @@ fn index_remove(rel_path: &str) {
 }
 
 /// Ingest 单文件:任意格式 → 转 markdown 写入 raw/(不可转的原样复制),增量刷新索引。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_ingest(source_path: String) -> Result<String, String> {
     let root = KB_ROOT.read().clone();
     let mut cache = IngestCache::load(&root);
@@ -1775,7 +1812,7 @@ pub fn kb_ingest(source_path: String) -> Result<String, String> {
 
 /// 知识库拖拽上传:批量(可含目录,自动展开)。每个文件转 markdown 入 raw/,
 /// 全部处理完只重扫一次索引。返回逐文件结果(失败不影响其余)。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_upload_files(paths: Vec<String>) -> Vec<KbUploadResult> {
     const MAX_FILES: usize = 500;
     let root = KB_ROOT.read().clone();
@@ -2140,7 +2177,7 @@ fn resolve_rel(base_dir: Option<&Path>, link: &str) -> Option<String> {
 /// 散点根因 (PRD §8 设计回顾): 原实现只认 `[[wikilink]]`, 未链接的文档=孤点。
 /// 现按真实目录层级 (raw/X/卷/篇) 自动生成"目录中枢节点"和树状边, 使任意
 /// 知识库无需手工双链即可呈现连通图谱; 双链与 Markdown 链接作为额外关系叠加。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_graph() -> KbGraph {
     use std::collections::HashSet;
     let idx = INDEX.read();
@@ -2307,7 +2344,7 @@ fn is_wiki_meta_page(rp: &str) -> bool {
 }
 
 /// wiki 质量检查: 死双链 / 缺 frontmatter type / 孤儿页 / 不安全路径。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_lint() -> KbLintReport {
     use std::collections::HashSet;
     let idx = INDEX.read();
@@ -2464,6 +2501,23 @@ mod tests {
         assert!(resolve_within_kb(&root, "nope.md").is_err());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn path_contains_handles_verbatim_prefix_and_case() {
+        // 同根, 子在内: 放行
+        assert!(path_contains(Path::new(r"C:\Users\a\Polaris"), Path::new(r"C:\Users\a\Polaris\x.md")));
+        // 关键回归: 一端带 Windows `\\?\` 扩展长度前缀、一端没有, 仍判为包含 (旧裸 starts_with 会误判越界)
+        assert!(path_contains(Path::new(r"C:\Users\a\Polaris"), Path::new(r"\\?\C:\Users\a\Polaris\x.md")));
+        assert!(path_contains(Path::new(r"\\?\C:\Users\a\Polaris"), Path::new(r"C:\Users\a\Polaris\x.md")));
+        // 伪前缀: 组件级比较不应把 `Polaris-bak` 当成 `Polaris` 的子树
+        assert!(!path_contains(Path::new(r"C:\Users\a\Polaris"), Path::new(r"C:\Users\a\Polaris-bak\x.md")));
+        // 真越界: 不在根下
+        assert!(!path_contains(Path::new(r"C:\Users\a\Polaris"), Path::new(r"C:\Windows\System32\drivers\etc\hosts")));
+        // Windows 上大小写不敏感: 根与子大小写不一致也应判为包含
+        if cfg!(windows) {
+            assert!(path_contains(Path::new(r"C:\Users\A\Polaris"), Path::new(r"c:\users\a\polaris\x.md")));
+        }
     }
 
     #[test]

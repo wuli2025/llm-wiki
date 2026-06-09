@@ -342,13 +342,13 @@ async fn run_apply(app: &AppHandle, version: &str) -> Result<(), String> {
 // ───────────────────────── Tauri 命令 ─────────────────────────
 
 /// 前端挂载时取一次当前态（事件之外的同步快照，避免错过 init 阶段设好的状态）。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn updater_get_state() -> UpdaterState {
     UPDATER.lock().state.clone()
 }
 
 /// 检查更新（自动 / 手动共用）。单飞：进行中 / 正在下载安装时直接返回当前态。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn updater_check(app: AppHandle) -> Result<UpdaterState, String> {
     {
         let mut g = UPDATER.lock();
@@ -368,7 +368,7 @@ pub async fn updater_check(app: AppHandle) -> Result<UpdaterState, String> {
 }
 
 /// 用户点「立即更新」：下载 + 安装 + 自重启。需当前处于 available / ready。单飞防重入。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn updater_apply(app: AppHandle) -> Result<(), String> {
     let version = {
         let mut g = UPDATER.lock();

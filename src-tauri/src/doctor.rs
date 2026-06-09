@@ -35,7 +35,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -886,7 +889,7 @@ fn prime_path_for_claude_inner() {
 
 // ───────────────────────── Commands ─────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_check() -> EnvReport {
     let os = std::env::consts::OS.to_string();
 
@@ -957,7 +960,7 @@ pub fn env_check() -> EnvReport {
 }
 
 /// 修复 PATH: 把 claude 所在目录写进用户 PATH + 当前进程 PATH。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_fix_path() -> Result<PathFixResult, String> {
     let report = env_check();
     match report.claude_dir {
@@ -974,7 +977,7 @@ pub fn env_fix_path() -> Result<PathFixResult, String> {
 /// 安装 Claude Code。method: "npm" (默认, 经国内镜像) | "native" (官方原生脚本, 兜底)。
 /// 流式把安装日志通过 `env:stream` 事件推给前端; 成功后自动修 PATH。
 /// 跨平台: Windows 经 PowerShell, macOS/Linux 经 `sh`(npm 方式两端一致; native 各走各的官方脚本)。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_install_claude(app: AppHandle, method: Option<String>) -> Result<String, String> {
     let method = method.unwrap_or_else(|| "npm".to_string());
     let inner = claude_install_cmd(&method);
@@ -991,7 +994,7 @@ pub fn env_install_claude(app: AppHandle, method: Option<String>) -> Result<Stri
 ///   镜像加速) 静默安装 (Win10 常无 winget, 故必须有 MSI 兜底)。
 /// - **macOS**: 下载 Node 官方 darwin tar.gz (走 npmmirror 二进制镜像, 国内可达) **免 sudo**
 ///   解压到 `~/.local/polaris-node`, 并把其 `bin` 写进 shell 配置 —— 不动系统目录、不弹 UAC/密码。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_install_node(app: AppHandle) -> Result<String, String> {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
@@ -1115,7 +1118,7 @@ Write-Output 'Node.js 安装完成。'
 /// ② winget 缺失 / 失败 → **直接下载官方 MSI 再 msiexec 静默安装**, 且下载走
 ///    国内可达的 GitHub 文件代理 (gh-proxy / ghfast) 兜底, 实在不行再走 GitHub 直连。
 ///    这就是「下载路径」修复 —— 明确把 MSI 落到 `%TEMP%` 再装, 不再黑盒依赖 winget。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_install_pwsh(app: AppHandle) -> Result<String, String> {
     if !cfg!(windows) {
         return Err("PowerShell 7 自动安装仅支持 Windows。".into());
@@ -1282,7 +1285,7 @@ fn registry_latest_via_http() -> Option<String> {
 }
 
 /// 检测 Claude Code 是否有新版本: 当前版本 (`claude --version`) vs 镜像 latest。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_claude_update_check() -> ClaudeUpdateInfo {
     let current_raw = probe_version("claude", &["--version"]);
     let installed = current_raw.is_some() || resolve_claude_exe().is_some();
@@ -1338,7 +1341,7 @@ pub fn env_claude_update_check() -> ClaudeUpdateInfo {
 
 /// 更新 Claude Code 到最新版 —— 走国内 npmmirror, 与默认安装方式同源, 国内最快。
 /// 复用流式安装管线; 成功后清解析缓存并自动修 PATH (与首次安装一致)。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_update_claude(app: AppHandle) -> Result<String, String> {
     let inner = "npm install -g @anthropic-ai/claude-code@latest \
 --registry=https://registry.npmmirror.com";
@@ -1348,7 +1351,7 @@ pub fn env_update_claude(app: AppHandle) -> Result<String, String> {
     Ok(req_id)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn env_cancel(req_id: String) -> Result<(), String> {
     if let Some(mut child) = CHILDREN.lock().remove(&req_id) {
         let _ = child.kill();

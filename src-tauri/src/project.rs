@@ -23,7 +23,10 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use walkdir::WalkDir;
 
 #[cfg(windows)]
@@ -191,7 +194,7 @@ fn port_from_url(url: &str) -> Option<u16> {
 // ───────────────────────── 命令: 列项目 ─────────────────────────
 
 /// 扫某会话产物目录, 找出全部带 `polaris.project.json` 的可运行项目。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn project_list(conversation_id: Option<String>) -> Vec<ProjectInfo> {
     let out_dir = crate::chat::artifacts_dir(conversation_id.as_deref());
     let mut found: Vec<ProjectInfo> = Vec::new();
@@ -235,7 +238,7 @@ pub fn project_list(conversation_id: Option<String>) -> Vec<ProjectInfo> {
 }
 
 /// 单个项目是否正在运行。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn project_status(root: String) -> bool {
     RUNNING.lock().contains_key(&root)
 }
@@ -244,7 +247,7 @@ pub fn project_status(root: String) -> bool {
 
 /// 一键运行某项目: 装依赖(按需) → 起前后端各服务 → 就绪后 emit ready。
 /// 立即返回, 真正的装/起在后台线程跑, 进度走 `project:log` / `project:ready` / `project:exit` 事件。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn project_run(app: AppHandle, root: String) -> Result<(), String> {
     if RUNNING.lock().contains_key(&root) {
         // 已在跑: 直接回报就绪, 前端据此加载 iframe。
@@ -494,7 +497,7 @@ fn wait_port(port: u16, timeout: Duration) -> bool {
 // ───────────────────────── 命令: 停止 ─────────────────────────
 
 /// 停止某项目: kill 整个进程树 (Windows taskkill /T /F, 其它平台 child.kill)。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn project_stop(app: AppHandle, root: String) -> Result<(), String> {
     let proj = RUNNING.lock().remove(&root);
     let Some(mut proj) = proj else {

@@ -985,7 +985,7 @@ pub struct CodexProxyInfo {
     pub last_error: String,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn codex_proxy_info() -> CodexProxyInfo {
     let p = port();
     CodexProxyInfo {

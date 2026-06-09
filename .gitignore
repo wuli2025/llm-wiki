@@ -41,3 +41,8 @@ PolarisKB/.polaris_seeded
 /polaris-video-work-longoutput/
 /polaris-video-work-zhiyuan/
 /polaris-video-work-kbwiki/
+
+# Docker 化本地产物（勿提交）
+.claude-seed/
+.docker-build.log
+docker-compose.override.yml

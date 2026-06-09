@@ -1,0 +1,28 @@
+# 构建上下文瘦身：只让 Docker 看到构建真正需要的东西。
+.git
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
+# 只排根目录的调试截图，别动 src/assets/ 里 App 引用的图标
+/.shot*.png
+/.dev-screenshot*.png
+**/*.log
+.wrangler
+_scratch
+career-map-work
+polaris-video-work
+polaris-video-work-kbwiki
+polaris-video-work-longoutput
+polaris-video-work-zhiyuan
+workspace
+docs
+*.html
+!index.html
+# 知识库内容运行时由卷挂载/种子提供，不进镜像
+PolarisKB
+# updater 私钥等
+*.key
+# 本地验证用的 claude 凭证种子（绝不进镜像）
+.claude-seed
+.docker-build.log

@@ -19,7 +19,10 @@ use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 
 // ───────────────────────── 配置 ─────────────────────────
 
@@ -245,7 +248,7 @@ const REMINDER_PATTERNS: &[&str] = &[
 
 // ───────────────────────── Tauri commands ─────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn feishu_get_config() -> FeishuConfig {
     let mut cfg = read_config();
     // 不把 secret 明文回前端（仅指示是否已填）
@@ -255,7 +258,7 @@ pub fn feishu_get_config() -> FeishuConfig {
     cfg
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn feishu_set_config(config: FeishuConfig) -> Result<(), String> {
     let mut cfg = config;
     // 前端回传的占位 secret 表示「不修改」，保留原值
@@ -267,7 +270,7 @@ pub fn feishu_set_config(config: FeishuConfig) -> Result<(), String> {
 }
 
 /// 连接测试：取 token + 机器人信息。验证凭证是否可用（阶段 A 的核心可验证项）。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn feishu_test_connection() -> FeishuTestResult {
     let cfg = read_config();
     if cfg.app_id.trim().is_empty() || cfg.app_secret.trim().is_empty() {
@@ -328,7 +331,7 @@ pub struct FeishuQrResult {
 }
 
 /// 生成「扫码创建机器人」二维码：内容为飞书开放平台建应用入口。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn feishu_create_qr() -> Result<FeishuQrResult, String> {
     use qrcode::render::svg;
     use qrcode::QrCode;
@@ -350,7 +353,7 @@ pub fn feishu_create_qr() -> Result<FeishuQrResult, String> {
 }
 
 /// 在系统默认浏览器打开飞书开放平台建应用页（桌面兜底，等价于扫码）。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn feishu_open_console() -> Result<(), String> {
     let cfg = read_config();
     let url = console_url(&cfg);
@@ -404,6 +407,27 @@ fn bridge_dir() -> Option<PathBuf> {
 fn emit_log(app: &AppHandle, text: impl Into<String>) {
     let _ = app.emit("feishu://log", text.into());
 }
+/// 同步阻塞跑一次 chat_send（飞书 bridge 在独立线程里调用）。
+/// 桌面走 tauri 运行时；server 临时建一个 current-thread tokio 运行时。
+#[cfg(feature = "desktop")]
+fn block_on_chat_send(
+    app: AppHandle,
+    args: crate::chat::ChatSendArgs,
+) -> Result<String, String> {
+    tauri::async_runtime::block_on(crate::chat::chat_send(app, args))
+}
+#[cfg(not(feature = "desktop"))]
+fn block_on_chat_send(
+    app: AppHandle,
+    args: crate::chat::ChatSendArgs,
+) -> Result<String, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("建运行时失败: {e}"))?
+        .block_on(crate::chat::chat_send(app, args))
+}
+
 fn emit_status(app: &AppHandle, state: &str) {
     let _ = app.emit("feishu://status", state.to_string());
 }
@@ -525,12 +549,12 @@ pub struct GatewayStatus {
     pub running: bool,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn feishu_gateway_status() -> GatewayStatus {
     GatewayStatus { running: SHOULD_RUN.load(Ordering::Relaxed) }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn feishu_gateway_stop(app: AppHandle) -> Result<(), String> {
     SHOULD_RUN.store(false, Ordering::Relaxed);
     let mut g = GATEWAY.lock();
@@ -611,7 +635,7 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
                 batch_build: false,
                 batch_size: None,
             };
-            if let Err(e) = tauri::async_runtime::block_on(crate::chat::chat_send(app.clone(), args)) {
+            if let Err(e) = block_on_chat_send(app.clone(), args) {
                 emit_log(app, format!("调起对话失败: {e}"));
                 return;
             }
@@ -693,7 +717,7 @@ fn run_bridge_once(app: &AppHandle, dir: &std::path::Path, cfg: &FeishuConfig, b
     started.elapsed().as_secs()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn feishu_gateway_start(app: AppHandle) -> Result<(), String> {
     if SHOULD_RUN.load(Ordering::Relaxed) {
         return Err("网关已在运行".into());

@@ -15,7 +15,10 @@ use directories::UserDirs;
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
+#[cfg(feature = "desktop")]
 use tauri::AppHandle;
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 
 pub const PLACEHOLDER_MARKER: &str = "polaris:placeholder";
 
@@ -102,7 +105,7 @@ pub struct KbClaudeMd {
     pub size: u64,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn claude_md_list_projects() -> Vec<ProjectClaudeMd> {
     conv::list_active_projects()
         .into_iter()
@@ -121,7 +124,7 @@ pub fn claude_md_list_projects() -> Vec<ProjectClaudeMd> {
         .collect()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn claude_md_kb_info() -> KbClaudeMd {
     let path = match kb_claude_md_path() {
         Some(p) => p,
@@ -160,7 +163,7 @@ fn resolve_path(area: &str, project_id: Option<&str>) -> Result<PathBuf, String>
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn claude_md_read(area: String, project_id: Option<String>) -> Result<String, String> {
     let path = resolve_path(&area, project_id.as_deref())?;
     if !path.exists() {
@@ -170,7 +173,7 @@ pub fn claude_md_read(area: String, project_id: Option<String>) -> Result<String
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn claude_md_write(
     area: String,
     project_id: Option<String>,

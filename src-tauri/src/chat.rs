@@ -23,7 +23,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter};
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use walkdir::WalkDir;
 
 #[cfg(windows)]
@@ -172,7 +175,7 @@ fn next_req_id() -> String {
 
 // ───────────────────────── Commands ──────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, String> {
     let req_id = next_req_id();
 
@@ -572,7 +575,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     Ok(req_id)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn chat_cancel(req_id: String) -> Result<(), String> {
     if let Some(mut child) = CHILDREN.lock().remove(&req_id) {
         kill_tree(child.id()); // 先杀整树: claude 扇出的 python/node/dev server 等子孙
@@ -585,7 +588,7 @@ pub fn chat_cancel(req_id: String) -> Result<(), String> {
 /// 读取某会话的分批构建清单 `polaris.build.json`(分批长任务的断点/进度凭据)。
 /// 前端编排循环每轮结束后读它, 算还剩几个 pending 来决定续不续、断了从哪接。
 /// 不存在或解析失败返回 None(前端据此判定「还没规划」或「读不到, 当作未完成重试」)。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn chat_build_manifest(conversation_id: Option<String>) -> Option<Value> {
     let path = artifacts_dir(conversation_id.as_deref()).join("polaris.build.json");
     let txt = std::fs::read_to_string(&path).ok()?;
@@ -753,6 +756,10 @@ fn emit_event(app: &AppHandle, ev: ChatStreamEvent) {
     let _ = app.emit("chat:stream", ev);
 }
 
+// Docker-in-Docker 沙箱仅桌面构建可用 (依赖 polaris_sandbox crate)；
+// server(容器内)本期降级，不编译此路径。
+#[cfg(feature = "desktop")]
+#[allow(dead_code)]
 fn spawn_in_sandbox(prompt: &str, perm: &str) -> Result<Child, String> {
     let perm_flag = format!("--permission-mode={}", perm);
     // 联网 + (非只读档位)本地读写执行, 让成品能真正产出
@@ -852,6 +859,15 @@ fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path, with_task: bool) -> R
     // 系统代理会劫持回环 → 连不上) + 清 DEBUG/LD_PRELOAD。见 doctor::harden_child_env。
     crate::doctor::harden_child_env(&mut cmd);
     no_window(&mut cmd); // 隐藏式: 每次发消息不再弹出黑色终端窗口
+
+    // Linux/容器: 让 claude 成为新进程组的组长 (setpgid)。这样 kill_tree 的
+    // `kill -TERM -<pid>` 能一次带走 claude 扇出的 python/node/dev-server 整棵子孙树,
+    // 不留孤儿占端口/CPU —— 对容器内长稳运行(>3h, 反复发消息)至关重要。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
     cmd.spawn().map_err(|e| {
         // 错误只在 spawn 本身失败 (e.g. exe 找不到), 不再是 prompt 太长
@@ -1443,7 +1459,7 @@ pub struct ArtifactPayload {
     pub size: u64,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn artifact_read(path: String) -> Result<ArtifactPayload, String> {
     let p = ensure_artifact_path(&path)?;
     let meta = std::fs::metadata(&p).map_err(|_| format!("文件不存在或无法访问: {}", path))?;
@@ -1509,7 +1525,7 @@ pub fn artifact_read(path: String) -> Result<ArtifactPayload, String> {
 }
 
 /// 用系统默认程序打开产物文件 (浏览器开 HTML / 看图器开图片等)
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn artifact_open_external(path: String) -> Result<(), String> {
     // 护栏 + 规范化: 只允许打开 App 管理目录内的文件, 且用解析后的绝对路径喂给系统命令
     let path = ensure_artifact_path(&path)?.to_string_lossy().to_string();
@@ -1539,7 +1555,7 @@ pub fn artifact_open_external(path: String) -> Result<(), String> {
 
 /// 在系统文件管理器中定位并选中该产物文件 (Windows 资源管理器 / macOS Finder)。
 /// Linux 无统一「选中文件」语义, 退化为打开其所在目录。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn artifact_reveal(path: String) -> Result<(), String> {
     // 护栏 + 规范化: 只允许定位 App 管理目录内的文件
     let path = ensure_artifact_path(&path)?.to_string_lossy().to_string();
@@ -1574,6 +1590,44 @@ pub fn artifact_reveal(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 把编辑后的文本写回一个**已存在**的产物文件 (供「成品编辑器」保存 HTML / 网页 deck)。
+/// 护栏: 复用 ensure_artifact_path —— 路径必须已存在且落在 App 管理目录内, 防越界写入。
+/// 仅允许文本类后缀, 防止误把二进制 / 可执行覆盖掉。原子写 (先写临时文件再 rename)。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn artifact_write(path: String, content: String) -> Result<(), String> {
+    let p = ensure_artifact_path(&path)?;
+    if !p.is_file() {
+        return Err("目标不是文件".into());
+    }
+    let ext = p
+        .extension()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let editable = matches!(
+        ext.as_str(),
+        "html" | "htm" | "svg" | "md" | "markdown" | "txt" | "json" | "csv" | "css" | "js"
+    );
+    if !editable {
+        return Err(format!("该文件类型不支持编辑保存: .{ext}"));
+    }
+    const MAX: usize = 16 * 1024 * 1024;
+    if content.len() > MAX {
+        return Err("内容过大, 拒绝保存 (>16MB)".into());
+    }
+    // 原子写: 同目录临时文件 → rename, 避免写一半损坏原文件。
+    let parent = p.parent().ok_or("无法定位父目录")?;
+    let tmp = parent.join(format!(
+        ".{}.polaris-tmp",
+        p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+    ));
+    std::fs::write(&tmp, content.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &p).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })?;
+    Ok(())
+}
+
 /// 「参考资料」文件夹视图的一条文件记录。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1591,7 +1645,7 @@ pub struct ArtifactEntry {
 
 /// 列出某会话产物目录下的全部成品文件, 按修改时间倒序 (最新在前)。
 /// 供右侧抽屉「参考资料」以文件夹视图按时间排列、点开即预览。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn artifact_list(conversation_id: Option<String>) -> Vec<ArtifactEntry> {
     let dir = artifacts_dir(conversation_id.as_deref());
     let mut entries: Vec<ArtifactEntry> = Vec::new();
@@ -1677,7 +1731,7 @@ fn ensure_artifact_path(path: &str) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|_| format!("文件不存在或无法访问: {path}"))?;
     let roots = allowed_open_roots();
-    if roots.iter().any(|r| canon.starts_with(r)) {
+    if roots.iter().any(|r| kb::path_contains(r, &canon)) {
         Ok(canon)
     } else {
         Err("路径越界, 拒绝访问".into())
@@ -1699,7 +1753,7 @@ fn conversation_roots() -> Vec<PathBuf> {
 
 /// 在所有对话的 outputs 里检索: 文件名命中 +10, 正文命中 +2/次(上限), 按分数+时间排序。
 /// 让「搜索以前的对话记忆」把之前输出的文件也算入。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn artifact_search(query: String) -> Vec<ArtifactSearchHit> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -1810,7 +1864,7 @@ pub struct AttachedFile {
 /// 对话拖拽上传:把文件复制进「会话 uploads 目录」,返回附件清单。
 /// 与「知识库上传」是两条不同的路径 —— 这里只把文件挂到当前对话,
 /// 前端发送时把这些绝对路径写进 prompt,claude 用 Read 工具按需读取。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn chat_attach_files(
     conversation_id: Option<String>,
     paths: Vec<String>,

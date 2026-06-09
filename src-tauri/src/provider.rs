@@ -22,7 +22,10 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(feature = "desktop")]
 use tauri::AppHandle;
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 use walkdir::WalkDir;
 
 // 构建期注入的「粉丝福利」MiniMax key(XOR 滚动混淆字节, 见 build.rs)。
@@ -748,7 +751,7 @@ pub fn image_gen_capability() -> (String, bool) {
 
 // ───────────────────────── Commands: 供应商 ─────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn provider_list() -> Result<ProviderListResult, String> {
     let store = STORE.read().clone();
     let providers = build_views(&store);
@@ -756,7 +759,7 @@ pub fn provider_list() -> Result<ProviderListResult, String> {
     Ok(ProviderListResult { providers, current_id })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn provider_switch(id: String) -> Result<String, String> {
     let store = STORE.read().clone();
     let views = build_views(&store);
@@ -811,7 +814,7 @@ pub fn provider_switch(id: String) -> Result<String, String> {
     Ok(id)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn provider_save(input: ProviderInput) -> Result<String, String> {
     let token_field = input
         .token_field
@@ -852,7 +855,7 @@ pub fn provider_save(input: ProviderInput) -> Result<String, String> {
     Ok(id)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn provider_delete(id: String) -> Result<(), String> {
     let mut store = STORE.write();
     store.items.retain(|i| i.id != id);
@@ -896,7 +899,7 @@ pub(crate) fn codex_auth_path() -> Option<PathBuf> {
     UserDirs::new().map(|u| u.home_dir().join(".codex").join("auth.json"))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn codex_status() -> Result<CodexStatus, String> {
     let installed = Command::new("codex")
         .arg("--version")
@@ -1014,7 +1017,7 @@ fn codex_agent() -> ureq::Agent {
 }
 
 /// ① 启动 Device Code 流程并打开浏览器验证页
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn codex_start_login() -> Result<CodexDeviceLogin, String> {
     let resp = codex_agent()
         .post(CODEX_DEVICE_USERCODE_URL)
@@ -1043,7 +1046,7 @@ pub fn codex_start_login() -> Result<CodexDeviceLogin, String> {
 }
 
 /// ② 轮询授权状态; 成功则换 token 并落盘 ~/.codex/auth.json
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn codex_poll_login(device_code: String, user_code: String) -> Result<CodexPollResult, String> {
     let pending = || Ok(CodexPollResult { status: "pending".into() });
 
@@ -1326,7 +1329,7 @@ fn line_cost(u: &Usage, model: &str) -> f64 {
         / 1_000_000.0
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn usage_summary() -> Result<UsageSummary, String> {
     let Some(dir) = claude_dir().map(|d| d.join("projects")) else {
         return Ok(empty_summary());

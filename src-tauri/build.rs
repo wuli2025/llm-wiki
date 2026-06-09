@@ -7,6 +7,9 @@ use std::path::Path;
 const GIFT_PAD: [u8; 8] = [0x9E, 0x37, 0x79, 0xB1, 0x5A, 0xC4, 0x2D, 0xE6];
 
 fn main() {
+    // tauri_build 仅在桌面构建时调用; server (Docker) 构建无需 Tauri 上下文/资源清单,
+    // 跳过它即可在无 webkit2gtk 的 Linux 镜像里编译同一份源码。
+    #[cfg(feature = "desktop")]
     tauri_build::build();
 
     // 构建期从环境变量注入礼物 key(CI 走 GitHub secret POLARIS_GIFT_MINIMAX_KEY)。

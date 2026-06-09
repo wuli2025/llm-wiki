@@ -1,0 +1,40 @@
+# Polaris Docker 版 —— 一键拉起：docker compose up -d --build
+# 浏览器访问 http://localhost:8080 （若设了 POLARIS_AUTH_TOKEN，用 ?token=xxx）
+services:
+  polaris:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: polaris-web:latest
+    container_name: polaris-web
+    init: true                      # tini：回收 claude spawn 出的子进程僵尸（长稳关键）
+    ports:
+      - "8080:8080"
+    environment:
+      # ── 鉴权（任选其一接入 LLM）──
+      # 1) Claude 官方 / 第三方 Anthropic 兼容端点：API Key 模式
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
+      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-}"
+      # 2) 访问口令（不设则对所有可达网络开放，公网部署务必设置）
+      POLARIS_AUTH_TOKEN: "${POLARIS_AUTH_TOKEN:-}"
+      POLARIS_PORT: "8080"
+    volumes:
+      # 数据持久化（KB / 对话历史 / 项目 / 产物 / 技能）：容器重建不丢
+      - polaris-data:/root/Polaris
+      # claude 凭证 + settings（供应商切换、OAuth 登录态）
+      - polaris-claude:/root/.claude
+      # kb 设置等 XDG 配置
+      - polaris-config:/root/.config
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  polaris-data: {}
+  polaris-claude: {}
+  polaris-config: {}

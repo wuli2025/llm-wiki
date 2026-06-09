@@ -194,7 +194,7 @@ fn open_browser(url: &str) -> Result<(), String> {
 }
 
 /// 扫码自动配置：起本地回环服务 + 开系统浏览器，阻塞等待扫码结果（最多 5 分钟）。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn wecom_scan_create(source: String) -> Result<WecomBotInfo, String> {
     let src = if source.trim().is_empty() {
         "polaris-ai".to_string()

@@ -66,14 +66,14 @@ fn project_claude_md_path(project_id: &str) -> Option<PathBuf> {
 
 // ───────────────────────── Tauri commands ─────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn persona_list() -> Vec<PersonaPreset> {
     presets()
 }
 
 /// 把某预设人格应用到指定项目：写入该项目 CLAUDE.md + 绑定建议的知识库 scope。
 /// `overwrite=false` 且已有非占位内容时拒绝覆盖（交前端二次确认后再 true）。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn persona_apply(
     project_id: String,
     persona_id: String,

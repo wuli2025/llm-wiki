@@ -1,33 +1,48 @@
-mod accounts;
-mod chat;
-mod claude_md;
-mod codex_proxy;
-mod conv;
-mod convert;
-mod doctor;
-mod feishu;
-mod kb;
-mod persona;
-mod project;
-mod provider;
-mod skills;
-mod updater;
-mod wecom;
+// ── 引擎模块（桌面 + Docker 两种外壳共用同一份源码）──
+pub mod accounts;
+pub mod chat;
+pub mod claude_md;
+pub mod codex_proxy;
+pub mod conv;
+pub mod convert;
+pub mod doctor;
+pub mod feishu;
+pub mod kb;
+pub mod persona;
+pub mod project;
+pub mod provider;
+pub mod skills;
+pub mod wecom;
+// 自动更新依赖 Tauri updater/restart/package_info → 桌面专属（Docker 用 docker pull 更新）。
+#[cfg(feature = "desktop")]
+pub mod updater;
 
+// ── Docker(server) 外壳：shim AppHandle + axum HTTP/WS 服务 ──
+#[cfg(feature = "server")]
+pub mod host;
+#[cfg(feature = "server")]
+pub mod server;
+
+#[cfg(feature = "desktop")]
 use polaris_core::KbLocator;
+#[cfg(feature = "desktop")]
 use std::sync::Arc;
+#[cfg(feature = "desktop")]
 use tauri::Manager;
 
 /// host 适配器：把板块② `kb` 的 `kb_root()` 适配成 core 的 [`KbLocator`] 契约，
 /// 在启动时注入给板块⑤ `polaris-sandbox`，从而打破 `sandbox → kb` 的直接依赖。
 /// （架构重构 Phase 1：依赖反转的落地点）
+#[cfg(feature = "desktop")]
 struct HostKbLocator;
+#[cfg(feature = "desktop")]
 impl KbLocator for HostKbLocator {
     fn kb_root(&self) -> std::path::PathBuf {
         std::path::PathBuf::from(kb::kb_root())
     }
 }
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -57,6 +72,9 @@ pub fn run() {
             skills::seed_deck_studio_skill();
             // 确保「网站生成」技能落盘（支撑「网站生成」入口）。
             skills::seed_web_studio_skill();
+            // 确保「壹伴排版优化」技能落盘（含 wechat_yiban.py：壹伴样式引擎 + CloakBrowser 驱动，
+            // spawn 的 claude agent 才能在磁盘上直接 python 跑它）。best-effort，不阻断启动。
+            skills::seed_wechat_typesetter_skill();
             // 环境预热: 后台把 claude / pwsh 目录塞进进程 PATH + 设 Git Bash 路径,
             // 让之后 spawn 的 claude CLI 直接「找得到、有 shell」, 无需重启 (见 doctor.rs)。
             doctor::prime_path_for_claude();
@@ -129,6 +147,7 @@ pub fn run() {
             chat::chat_attach_files,
             chat::chat_build_manifest,
             chat::artifact_read,
+            chat::artifact_write,
             chat::artifact_open_external,
             chat::artifact_reveal,
             chat::artifact_list,

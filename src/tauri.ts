@@ -16,25 +16,168 @@ export const isTauri =
   // @ts-ignore tauri injects this
   typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
 
-export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauri) {
-    // Browser-only stubs so the UI is still navigable during pure-web dev.
-    return browserStub(cmd, args) as T;
+// ──────────────────────────────────────────────────────────────
+// Docker/Web 后端适配层
+// ──────────────────────────────────────────────────────────────
+// 非 Tauri 环境下：若同源存在 polaris-server（Docker 版），所有 invoke/listen
+// 改走 HTTP(/api/invoke) + WebSocket(/ws)；探测不到后端则回退 browserStub，
+// 保留 `npm run dev` 纯前端预览体验。业务组件零改动。
+
+type BackendMode = "http" | "stub";
+let backendMode: BackendMode | null = null;
+let probePromise: Promise<void> | null = null;
+
+/** 访问口令：URL ?token= 优先落盘 localStorage，之后从 localStorage 读。 */
+function authToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const u = new URL(window.location.href);
+    const fromUrl = u.searchParams.get("token");
+    if (fromUrl) localStorage.setItem("POLARIS_AUTH_TOKEN", fromUrl);
+    return localStorage.getItem("POLARIS_AUTH_TOKEN");
+  } catch {
+    return null;
   }
-  return rawInvoke<T>(cmd, args);
+}
+
+function authHeaders(): Record<string, string> {
+  const t = authToken();
+  return t ? { authorization: `Bearer ${t}` } : {};
+}
+
+async function ensureBackend(): Promise<void> {
+  if (backendMode) return;
+  if (!probePromise) {
+    probePromise = (async () => {
+      try {
+        const r = await fetch("/api/health", { cache: "no-store" });
+        backendMode = r.ok ? "http" : "stub";
+      } catch {
+        backendMode = "stub";
+      }
+    })();
+  }
+  await probePromise;
+}
+
+async function httpInvoke<T>(
+  cmd: string,
+  args?: Record<string, unknown>
+): Promise<T> {
+  const res = await fetch("/api/invoke", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ cmd, args: args ?? {} }),
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try {
+      const j = await res.json();
+      if (j?.error) msg = j.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
+/** 浏览器拖拽/选择的文件 → 上传到服务端 → 返回服务端绝对路径（喂给 kb_upload_files/chat_attach_files）。 */
+export async function uploadToBackend(
+  files: File[] | FileList
+): Promise<Array<{ name: string; path: string; size: number }>> {
+  if (isTauri) throw new Error("Tauri 环境请用原生文件路径");
+  await ensureBackend();
+  if (backendMode !== "http") return [];
+  const fd = new FormData();
+  const arr = Array.from(files as ArrayLike<File>);
+  for (const f of arr) fd.append("files", f, f.name);
+  const res = await fetch("/api/upload", {
+    method: "POST",
+    headers: { ...authHeaders() },
+    body: fd,
+  });
+  if (!res.ok) throw new Error(`上传失败 HTTP ${res.status}`);
+  const j = await res.json();
+  return j.files ?? [];
+}
+
+// ── WebSocket：把服务端 emit 的事件按 topic 分发给 listen 注册的回调 ──
+let ws: WebSocket | null = null;
+const wsListeners = new Map<string, Set<(p: unknown) => void>>();
+let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function ensureWs(): void {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
+    return;
+  try {
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    const t = authToken();
+    const url = `${proto}://${window.location.host}/ws${
+      t ? `?token=${encodeURIComponent(t)}` : ""
+    }`;
+    ws = new WebSocket(url);
+    ws.onmessage = (e) => {
+      try {
+        const { topic, payload } = JSON.parse(e.data);
+        const set = wsListeners.get(topic);
+        if (set) for (const cb of set) cb(payload);
+      } catch {
+        /* ignore malformed frame */
+      }
+    };
+    ws.onclose = () => {
+      ws = null;
+      if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+      // 仍有监听者才自动重连（避免空连接刷日志）。
+      if (wsListeners.size > 0) wsReconnectTimer = setTimeout(ensureWs, 1500);
+    };
+    ws.onerror = () => {
+      try {
+        ws?.close();
+      } catch {
+        /* ignore */
+      }
+    };
+  } catch {
+    ws = null;
+  }
+}
+
+export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (isTauri) return rawInvoke<T>(cmd, args);
+  await ensureBackend();
+  if (backendMode === "http") return httpInvoke<T>(cmd, args);
+  // 纯前端预览：返回 stub 数据让 UI 仍可浏览。
+  return browserStub(cmd, args) as T;
 }
 
 export async function listen<T>(
   event: string,
   cb: (payload: T) => void
 ): Promise<UnlistenFn> {
-  if (!isTauri) return () => {};
-  return rawListen<T>(event, (e) => cb(e.payload));
+  if (isTauri) return rawListen<T>(event, (e) => cb(e.payload));
+  await ensureBackend();
+  if (backendMode !== "http") return () => {};
+  ensureWs();
+  let set = wsListeners.get(event);
+  if (!set) {
+    set = new Set();
+    wsListeners.set(event, set);
+  }
+  set.add(cb as (p: unknown) => void);
+  return () => {
+    set!.delete(cb as (p: unknown) => void);
+    if (set!.size === 0) wsListeners.delete(event);
+  };
 }
 
 export async function emit(event: string, payload?: unknown): Promise<void> {
-  if (!isTauri) return;
-  await rawEmit(event, payload);
+  if (isTauri) {
+    await rawEmit(event, payload);
+  }
+  // Docker/Web 模式：前端→后端无需 emit（事件单向 server→client）。
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -341,6 +484,9 @@ export interface ArtifactEntry {
 
 export const artifacts = {
   read: (path: string) => invoke<ArtifactPayload>("artifact_read", { path }),
+  /** 把编辑后的文本写回已存在的产物文件（成品编辑器保存用） */
+  write: (path: string, content: string) =>
+    invoke<void>("artifact_write", { path, content }),
   openExternal: (path: string) =>
     invoke<void>("artifact_open_external", { path }),
   /** 在系统文件管理器中定位并选中该文件（资源管理器 / 访达） */
@@ -819,6 +965,8 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         size: 0,
       };
     }
+    case "artifact_write":
+      return undefined;
     case "artifact_open_external":
       return undefined;
     case "artifact_list":

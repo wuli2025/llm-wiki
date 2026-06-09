@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(feature = "desktop")]
 use tauri::AppHandle;
+#[cfg(not(feature = "desktop"))]
+use crate::host::AppHandle;
 
 // ───────────────────────── Types ─────────────────────────
 
@@ -298,7 +301,7 @@ pub fn append_message(conversation_id: &str, role: &str, content: &str) -> Resul
 
 // ───────────────────────── Tauri commands ────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_list_projects() -> Vec<Project> {
     STATE
         .read()
@@ -309,7 +312,7 @@ pub fn conv_list_projects() -> Vec<Project> {
         .collect()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_create_project(name: String) -> Result<Project, String> {
     let p = Project {
         id: new_id("p"),
@@ -329,7 +332,7 @@ pub fn conv_create_project(name: String) -> Result<Project, String> {
 }
 
 /// 手动设置项目的知识库 scope（人格工坊里的下拉）。persona_id 维持不变。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_set_project_kb_scope(project_id: String, kb_scope: Option<String>) -> Result<(), String> {
     let persona = STATE
         .read()
@@ -353,7 +356,7 @@ fn project_dir(project_id: &str) -> Option<PathBuf> {
 }
 
 /// 在系统文件管理器中打开该项目的工作目录(不存在则先建好, 否则 explorer 会报路径不存在)。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_open_project_dir(project_id: String) -> Result<(), String> {
     let dir = project_dir(&project_id).ok_or_else(|| "no user dir".to_string())?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -385,7 +388,7 @@ pub fn conv_open_project_dir(project_id: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_archive_project(project_id: String) -> Result<(), String> {
     let mut st = STATE.write();
     for p in st.projects.iter_mut() {
@@ -398,7 +401,7 @@ pub fn conv_archive_project(project_id: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_list_conversations(project_id: String) -> Vec<Conversation> {
     let mut list: Vec<Conversation> = STATE
         .read()
@@ -411,7 +414,7 @@ pub fn conv_list_conversations(project_id: String) -> Vec<Conversation> {
     list
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_create_conversation(project_id: String) -> Result<Conversation, String> {
     let st = STATE.read();
     if !st.projects.iter().any(|p| p.id == project_id) {
@@ -431,7 +434,7 @@ pub fn conv_create_conversation(project_id: String) -> Result<Conversation, Stri
     Ok(c)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_delete_conversation(conversation_id: String) -> Result<(), String> {
     let mut st = STATE.write();
     st.conversations.retain(|c| c.id != conversation_id);
@@ -441,12 +444,12 @@ pub fn conv_delete_conversation(conversation_id: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_get_messages(conversation_id: String) -> Vec<Message> {
     get_messages(&conversation_id)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn conv_rename_conversation(conversation_id: String, title: String) -> Result<(), String> {
     let mut st = STATE.write();
     for c in st.conversations.iter_mut() {

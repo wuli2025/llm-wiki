@@ -129,14 +129,14 @@ fn xhs_status() -> AccountStatus {
 }
 
 /// 列出各平台登录态（账号管理面板）。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn media_accounts_status() -> Vec<AccountStatus> {
     vec![wechat_status(), xhs_status()]
 }
 
 /// 解绑某平台：删除其 profile 目录，强制下次重新扫码登录。
 /// 安全：只允许删本模块固定推导出的已知路径，杜绝任意路径删除。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn media_account_forget(platform: String) -> Result<String, String> {
     let targets: Vec<PathBuf> = match platform.as_str() {
         "wechat" => vec![wechat_profile()],

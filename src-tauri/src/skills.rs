@@ -47,7 +47,7 @@ const PVS_WORKFLOW: &str =
 // 与 PVS 同套路：全部编译期内嵌、启动时确保落到 ~/Polaris/skills（靠 DECK_VERSION 比对覆盖）。
 const DECK_ID: &str = "polaris-deck-studio";
 // 改动任一内嵌资源后必须 +1，让已安装用户下次启动拿到更新。
-const DECK_VERSION: &str = "2";
+const DECK_VERSION: &str = "3";
 const DECK_SKILL_MD: &str = include_str!("templates/skills/polaris-deck-studio/SKILL.md");
 const DECK_LICENSE: &str = include_str!("templates/skills/polaris-deck-studio/LICENSE");
 const DECK_BASE_CSS: &str = include_str!("templates/skills/polaris-deck-studio/assets/base.css");
@@ -74,6 +74,23 @@ const WEB_RUNTIME_JS: &str =
     include_str!("templates/skills/polaris-web-studio/assets/runtime.js");
 const WEB_TEMPLATE: &str =
     include_str!("templates/skills/polaris-web-studio/templates/site.html");
+
+// ───────── 「壹伴排版优化」多文件技能（公众号排版，编译期内嵌，启动落盘）─────────
+// 升级成多文件：SKILL.md（只产语义正文）+ scripts/wechat_yiban.py（壹伴样式引擎 + CloakBrowser
+// 驱动）。和 deck/video studio 同套路：编译期内嵌、启动确保落到 ~/Polaris/skills（靠版本号比对覆盖），
+// 这样脚本能被 spawn 的 claude agent 在磁盘上直接 `python …/wechat_yiban.py` 执行。
+const WECHAT_TS_ID: &str = "wechat-md-typesetter";
+// 改动 SKILL.md 或 wechat_yiban.py 后必须 +1，让已安装用户下次启动拿到更新。
+// v2：修真机测出的两个 bug —— cloakbrowser API 是 headless= 非 headed=；render 改 about:blank+evaluate 避开 set_content 等 "load" 超时。
+// v3：publish 健壮性 —— 跨「所有标签页×所有 frame」找编辑器（写图文常开新标签）；登录后自动点一次「写图文」入口；
+//     兜底 render 复用已开 ctx 开新标签（不再另起同步 Playwright→消除 'Sync API inside asyncio loop' 崩溃）。
+// v4：按真机 dump 校 SELECTORS —— editor_body 加新版 ProseMirror；title_input 改专指文章标题(避开草稿箱搜索框)；
+//     new_article_entry 精确点「写图文」。注：editor_body 仍需真机在编辑器打开态确认一次。
+const WECHAT_TS_VERSION: &str = "4";
+const WECHAT_TS_SKILL_MD: &str =
+    include_str!("templates/skills/wechat-md-typesetter/SKILL.md");
+const WECHAT_TS_YIBAN_PY: &str =
+    include_str!("templates/skills/wechat-md-typesetter/scripts/wechat_yiban.py");
 
 // ═══════════════════════════════════════════════════════════════
 // 统一目录 Catalog（编译期，只读）
@@ -246,10 +263,10 @@ fn catalog() -> Vec<CatalogSkill> {
         CatalogSkill {
             id: "wechat-md-typesetter",
             name: "壹伴排版优化",
-            description: "把文章排成微信公众号兼容的内联样式 HTML（套主题/移动端字号/标题色块/引用块全内联），存成文件；再用 CloakBrowser 打开后台编辑器直接注入、图走素材库，保存为草稿（绝不自动发布）——根治粘贴格式错乱",
+            description: "壹伴式排版：只产出干净语义正文（零内联样式），随包壹伴脚本在 CloakBrowser 公众号编辑器 DOM 上按约定风格一键套样式（标题色块/引用卡/分割线/列表转段落全内联），填标题存草稿（绝不自动发布）——根治粘贴格式错乱",
             source: "third-party",
             preinstalled: true,
-            system_prompt: include_str!("templates/skills/wechat-md-typesetter.md"),
+            system_prompt: WECHAT_TS_SKILL_MD,
         },
         // ── 源自 ClaudeSkills 合集的两个内容创作技能（全链路成稿/出图时调用） ──
         CatalogSkill {
@@ -604,7 +621,7 @@ pub fn auto_skills_for_intent(prompt: &str) -> Vec<(SkillMeta, String)> {
 // Tauri Commands
 // ═══════════════════════════════════════════════════════════════
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn list_skills() -> Vec<SkillMeta> {
     let user = scan_user_skills();
     let user_ids: HashSet<String> = user.iter().map(|s| s.id.clone()).collect();
@@ -644,7 +661,7 @@ pub fn list_skills() -> Vec<SkillMeta> {
     list
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn get_skill(id: String) -> Result<SkillMeta, String> {
     find(&id)
         .map(|(meta, _)| meta)
@@ -659,7 +676,7 @@ pub struct CreateSkillArgs {
     pub system_prompt: String,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn create_skill(args: CreateSkillArgs) -> Result<(), String> {
     // 校验 id: 只允许小写字母、数字、-、_
     if !args
@@ -681,7 +698,7 @@ pub fn create_skill(args: CreateSkillArgs) -> Result<(), String> {
 
 /// 从市场安装一个目录技能：复制模板到用户目录，保留原始 source。
 /// 安装即拥有，立即出现在技能中心（前端负责自动激活）。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn install_skill(id: String) -> Result<(), String> {
     // 多文件打包技能走专用安装路径（clone 整包 + 叠加 Polaris 助手 + 拼 skill.md）。
     if id == WVP_ID {
@@ -911,6 +928,36 @@ fn write_video_studio_files(dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 启动时确保「壹伴排版优化」技能在 ~/Polaris/skills 落盘（多文件，含 wechat_yiban.py 可执行脚本）。
+///
+/// 与 deck/video studio 同策略：目录缺失 / 版本旧（`.polaris_version` < `WECHAT_TS_VERSION`）就（重）写；
+/// 已是最新则跳过。脚本必须真落到磁盘，spawn 的 claude agent 才能 `python …/wechat_yiban.py` 跑它。
+/// best-effort：失败只让「壹伴直送草稿」暂不可用，不阻断 App 启动。
+pub fn seed_wechat_typesetter_skill() {
+    let Some(root) = skills_dir() else {
+        return;
+    };
+    let dest = root.join(WECHAT_TS_ID);
+    let ver_file = dest.join(".polaris_version");
+    let stored = fs::read_to_string(&ver_file).unwrap_or_default();
+    let present = dest.join("skill.md").exists();
+    if present && stored.trim() == WECHAT_TS_VERSION {
+        return;
+    }
+    if write_wechat_typesetter_files(&dest).is_ok() {
+        let _ = fs::write(&ver_file, WECHAT_TS_VERSION);
+    }
+}
+
+/// 把内嵌的「壹伴排版优化」文件写到目标目录。技能正文写成小写 `skill.md`，与扫描约定一致。
+fn write_wechat_typesetter_files(dest: &Path) -> Result<(), String> {
+    let scripts = dest.join("scripts");
+    fs::create_dir_all(&scripts).map_err(|e| e.to_string())?;
+    fs::write(dest.join("skill.md"), WECHAT_TS_SKILL_MD).map_err(|e| e.to_string())?;
+    fs::write(scripts.join("wechat_yiban.py"), WECHAT_TS_YIBAN_PY).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ═══════════════════════════════════════════════════════════════
 // 外部导入 / 下载（不限来源，鼓励从外面拿）
 //   本地：.md 文件 / .zip 压缩包 / 技能目录
@@ -918,7 +965,7 @@ fn write_video_studio_files(dest: &Path) -> Result<(), String> {
 // ═══════════════════════════════════════════════════════════════
 
 /// 把任意来源的 skill 导入用户目录，返回导入成功的 skill id 列表（供前端自动激活）。
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn import_skill(source: String) -> Result<Vec<String>, String> {
     let src = source.trim();
     if src.is_empty() {
@@ -1106,7 +1153,7 @@ fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
     run_cmd("tar", &["-xf", zip_s.as_ref(), "-C", dest_s.as_ref()])
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn delete_skill(id: String) -> Result<(), String> {
     let Some(root) = skills_dir() else {
         return Err("无法获取用户目录".into());

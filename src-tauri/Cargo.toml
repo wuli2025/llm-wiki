@@ -22,20 +22,28 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
-tauri = { version = "2.1", features = [] }
-tauri-plugin-dialog = "2.0"
-tauri-plugin-fs = "2.0"
-tauri-plugin-shell = "2.0"
+# ── 桌面外壳依赖：全部 optional，仅在 `desktop` feature 下编译 ──
+# Docker(server) 构建用 `--no-default-features --features server`，不拉 tauri，
+# 因此无需 Linux 上的 webkit2gtk-dev/libsoup 等系统库即可编译同一份源码。
+tauri = { version = "2.1", features = [], optional = true }
+tauri-plugin-dialog = { version = "2.0", optional = true }
+tauri-plugin-fs = { version = "2.0", optional = true }
+tauri-plugin-shell = { version = "2.0", optional = true }
 # 自动更新（GitHub Releases 托管）+ 重启（更新后自重启生效）
-tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
+tauri-plugin-updater = { version = "2", optional = true }
+tauri-plugin-process = { version = "2", optional = true }
+# ── Docker(server) 外壳依赖：仅在 `server` feature 下编译 ──
+axum = { version = "0.7", features = ["ws", "multipart"], optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"], optional = true }
+futures-util = { version = "0.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 # 自动更新「防卡死」用：停滞看门狗(time::sleep) + 与下载 future 竞速(select!)。
 # tokio 本就随 tauri 编进来了，这里只是显式开 time/macros 两个 feature；与 Codex 那条
 # 「无 tokio 的 ureq 同步流」互不影响。
-tokio = { version = "1", features = ["time", "macros"] }
+tokio = { version = "1", features = ["time", "macros", "rt-multi-thread", "sync", "net", "io-util", "signal"] }
 walkdir = "2"
 once_cell = "1"
 directories = "5"
@@ -44,7 +52,9 @@ regex = "1"
 
 # 板块 crate (架构重构 Phase 0–1)
 polaris-core = { path = "crates/polaris-core" }
-polaris-sandbox = { path = "crates/polaris-sandbox" }
+# sandbox 含 #[tauri::command]，依赖 tauri → 仅桌面构建编译；
+# Docker 内「Docker-in-Docker」沙箱本期降级（dispatch 层给 stub）。
+polaris-sandbox = { path = "crates/polaris-sandbox", optional = true }
 # 文件转换 (板块② 上传/入库) — 纯 Rust，无需 pdfium.dll 等原生绑定
 # clean-room 自写转换逻辑，仅这些底层解析库为第三方
 zip = "8.6.0"          # docx/pptx/xlsx 本质是 zip+xml，解压取 XML
@@ -58,8 +68,33 @@ ureq = { version = "2", features = ["json"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [features]
-default = ["custom-protocol"]
-custom-protocol = ["tauri/custom-protocol"]
+default = ["desktop"]
+# 桌面构建：Tauri 外壳 + 各插件 + 沙箱板块 + 自定义协议。
+desktop = [
+    "dep:tauri",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-fs",
+    "dep:tauri-plugin-shell",
+    "dep:tauri-plugin-updater",
+    "dep:tauri-plugin-process",
+    "dep:polaris-sandbox",
+    "custom-protocol",
+]
+custom-protocol = ["tauri?/custom-protocol"]
+# Docker/Web 构建：axum HTTP/WS 外壳，复用全部 Rust 引擎，不含 Tauri。
+server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:futures-util"]
+
+# server 二进制：浏览器前端 + REST/WS 后端（替代 Tauri 外壳）。
+# 构建：cargo build --release --bin polaris-server --no-default-features --features server
+[[bin]]
+name = "polaris-server"
+path = "src/bin/polaris-server.rs"
+required-features = ["server"]
+
+# 桌面二进制保持默认（main.rs）。
+[[bin]]
+name = "polaris-app"
+path = "src/main.rs"
 
 # ═══════════════════════════════════════════════════════════════
 # Release 体积优化 — 工业级减负配置
@@ -76,3 +111,12 @@ strip = true           # 自动剥离符号表
 # 进一步缩减：移除断言和溢出检查（仅 release）
 [profile.release.package."*"]
 opt-level = 3
+
+# server(Docker) 二进制专用：继承 release 的优化，但关掉 LTO + 放开 codegen-units，
+# 大幅缩短镜像构建时间。server 不是 CPU 密集型（重活在 spawn 的 claude CLI），
+# 关 LTO 对运行性能几乎无影响，却能把 Docker 里的最终链接从数分钟降到数十秒。
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = true
