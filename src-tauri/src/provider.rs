@@ -21,7 +21,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 use walkdir::WalkDir;
 
@@ -213,6 +213,10 @@ struct Store {
 
 static STORE: Lazy<RwLock<Store>> = Lazy::new(|| RwLock::new(Store::default()));
 static STORE_PATH: Lazy<RwLock<PathBuf>> = Lazy::new(|| RwLock::new(PathBuf::new()));
+/// 串行化对 settings.json / providers.json 的「读-改-写」。
+/// Tauri 命令可并发跑在线程池上, 两个 provider_switch 同时进来若不串行化, 会交错写同一份
+/// settings.json → 撕裂成半截。此锁保证整条 RMW 原子, 与 atomic_write 一起根治配置损坏。
+static IO_LOCK: Lazy<parking_lot::Mutex<()>> = Lazy::new(|| parking_lot::Mutex::new(()));
 
 /// 还原构建期注入的「粉丝福利」MiniMax key。
 /// 二进制内为 XOR 混淆字节, 此处解出明文; 未注入(本地 dev 构建)时返回空串。
@@ -288,7 +292,7 @@ fn config_with_model(mut cfg: Value, model: &str) -> Value {
     cfg
 }
 
-/// Codex 路由配置: 把 base_url 指到本地翻译代理, 钉模型为 gpt-5-codex(含小任务档),
+/// Codex 路由配置: 把 base_url 指到本地翻译代理, 钉模型为 gpt-5.5(含小任务档),
 /// AUTH_TOKEN 给个占位串(代理只认 ~/.codex/auth.json, 不看这个), 让 claude 愿意发请求。
 fn codex_route_config(port: u16) -> Value {
     let mut env = Map::new();
@@ -301,11 +305,11 @@ fn codex_route_config(port: u16) -> Value {
         Value::String("polaris-codex-proxy".into()),
     );
     for k in MODEL_ENV_KEYS {
-        env.insert((*k).into(), Value::String("gpt-5-codex".into()));
+        env.insert((*k).into(), Value::String("gpt-5.5".into()));
     }
     env.insert(
         "ANTHROPIC_SMALL_FAST_MODEL".into(),
-        Value::String("gpt-5-codex".into()),
+        Value::String("gpt-5.5".into()),
     );
     json!({ "env": Value::Object(env) })
 }
@@ -319,7 +323,19 @@ pub fn init(_app: &AppHandle) -> Result<()> {
 
     let mut store: Store = if path.exists() {
         let txt = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&txt).unwrap_or_default()
+        match serde_json::from_str(&txt) {
+            Ok(s) => s,
+            Err(_) => {
+                // 解析失败别静默 default —— 那会让用户所有已存供应商/API key 凭空消失。
+                // 先把损坏文件留底, 用户仍可手工抢救, 再回落空 store。
+                if !txt.trim().is_empty() {
+                    let mut bak = path.as_os_str().to_owned();
+                    bak.push(".corrupt.bak");
+                    let _ = fs::copy(&path, PathBuf::from(bak));
+                }
+                Store::default()
+            }
+        }
     } else {
         Store::default()
     };
@@ -391,13 +407,26 @@ pub fn init(_app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
+/// 原子落盘: 先写同目录临时文件, 再 rename 覆盖目标。
+/// rename 在同一文件系统内是原子的 (Windows 的 `fs::rename` 用 MoveFileExW+REPLACE_EXISTING),
+/// 故进程在写一半时崩溃/断电只会留下 `.polaris.tmp`, 目标文件要么旧内容要么新内容,
+/// 绝不会被截成半截 JSON —— 这是「torn write 破坏 claude 配置 / 静默清空 API key」的根治。
+fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".polaris.tmp");
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, contents)?;
+    fs::rename(&tmp, path)
+}
+
 fn persist() {
     let path = STORE_PATH.read().clone();
     if path.as_os_str().is_empty() {
         return;
     }
+    let _io = IO_LOCK.lock();
     if let Ok(txt) = serde_json::to_string_pretty(&*STORE.read()) {
-        let _ = fs::write(&path, txt);
+        let _ = atomic_write(&path, &txt);
     }
 }
 
@@ -622,6 +651,8 @@ fn read_live_env() -> Map<String, Value> {
 /// 把供应商 settings_config 合并写进 live settings.json：
 /// 先从 live 清掉受管 env/top 键，再套用 cfg 的 env 与顶层键，其余 live 键原样保留。
 fn apply_settings_config(cfg: &Value) -> Result<(), String> {
+    // 整条「读 settings.json → 合并 → 写回」串行化, 防并发切换交错撕裂用户实时配置。
+    let _io = IO_LOCK.lock();
     let path = claude_settings_path().ok_or_else(|| "无法定位用户主目录".to_string())?;
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -683,7 +714,7 @@ fn apply_settings_config(cfg: &Value) -> Result<(), String> {
 
     let txt = serde_json::to_string_pretty(&root)
         .map_err(|e| format!("序列化 settings.json 失败: {e}"))?;
-    fs::write(&path, txt).map_err(|e| format!("写 settings.json 失败: {e}"))?;
+    atomic_write(&path, &txt).map_err(|e| format!("写 settings.json 失败: {e}"))?;
     Ok(())
 }
 
@@ -974,10 +1005,19 @@ fn codex_parse_interval(v: Option<&Value>) -> u64 {
     raw.max(1) + 3
 }
 
+/// 带超时的 OAuth agent: 设备授权 / 轮询 / 换 token 都是非流式请求-响应, 给整条 call 30s
+/// 全局 deadline, 防 OpenAI 认证端点黑洞把 Tauri 命令线程挂死 (轮询命令更会每次挂一条)。
+fn codex_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build()
+}
+
 /// ① 启动 Device Code 流程并打开浏览器验证页
 #[tauri::command]
 pub fn codex_start_login() -> Result<CodexDeviceLogin, String> {
-    let resp = ureq::post(CODEX_DEVICE_USERCODE_URL)
+    let resp = codex_agent()
+        .post(CODEX_DEVICE_USERCODE_URL)
         .set("Content-Type", "application/json")
         .set("User-Agent", CODEX_USER_AGENT)
         .send_json(json!({ "client_id": CODEX_CLIENT_ID }))
@@ -1007,7 +1047,8 @@ pub fn codex_start_login() -> Result<CodexDeviceLogin, String> {
 pub fn codex_poll_login(device_code: String, user_code: String) -> Result<CodexPollResult, String> {
     let pending = || Ok(CodexPollResult { status: "pending".into() });
 
-    let resp = match ureq::post(CODEX_DEVICE_TOKEN_URL)
+    let resp = match codex_agent()
+        .post(CODEX_DEVICE_TOKEN_URL)
         .set("Content-Type", "application/json")
         .set("User-Agent", CODEX_USER_AGENT)
         .send_json(json!({ "device_auth_id": device_code, "user_code": user_code }))
@@ -1039,7 +1080,8 @@ pub fn codex_poll_login(device_code: String, user_code: String) -> Result<CodexP
 
 /// 用 authorization_code + code_verifier 换 token
 fn codex_exchange_code(code: &str, code_verifier: &str) -> Result<CodexTokenResp, String> {
-    let resp = ureq::post(CODEX_OAUTH_TOKEN_URL)
+    let resp = codex_agent()
+        .post(CODEX_OAUTH_TOKEN_URL)
         .set("User-Agent", CODEX_USER_AGENT)
         .send_form(&[
             ("grant_type", "authorization_code"),

@@ -36,3 +36,8 @@ PolarisKB/.polaris_seeded
 /career-map-work/
 /polaris-video-work/
 /polaris-video-work-kbwiki/
+
+# 生成的视频工作产物(大体积,勿提交)
+/polaris-video-work-longoutput/
+/polaris-video-work-zhiyuan/
+/polaris-video-work-kbwiki/

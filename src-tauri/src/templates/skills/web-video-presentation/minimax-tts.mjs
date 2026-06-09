@@ -27,6 +27,10 @@ import os from "node:os";
 const ENDPOINT = process.env.MINIMAX_T2A_URL || "https://api.minimaxi.com/v1/t2a_v2";
 const MODEL = process.env.MINIMAX_TTS_MODEL || "speech-02-turbo";
 const DEFAULT_VOICE = process.env.MINIMAX_TTS_VOICE || "male-qn-qingse";
+// 配音语言增强（粤语/英语/日语…）。对齐 MiniMax T2A v2 language_boost 取值，
+// 如 "Chinese"、"Chinese,Yue"、"English"、"Japanese"、"auto"。
+// 每段可在 audio-segments.json 用 language_boost 字段覆盖此默认值。
+const DEFAULT_LANGUAGE_BOOST = (process.env.MINIMAX_LANGUAGE_BOOST || "").trim();
 
 function discoverKey() {
   if (process.env.MINIMAX_API_KEY) return process.env.MINIMAX_API_KEY.trim();
@@ -45,7 +49,7 @@ function discoverKey() {
   return null;
 }
 
-async function synth(text, outPath, voice) {
+async function synth(text, outPath, voice, languageBoost) {
   const key = discoverKey();
   if (!key) {
     throw new Error(
@@ -59,6 +63,8 @@ async function synth(text, outPath, voice) {
     voice_setting: { voice_id: voice || DEFAULT_VOICE, speed: 1, vol: 1, pitch: 0 },
     audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3" },
   };
+  const boost = (languageBoost || DEFAULT_LANGUAGE_BOOST).trim();
+  if (boost) body.language_boost = boost; // 提升目标语言（粤语/英语等）的发音准确度
   const res = await fetch(ENDPOINT, {
     method: "POST",
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
@@ -80,12 +86,12 @@ async function synth(text, outPath, voice) {
 async function main() {
   const args = process.argv.slice(2);
   if (args[0] === "--one") {
-    const [, text, out, voice] = args;
+    const [, text, out, voice, languageBoost] = args;
     if (!text || !out) {
-      console.error('usage: node minimax-tts.mjs --one "<text>" <out.mp3> [voice]');
+      console.error('usage: node minimax-tts.mjs --one "<text>" <out.mp3> [voice] [language_boost]');
       process.exit(1);
     }
-    const p = await synth(text, out, voice);
+    const p = await synth(text, out, voice, languageBoost);
     console.log(`✓ ${p} (${fs.statSync(p).size} bytes)`);
     return;
   }
@@ -116,7 +122,7 @@ async function main() {
         continue;
       }
       try {
-        await synth(s.text, out, s.voice);
+        await synth(s.text, out, s.voice, s.language_boost);
         ok++;
         console.log(`[${i + 1}/${segs.length}] ${tag} ✓`);
       } catch (e) {

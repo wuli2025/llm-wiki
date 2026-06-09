@@ -23,6 +23,9 @@ import UpdatePanel from "./components/UpdatePanel.vue";
 import FeishuSettings from "./components/FeishuSettings.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
 import VideoCourseStudio from "./components/VideoCourseStudio.vue";
+import MediaOps from "./components/MediaOps.vue";
+import DeckStudio from "./components/DeckStudio.vue";
+import WebStudio from "./components/WebStudio.vue";
 import { checkForUpdate } from "./composables/useUpdater";
 import { useAppStore, type ViewKey } from "./stores/app";
 import { useArtifactsStore } from "./stores/artifacts";
@@ -138,6 +141,9 @@ const layoutCols = computed(
         <McpConfigModal v-else-if="mountedView === 'mcp'" inline @close="app.setView('chat')" />
         <Settings v-else-if="mountedView === 'settings'" />
         <VideoCourseStudio v-else-if="mountedView === 'video_course'" />
+        <MediaOps v-else-if="mountedView === 'media_ops'" />
+        <DeckStudio v-else-if="mountedView === 'deck'" />
+        <WebStudio v-else-if="mountedView === 'web_studio'" />
       </KeepAlive>
 
       <!-- 点击重视图即刻浮现的快速加载条（盖住挂载/建图卡顿） -->

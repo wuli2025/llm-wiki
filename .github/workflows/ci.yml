@@ -1,0 +1,52 @@
+name: CI
+
+# 在 push / PR 到 main 时跑: Rust 单测(硬门槛) + clippy/fmt(建议性) + 前端构建。
+# 目的: 把这次安全/稳定加固锁住, 别让回归悄悄溜进来。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (test + clippy)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # 硬门槛: 全 workspace 单测必须过 (含 kb 路径穿越 / codex_proxy 解析边界等回归测试)
+      - name: Test
+        run: cargo test --workspace
+      # 建议性: 先不 -D warnings, 等存量 lint 清干净再收紧成硬门槛
+      - name: Format check
+        run: cargo fmt --all --check
+        continue-on-error: true
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+        continue-on-error: true
+
+  frontend:
+    name: Frontend (type-check + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # npm run build = vue-tsc --noEmit && vite build (类型检查 + 打包)
+      - run: npm run build

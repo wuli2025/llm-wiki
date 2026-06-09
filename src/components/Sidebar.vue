@@ -20,6 +20,9 @@ import {
   MoreHorizontal,
   Archive,
   Clapperboard,
+  Megaphone,
+  Presentation,
+  Globe,
 } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 import { useChatStore } from "../stores/chat";
@@ -44,9 +47,12 @@ const primaryNav: NavItem[] = [
 ];
 // 收纳进「更多」的次要项（更新 / 飞书 / 环境 / MCP / 设置）
 const moreNav: NavItem[] = [
+  { key: "media_ops", label: "自媒体运营", icon: Megaphone },
+  { key: "deck", label: "PPT 演示", icon: Presentation },
+  { key: "web_studio", label: "网站生成", icon: Globe },
   { key: "video_course", label: "生成课件类视频", icon: Clapperboard },
   { key: "update", label: "更新", icon: CloudDownload },
-  { key: "feishu", label: "飞书", icon: MessageCircle },
+  { key: "feishu", label: "聊天机器人", icon: MessageCircle },
   { key: "env_doctor", label: "环境", icon: Stethoscope },
   { key: "mcp", label: "MCP", icon: Server },
   { key: "settings", label: "设置", icon: Settings },

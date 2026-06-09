@@ -22,11 +22,15 @@ import {
   FolderOpen,
   ExternalLink,
   ChevronRight,
+  Languages,
+  Captions,
+  AlertTriangle,
 } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 import { useChatStore } from "../stores/chat";
 import { artifacts as artifactsApi, chat as chatApi, type AttachedFile } from "../tauri";
 import { useFileDrop } from "../composables/useFileDrop";
+import { DECK_THEMES_WITH_AUTO, findTheme, type DeckTheme } from "../lib/deckThemes";
 
 const app = useAppStore();
 const chat = useChatStore();
@@ -67,48 +71,11 @@ const durationText = computed(() => {
   return m > 0 ? `${m} 分 ${r ? r + " 秒" : ""}`.trim() : `${r} 秒`;
 });
 
-// PPT 风格：很多选择（含「AI 自由发挥」）
-const selectedTheme = ref("chalk-garden");
-type Theme = { id: string; name: string; group: string; preview: string };
-const THEME_AUTO: Theme = {
-  id: "auto",
-  name: "AI 自由发挥",
-  group: "智能",
-  preview: "linear-gradient(135deg,#6366f1,#ec4899) / #fff",
-};
-const themes: Theme[] = [
-  THEME_AUTO,
-  { id: "paper-press", name: "亮色印刷", group: "浅色", preview: "#faf6ee / #e85d2a" },
-  { id: "newsroom", name: "报社", group: "浅色", preview: "#ffffff / #c0392b" },
-  { id: "monochrome-print", name: "黑白印刷", group: "浅色", preview: "#f5f5f5 / #111111" },
-  { id: "vintage-editorial", name: "复古编辑", group: "浅色", preview: "#f3ead2 / #8a5a2b" },
-  { id: "sunset-zine", name: "日落 Zine", group: "浅色", preview: "#fff1e6 / #ff5e62" },
-  { id: "pastel-dream", name: "柔光梦", group: "浅色", preview: "#fdf2f8 / #c084fc" },
-  { id: "warm-keynote", name: "暖色 Keynote", group: "浅色", preview: "#fff9f0 / #2ec4b6" },
-  { id: "electric-studio", name: "电光企业", group: "浅色", preview: "#f0f4ff / #2563eb" },
-  { id: "bauhaus-bold", name: "包豪斯", group: "浅色", preview: "#f5f1e6 / #e63946" },
-  { id: "swiss-ikb", name: "瑞士克莱因蓝", group: "浅色", preview: "#ffffff / #002fa7" },
-  { id: "dune", name: "沙丘", group: "浅色", preview: "#f0e6d2 / #c89b3c" },
-  { id: "indigo-porcelain", name: "靛蓝瓷", group: "浅色", preview: "#f8f9fa / #1a3c8a" },
-  { id: "forest-ink", name: "森林墨", group: "浅色", preview: "#f2f5f0 / #1b4332" },
-  { id: "kraft-paper", name: "牛皮纸", group: "浅色", preview: "#d9c3a0 / #5c4326" },
-  { id: "split-canvas", name: "双拼画布", group: "浅色", preview: "#fafafa / #ff4d6d" },
-  { id: "midnight-press", name: "暗色印刷", group: "深色", preview: "#0a0a0a / #ff6b35" },
-  { id: "dark-botanical", name: "暗夜植物", group: "深色", preview: "#10231a / #4ade80" },
-  { id: "chalk-garden", name: "粉笔花园", group: "深色", preview: "#1a1a1a / #f9e8b5" },
-  { id: "blueprint", name: "工程蓝图", group: "深色", preview: "#0d1b2a / #00b4d8" },
-  { id: "terminal-green", name: "终端绿", group: "深色", preview: "#0b0f0b / #33ff66" },
-  { id: "neon-cyber", name: "霓虹赛博", group: "深色", preview: "#0a0a14 / #ff00ff" },
-  { id: "bold-signal", name: "焦点信号", group: "深色", preview: "#111111 / #ffd400" },
-  { id: "creative-voltage", name: "电压创意", group: "深色", preview: "#14071e / #b829f7" },
-];
-const themeName = computed(() => themes.find((t) => t.id === selectedTheme.value)?.name ?? "");
-function themeBg(t: Theme): string {
-  return t.preview.split(" / ")[0];
-}
-function themeAccent(t: Theme): string {
-  return t.preview.split(" / ")[1];
-}
+// PPT 风格：复用共享主题目录（与「演示工坊」一致，预览更精致；id 仅作 AI 设计提示）
+const selectedTheme = ref("tokyo-night");
+const themes = DECK_THEMES_WITH_AUTO;
+const curTheme = computed<DeckTheme>(() => findTheme(selectedTheme.value));
+const themeName = computed(() => curTheme.value.name);
 
 // 配音：语速 + 音色
 const speed = ref(1.0);
@@ -126,6 +93,61 @@ const VOICES = [
   { id: "audiobook_female_1", name: "有声书（女）" },
 ];
 const voice = ref("male-qn-jingying");
+
+// ───────── 配音语言（MiniMax language_boost）─────────
+// boost 值对齐 MiniMax T2A v2 的 language_boost 取值
+type Lang = { code: string; name: string; boost: string };
+const DUB_LANGS: Lang[] = [
+  { code: "zh-Hans", name: "中文 · 普通话", boost: "Chinese" },
+  { code: "yue", name: "粤语", boost: "Chinese,Yue" },
+  { code: "en", name: "English 英语", boost: "English" },
+  { code: "ja", name: "日本語 日语", boost: "Japanese" },
+  { code: "ko", name: "한국어 韩语", boost: "Korean" },
+  { code: "es", name: "Español 西班牙语", boost: "Spanish" },
+  { code: "fr", name: "Français 法语", boost: "French" },
+  { code: "de", name: "Deutsch 德语", boost: "German" },
+  { code: "ru", name: "Русский 俄语", boost: "Russian" },
+  { code: "pt", name: "Português 葡萄牙语", boost: "Portuguese" },
+  { code: "it", name: "Italiano 意大利语", boost: "Italian" },
+  { code: "ar", name: "العربية 阿拉伯语", boost: "Arabic" },
+  { code: "hi", name: "हिन्दी 印地语", boost: "Hindi" },
+  { code: "th", name: "ไทย 泰语", boost: "Thai" },
+  { code: "vi", name: "Tiếng Việt 越南语", boost: "Vietnamese" },
+  { code: "id", name: "Bahasa Indonesia 印尼语", boost: "Indonesian" },
+];
+const dubLang = ref("zh-Hans");
+const dubInfo = computed(() => DUB_LANGS.find((l) => l.code === dubLang.value) ?? DUB_LANGS[0]);
+
+// ───────── 字幕语言（含繁体中文；文本由 AI 翻译，不受 TTS 限制）─────────
+const SUB_LANGS: { code: string; name: string }[] = [
+  { code: "zh-Hans", name: "简体中文" },
+  { code: "zh-Hant", name: "繁體中文" },
+  { code: "en", name: "English" },
+  { code: "yue", name: "粤语字幕" },
+  { code: "ja", name: "日本語" },
+  { code: "ko", name: "한국어" },
+  { code: "es", name: "Español" },
+  { code: "fr", name: "Français" },
+  { code: "de", name: "Deutsch" },
+  { code: "ru", name: "Русский" },
+  { code: "pt", name: "Português" },
+  { code: "it", name: "Italiano" },
+  { code: "ar", name: "العربية" },
+  { code: "hi", name: "हिन्दी" },
+  { code: "th", name: "ไทย" },
+  { code: "vi", name: "Tiếng Việt" },
+  { code: "id", name: "Indonesia" },
+];
+const subLangName = (code: string) => SUB_LANGS.find((l) => l.code === code)?.name ?? code;
+// 选中的字幕语言，保持点选顺序：前 1–2 种会烧进画面
+const subLangs = ref<string[]>(["zh-Hans"]);
+const burnSubs = ref(true); // 烧录（硬字幕）：前 1–2 种压进画面，任何播放器都能看到
+function toggleSub(code: string) {
+  const i = subLangs.value.indexOf(code);
+  if (i >= 0) subLangs.value.splice(i, 1);
+  else subLangs.value.push(code);
+}
+const burnList = computed(() => (burnSubs.value ? subLangs.value.slice(0, 2) : []));
 
 // 背景音乐
 const bgmPath = ref<string>("");
@@ -232,6 +254,45 @@ function configBlock(): string {
   return lines.join("\n");
 }
 
+// 多语言配音 + 多语言字幕的统一指令块（拼到每个 prompt）
+function i18nBlock(): string {
+  const lines = ["## 多语言配音与字幕"];
+
+  // —— 配音语言 ——
+  if (dubLang.value === "zh-Hans") {
+    lines.push("- 配音语言：中文 · 普通话。MiniMax 合成时 language_boost=Chinese。");
+  } else {
+    lines.push(
+      `- 配音语言：${dubInfo.value.name}（code=${dubLang.value}）。`,
+      `  · **逐字稿、口播稿、以及 narrations.ts 里的台词，全部用「${dubInfo.value.name}」书写**——把中文内容翻译成该语言，要地道、口语化、适合朗读，而不是逐字硬翻。`,
+      `  · 配音合成时务必启用 MiniMax language_boost=${dubInfo.value.boost}：给 audio-segments.json 每一段加 "language_boost": "${dubInfo.value.boost}"，或运行配音脚本前设环境变量 MINIMAX_LANGUAGE_BOOST="${dubInfo.value.boost}"。`,
+    );
+  }
+
+  // —— 字幕语言 ——
+  if (!subLangs.value.length) {
+    lines.push("- 字幕：不需要。");
+  } else {
+    const codes = subLangs.value.join(",");
+    const burn = burnList.value.join(",");
+    lines.push(
+      `- 字幕语言：${subLangs.value.map(subLangName).join("、")}。`,
+      "  · 配音并提取出 audio-segments.json 后，给**每一段**补一个 subtitles 字段，形如：",
+      `    "subtitles": { ${subLangs.value
+        .map((c) => `"${c}": "<该段台词的${subLangName(c)}文本>"`)
+        .join(", ")} }`,
+      `    与配音同语言那一档可直接用该段 text；其余语言据 text 翻译（简/繁中文要分别给）。`,
+      burnList.value.length
+        ? `  · 出片时给 03-record.mjs 传：--subtitles=${codes} --burn=${burn}` +
+          `（前 ${burnList.value.length} 种「${burnList.value.map(subLangName).join(" + ")}」烧进画面，` +
+          "其余作为可切换软字幕轨，并在 MP4 旁生成同名 .srt 文件）。"
+        : `  · 出片时给 03-record.mjs 传：--subtitles=${codes} --no-burn` +
+          "（全部作为可切换软字幕轨 + 同名 .srt，不烧进画面）。",
+    );
+  }
+  return lines.join("\n");
+}
+
 function planPrompt(): string {
   return [
     "请使用 polaris-video-studio skill 制作课件类网页演示视频。",
@@ -241,6 +302,8 @@ function planPrompt(): string {
     scriptText.value.trim() || "（见下方上传素材）",
     "",
     configBlock(),
+    "",
+    i18nBlock(),
     "",
     "## 本步要产出的三份文件（保存到产物目录，文件名严格如下）",
     "1. `逐字稿.md` —— 把素材整理成完整、连贯、口语化的逐字稿（按目标时长控制篇幅）。",
@@ -260,6 +323,8 @@ function executePrompt(): string {
     "现在是 **第二步：执行**。请严格按这三份文件，用 polaris-video-studio skill 一路跑完，中途不要停下来问我：",
     "",
     configBlock(),
+    "",
+    i18nBlock(),
     "",
     "## 执行步骤",
     "1. 读取产物目录里的三份规划文件。",
@@ -288,6 +353,8 @@ function autoPrompt(): string {
     scriptText.value.trim() || "（见下方上传素材）",
     "",
     configBlock(),
+    "",
+    i18nBlock(),
     "",
     "## 全流程",
     "1. 把素材整理成逐字稿（按目标时长控制篇幅），存 `逐字稿.md`。",
@@ -403,6 +470,12 @@ function reset() {
 
 // ───────── 完成检测 + 拉取产物 ─────────
 const sending = computed(() => chat.isSending(convId.value));
+// 规划阶段已结束但三份文件没凑齐 —— 不再强行跳进 review（看得见点不了），
+// 而是停在规划页给明确「未凑齐」提示与重试入口。
+const planFilesReadyCount = computed(() => planFiles.value.filter((f) => f.path).length);
+const planStalled = computed(
+  () => phase.value === "planning" && !sending.value && !planReady.value
+);
 
 async function loadPlanFiles() {
   if (!convId.value) return;
@@ -447,10 +520,8 @@ watch(sending, async (now, before) => {
       if (planReady.value) {
         activePlanTab.value = "script";
         phase.value = "review";
-      } else {
-        // 没凑齐三份：仍进 review，让用户看已有的；缺的提示
-        phase.value = "review";
       }
+      // 没凑齐三份：留在 planning，由 planStalled 渲染「未凑齐」面板，不强行进 review。
     } else if (phase.value === "executing") {
       await loadPlanFiles();
       await loadOutputs();
@@ -596,6 +667,17 @@ function fillDemo() {
             <input type="range" min="0.5" max="2" step="0.05" v-model.number="speed" class="vc-range" />
           </div>
 
+          <!-- 配音语言 -->
+          <div class="vc-field">
+            <label class="vc-field-label"><Languages :size="13" /> 配音语言</label>
+            <select v-model="dubLang" class="vc-select">
+              <option v-for="l in DUB_LANGS" :key="l.code" :value="l.code">{{ l.name }}</option>
+            </select>
+            <span v-if="dubLang !== 'zh-Hans'" class="vc-field-note">
+              口播稿与台词会改用「{{ dubInfo.name }}」书写并合成（language_boost={{ dubInfo.boost }}）
+            </span>
+          </div>
+
           <!-- 音色 -->
           <div class="vc-field">
             <label class="vc-field-label"><Mic :size="13" /> 配音音色</label>
@@ -626,24 +708,80 @@ function fillDemo() {
             <Palette :size="15" :stroke-width="1.7" /><span>PPT 风格</span>
             <span class="vc-pill">当前：{{ themeName }}</span>
           </h3>
-          <div class="vc-themes">
-            <button
-              v-for="t in themes"
-              :key="t.id"
-              class="vc-theme"
-              :class="{ active: selectedTheme === t.id, auto: t.id === 'auto' }"
-              @click="selectedTheme = t.id"
+          <div class="vc-theme-wrap">
+            <!-- 选中主题实时预览 -->
+            <div
+              class="vc-theme-preview"
+              :style="{ background: curTheme.bg, color: curTheme.text, borderColor: curTheme.dark ? 'rgba(255,255,255,.14)' : 'rgba(0,0,0,.1)' }"
             >
               <div
-                class="vc-theme-sw"
-                :style="{ background: t.id === 'auto' ? themeBg(t) : themeBg(t) }"
-              >
-                <span v-if="t.id === 'auto'" class="vc-theme-auto-i"><Sparkles :size="15" /></span>
-                <span v-else class="vc-theme-accent" :style="{ background: themeAccent(t) }"></span>
+                class="vc-pv-kicker"
+                :style="{ color: curTheme.accent, fontFamily: curTheme.font === 'serif' ? 'var(--serif)' : curTheme.font === 'mono' ? 'monospace' : 'inherit' }"
+              >PREVIEW · {{ curTheme.name }}</div>
+              <div class="vc-pv-title" :style="{ fontFamily: curTheme.font === 'serif' ? 'var(--serif)' : 'inherit' }">课件标题示意</div>
+              <div class="vc-pv-lede">这套主题会作为 PPT 视觉风格的设计提示。</div>
+              <div class="vc-pv-row">
+                <span class="vc-pv-dot" :style="{ background: curTheme.accent }"></span>
+                <span class="vc-pv-bar" :style="{ background: curTheme.accent, opacity: .85 }"></span>
+                <span class="vc-pv-bar sm" :style="{ background: curTheme.text, opacity: .25 }"></span>
               </div>
-              <div class="vc-theme-name">{{ t.name }}</div>
-              <CheckCircle2 v-if="selectedTheme === t.id" :size="14" class="vc-theme-check" />
+            </div>
+            <!-- 主题网格 -->
+            <div class="vc-themes">
+              <button
+                v-for="t in themes"
+                :key="t.id"
+                class="vc-theme"
+                :class="{ active: selectedTheme === t.id, auto: t.id === 'auto' }"
+                @click="selectedTheme = t.id"
+              >
+                <div class="vc-theme-sw" :style="{ background: t.bg }">
+                  <span v-if="t.id === 'auto'" class="vc-theme-auto-i"><Sparkles :size="15" /></span>
+                  <span v-else class="vc-theme-accent" :style="{ background: t.accent }"></span>
+                </div>
+                <div class="vc-theme-name">{{ t.name }}</div>
+                <CheckCircle2 v-if="selectedTheme === t.id" :size="14" class="vc-theme-check" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 字幕语言：整行 -->
+        <div class="vc-card vc-span2">
+          <h3 class="vc-card-title">
+            <Captions :size="15" :stroke-width="1.7" /><span>字幕</span>
+            <span class="vc-pill">{{ subLangs.length ? subLangs.length + " 种语言" : "不加字幕" }}</span>
+          </h3>
+          <div class="vc-subs">
+            <button
+              v-for="l in SUB_LANGS"
+              :key="l.code"
+              class="vc-sub-chip"
+              :class="{ active: subLangs.includes(l.code) }"
+              @click="toggleSub(l.code)"
+            >
+              <span
+                v-if="subLangs.includes(l.code)"
+                class="vc-sub-order"
+              >{{ subLangs.indexOf(l.code) + 1 }}</span>
+              <span>{{ l.name }}</span>
             </button>
+          </div>
+          <div class="vc-sub-foot">
+            <label class="vc-sub-burn" :class="{ on: burnSubs }">
+              <input type="checkbox" v-model="burnSubs" />
+              <span class="vc-switch sm"><span class="vc-knob"></span></span>
+              <span>烧录硬字幕</span>
+            </label>
+            <span class="vc-sub-hint">
+              {{
+                !subLangs.length
+                  ? "不点选则不加字幕。"
+                  : burnSubs
+                    ? `前 ${burnList.length} 种（${burnList.map(subLangName).join(" + ")}）压进画面任何播放器可见，其余作可切换软字幕 + .srt。`
+                    : "全部作为可切换软字幕轨 + 同名 .srt，不压进画面。"
+              }}
+            </span>
           </div>
         </div>
 
@@ -665,9 +803,21 @@ function fillDemo() {
 
       <!-- ════════ 规划中 ════════ -->
       <section v-else-if="phase === 'planning'" class="vc-center">
-        <Loader :size="34" class="spin vc-big-spin" />
-        <h2 class="vc-center-title">正在规划三份文件…</h2>
-        <p class="vc-center-sub">逐字稿 · PPT 风格与动效 · 口播稿，就绪后会自动出现在这里。</p>
+        <!-- 进行中 -->
+        <template v-if="!planStalled">
+          <Loader :size="34" class="spin vc-big-spin" />
+          <h2 class="vc-center-title">正在规划三份文件…</h2>
+          <p class="vc-center-sub">逐字稿 · PPT 风格与动效 · 口播稿，就绪后会自动出现在这里。</p>
+        </template>
+        <!-- 已结束但没凑齐：明确提示 + 重试，而不是跳进点不了的 review -->
+        <template v-else>
+          <AlertTriangle :size="34" class="vc-warn-i" />
+          <h2 class="vc-center-title">规划未凑齐三份文件</h2>
+          <p class="vc-center-sub">
+            已生成 {{ planFilesReadyCount }} / 3。可以重新规划，或先查看已生成的部分、在对话里继续。
+          </p>
+        </template>
+
         <div class="vc-plan-pending">
           <div
             v-for="f in planFiles"
@@ -679,7 +829,19 @@ function fillDemo() {
             <span>{{ f.label }}</span>
           </div>
         </div>
-        <button class="vc-ghost-btn" @click="openConv">在对话里看实时进度 →</button>
+
+        <div v-if="!planStalled">
+          <button class="vc-ghost-btn" @click="openConv">在对话里看实时进度 →</button>
+        </div>
+        <div v-else class="vc-done-acts">
+          <button class="vc-ghost-btn" @click="replan"><RefreshCw :size="13" /> 重新规划</button>
+          <button
+            v-if="planFilesReadyCount > 0"
+            class="vc-ghost-btn"
+            @click="phase = 'review'"
+          ><Eye :size="13" /> 查看已生成的</button>
+          <button class="vc-ghost-btn" @click="openConv"><Eye :size="13" /> 在对话里看</button>
+        </div>
       </section>
 
       <!-- ════════ 规划确认 ════════ -->
@@ -991,6 +1153,56 @@ function fillDemo() {
   font-size: 13px;
 }
 .vc-select:focus { outline: none; border-color: var(--primary); }
+.vc-field-note { font-size: 11px; color: var(--primary-deep); line-height: 1.5; }
+
+/* 字幕语言多选 */
+.vc-subs { display: flex; flex-wrap: wrap; gap: 7px; }
+.vc-sub-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.vc-sub-chip:hover { border-color: var(--primary); }
+.vc-sub-chip.active { border-color: var(--primary); background: var(--primary-soft); color: var(--primary-deep); }
+.vc-sub-order {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+}
+.vc-sub-foot { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.vc-sub-burn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.vc-sub-burn.on { color: var(--primary-deep); }
+.vc-sub-burn input { display: none; }
+.vc-switch.sm { width: 30px; height: 17px; }
+.vc-sub-burn .vc-knob { width: 13px; height: 13px; }
+.vc-sub-burn.on .vc-switch { background: var(--primary); }
+.vc-sub-burn.on .vc-knob { transform: translateX(13px); }
+.vc-sub-hint { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
 
 .vc-bgm { display: flex; align-items: center; gap: 8px; }
 .vc-bgm .vc-ghost-btn { flex: 1; }
@@ -1036,6 +1248,22 @@ function fillDemo() {
 .vc-theme-auto-i { color: #fff; }
 .vc-theme-name { font-size: 11.5px; font-weight: 500; color: var(--text); }
 .vc-theme-check { position: absolute; top: 6px; right: 6px; color: var(--primary); }
+
+/* 主题区：左预览 + 右网格 */
+.vc-theme-wrap { display: grid; grid-template-columns: 280px 1fr; gap: 16px; align-items: start; }
+@media (max-width: 760px) { .vc-theme-wrap { grid-template-columns: 1fr; } }
+.vc-theme-preview {
+  border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px;
+  display: flex; flex-direction: column; gap: 7px; min-height: 150px; justify-content: center; overflow: hidden;
+}
+.vc-pv-kicker { font-size: 10.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+.vc-pv-title { font-size: 24px; font-weight: 800; letter-spacing: -.01em; }
+.vc-pv-lede { font-size: 12px; opacity: .72; }
+.vc-pv-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.vc-pv-dot { width: 13px; height: 13px; border-radius: 50%; }
+.vc-pv-bar { height: 8px; width: 96px; border-radius: 4px; }
+.vc-pv-bar.sm { width: 52px; }
+.vc-warn-i { color: var(--warn, #b07a1f); }
 
 /* 操作 */
 .vc-actions {

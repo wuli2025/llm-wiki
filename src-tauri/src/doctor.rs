@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 #[cfg(windows)]
@@ -145,6 +145,53 @@ fn to_fwd(p: &std::path::Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
+/// 跑一个子命令, 最多等 `timeout`; 超时则 kill 子进程并返回 None。
+/// 探测类调用 (npm view / npm prefix / 版本号 / where / 读注册表 PATH 等) 用它兜底:
+/// 网络卡死或进程僵死时不让 `env_check` 这条同步 Tauri 命令永久阻塞。
+/// stdout/stderr 各由独立线程读到 EOF, 避免子进程写满管道反压自锁。
+fn output_with_timeout(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().ok()?;
+    let mut out_pipe = child.stdout.take()?;
+    let mut err_pipe = child.stderr.take()?;
+    let (tx_o, rx_o) = std::sync::mpsc::channel();
+    let (tx_e, rx_e) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut out_pipe, &mut b);
+        let _ = tx_o.send(b);
+    });
+    std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut err_pipe, &mut b);
+        let _ = tx_e.send(b);
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None; // 超时: 杀掉并放弃
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => return None,
+        }
+    };
+    let stdout = rx_o.recv().unwrap_or_default();
+    let stderr = rx_e.recv().unwrap_or_default();
+    Some(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// 用 `where.exe`(Windows) / `which`(unix) 找出某命令的全部命中路径 (存在的才留)。
 fn which_all(bin: &str) -> Vec<PathBuf> {
     #[cfg(windows)]
@@ -161,9 +208,9 @@ fn which_all(bin: &str) -> Vec<PathBuf> {
     };
     cmd.stdin(Stdio::null());
     no_window(&mut cmd);
-    let out = match cmd.output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
+    let out = match output_with_timeout(cmd, Duration::from_secs(20)) {
+        Some(o) => o,
+        None => return Vec::new(),
     };
     if !out.status.success() {
         return Vec::new();
@@ -196,7 +243,7 @@ fn probe_version(bin: &str, args: &[&str]) -> Option<String> {
     };
     cmd.stdin(Stdio::null());
     no_window(&mut cmd);
-    let out = cmd.output().ok()?;
+    let out = output_with_timeout(cmd, Duration::from_secs(20))?;
     let pick = |bytes: &[u8]| -> Option<String> {
         String::from_utf8_lossy(bytes)
             .lines()
@@ -230,7 +277,7 @@ fn npm_global_prefix() -> Option<PathBuf> {
     };
     cmd.stdin(Stdio::null());
     no_window(&mut cmd);
-    let out = cmd.output().ok()?;
+    let out = output_with_timeout(cmd, Duration::from_secs(20))?;
     if !out.status.success() {
         return None;
     }
@@ -289,6 +336,41 @@ fn claude_candidates() -> Vec<PathBuf> {
 /// 安装成功后 (`stream_install`) 会清空, 下次重新解析。
 static CLAUDE_EXE_CACHE: once_cell::sync::Lazy<Mutex<Option<PathBuf>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(None));
+
+/// 子进程环境净化（借鉴 OpenCode 桌面端 sidecar：loopback 强制 NO_PROXY + 清干扰变量）。
+/// 给将要 spawn 的 **宿主机 claude** 子进程套上两层防护：
+///
+/// ① **回环并进 NO_PROXY**：切到 Codex 时 claude 的 `ANTHROPIC_BASE_URL` 被指向
+///    `http://127.0.0.1:{port}`（见 provider.rs 的 `codex_route_config`）。若用户配了系统级
+///    `HTTP(S)_PROXY`（国内/企业网常见），claude 底层 HTTP 客户端会把这个 **loopback 请求也走代理**
+///    → 连不上本地翻译代理、报「连接 ChatGPT 后端失败」。把回环列入 `NO_PROXY`/`no_proxy` 即绕开代理直连。
+///    只补回环、不动其他代理设置 —— 代理本身（claude 直连远端 API 时要用）照常生效。
+/// ② **清干扰继承变量**：`DEBUG`（让 Node 生态吐调试噪声、行为不可预测）；Linux 的 `LD_PRELOAD`（注入）。
+pub fn harden_child_env(cmd: &mut Command) {
+    for key in ["NO_PROXY", "no_proxy"] {
+        let current = std::env::var(key).unwrap_or_default();
+        cmd.env(key, merge_no_proxy(&current));
+    }
+    cmd.env_remove("DEBUG");
+    #[cfg(target_os = "linux")]
+    cmd.env_remove("LD_PRELOAD");
+}
+
+/// 把回环主机（`127.0.0.1` / `localhost` / `::1`）并进既有 NO_PROXY 值：
+/// 保留用户原有条目、大小写不敏感去重、已存在则不重复添加。抽纯函数便于单测。
+pub fn merge_no_proxy(current: &str) -> String {
+    let mut items: Vec<String> = current
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for host in ["127.0.0.1", "localhost", "::1"] {
+        if !items.iter().any(|v| v.eq_ignore_ascii_case(host)) {
+            items.push(host.to_string());
+        }
+    }
+    items.join(",")
+}
 
 /// 解析一个「可直接 spawn」的 claude 可执行文件全路径, 供 chat.rs 调起宿主机 CLI。
 ///
@@ -482,7 +564,7 @@ fn read_user_path() -> Option<String> {
     ]);
     cmd.stdin(Stdio::null());
     no_window(&mut cmd);
-    let out = cmd.output().ok()?;
+    let out = output_with_timeout(cmd, Duration::from_secs(20))?;
     if !out.status.success() {
         return None;
     }
@@ -731,7 +813,7 @@ fn login_shell_path() -> Option<String> {
     let mut cmd = Command::new(&shell);
     cmd.args(["-lc", "printf %s \"$PATH\""]);
     cmd.stdin(Stdio::null());
-    let out = cmd.output().ok()?;
+    let out = output_with_timeout(cmd, Duration::from_secs(20))?;
     if !out.status.success() {
         return None;
     }
@@ -1166,7 +1248,7 @@ fn npm_view_latest() -> Option<String> {
     };
     cmd.stdin(Stdio::null());
     no_window(&mut cmd);
-    let out = cmd.output().ok()?;
+    let out = output_with_timeout(cmd, Duration::from_secs(20))?;
     if !out.status.success() {
         return None;
     }
@@ -1186,7 +1268,7 @@ fn registry_latest_via_http() -> Option<String> {
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
     cmd.stdin(Stdio::null());
     no_window(&mut cmd);
-    let out = cmd.output().ok()?;
+    let out = output_with_timeout(cmd, Duration::from_secs(20))?;
     if !out.status.success() {
         return None;
     }
@@ -1487,6 +1569,27 @@ fn stream_install(app: AppHandle, req_id: String, mut cmd: Command, fix_path_aft
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_no_proxy_adds_loopback_to_empty() {
+        let out = merge_no_proxy("");
+        assert_eq!(out, "127.0.0.1,localhost,::1");
+    }
+
+    #[test]
+    fn merge_no_proxy_preserves_existing_and_appends() {
+        let out = merge_no_proxy("example.com, 10.0.0.5");
+        assert_eq!(out, "example.com,10.0.0.5,127.0.0.1,localhost,::1");
+    }
+
+    #[test]
+    fn merge_no_proxy_is_idempotent_case_insensitive() {
+        // 用户已配了回环（含大小写差异）→ 不重复添加。
+        let out = merge_no_proxy("LOCALHOST,127.0.0.1");
+        assert_eq!(out, "LOCALHOST,127.0.0.1,::1");
+        // 再并一次保持稳定（幂等）。
+        assert_eq!(merge_no_proxy(&out), out);
+    }
 
     /// 把内嵌的安装脚本原文 dump 到临时文件, 供外部用 PowerShell AST 解析器做语法校验
     /// (内嵌脚本的语法错误只会在「真正安装」时才暴露, 这里提前抓出来)。`--ignored` 手动跑。

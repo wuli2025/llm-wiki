@@ -9,10 +9,17 @@
 //! 阶段 B（WebSocket 长连接收事件 → 跑对话 → 回发）需真实飞书 app 凭证联调，单列后续 PR。
 
 use directories::UserDirs;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::process::{ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 
 // ───────────────────────── 配置 ─────────────────────────
 
@@ -37,6 +44,9 @@ pub struct FeishuConfig {
     /// 白名单（open_id 列表），dm_policy=allowlist 时生效
     #[serde(default)]
     pub allow_from: Vec<String>,
+    /// App 启动时自动开启网关（开机自动上线）
+    #[serde(default)]
+    pub auto_start: bool,
 }
 fn default_domain() -> String {
     "feishu".into()
@@ -290,6 +300,463 @@ pub fn feishu_test_connection() -> FeishuTestResult {
             message: e,
         },
     }
+}
+
+// ───────────────────────── 扫码创建机器人 ─────────────────────────
+//
+// 飞书没有「扫码即自动下发 App ID/Secret」的公开能力（企业微信智能机器人才有），
+// 所以「扫码创建机器人」= 把飞书开放平台「创建企业自建应用」入口编码成二维码：
+// 手机飞书扫一扫直达建应用页，建好后回到下方表单填 App ID/Secret 即接好机器人。
+// 同时给一个「在浏览器打开」桌面兜底。诚实、可用，不伪造不存在的自动下发流程。
+
+/// 飞书开放平台「创建应用」入口（按国内/国际域名区分）。
+fn console_url(cfg: &FeishuConfig) -> &'static str {
+    if cfg.domain == "lark" {
+        "https://open.larksuite.com/app"
+    } else {
+        "https://open.feishu.cn/app"
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuQrResult {
+    /// 二维码 SVG（本地生成，前端可直接内联渲染）。
+    pub svg: String,
+    /// 二维码指向的飞书开放平台建应用 URL（供「在浏览器打开」复用）。
+    pub url: String,
+}
+
+/// 生成「扫码创建机器人」二维码：内容为飞书开放平台建应用入口。
+#[tauri::command]
+pub fn feishu_create_qr() -> Result<FeishuQrResult, String> {
+    use qrcode::render::svg;
+    use qrcode::QrCode;
+
+    let cfg = read_config();
+    let url = console_url(&cfg);
+    let code = QrCode::new(url.as_bytes()).map_err(|e| format!("生成二维码失败: {e}"))?;
+    let svg = code
+        .render::<svg::Color>()
+        .min_dimensions(240, 240)
+        .quiet_zone(true)
+        .dark_color(svg::Color("#111111"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+    Ok(FeishuQrResult {
+        svg,
+        url: url.to_string(),
+    })
+}
+
+/// 在系统默认浏览器打开飞书开放平台建应用页（桌面兜底，等价于扫码）。
+#[tauri::command]
+pub fn feishu_open_console() -> Result<(), String> {
+    let cfg = read_config();
+    let url = console_url(&cfg);
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ───────────────────────── 飞书对话引擎（阶段B：Node 桥长连接 → headless claude → 回发）─────────────────────────
+//
+// Node 桥(assets/feishu_bridge.mjs)借飞书官方 SDK 的 WSClient 起长连接收消息 → stdout(JSON 行)；
+// 本模块读 stdout → 去重/权限闸门 → 跑 headless claude 得回复 → 写桥 stdin → 桥发回飞书。
+// 借官方 SDK 的可靠长连接实现，避免 Rust 自撸飞书 protobuf 帧的高复杂度与高出错率。
+
+const BRIDGE_MJS: &str = include_str!("../assets/feishu_bridge.mjs");
+const BRIDGE_PKG: &str = include_str!("../assets/feishu_bridge_package.json");
+
+struct Gateway {
+    pid: Option<u32>,
+    stdin: Option<ChildStdin>,
+    running: bool,
+}
+static GATEWAY: Lazy<Mutex<Gateway>> =
+    Lazy::new(|| Mutex::new(Gateway { pid: None, stdin: None, running: false }));
+static GW_DEDUP: Lazy<Mutex<DedupRing>> = Lazy::new(|| Mutex::new(DedupRing::new(256)));
+/// 网关「应当在运行」总开关：守护线程据此决定崩溃后是否自动重起；stop 时置 false。
+static SHOULD_RUN: AtomicBool = AtomicBool::new(false);
+
+fn bridge_dir() -> Option<PathBuf> {
+    UserDirs::new().map(|u| u.home_dir().join("Polaris").join("feishu-bridge"))
+}
+fn emit_log(app: &AppHandle, text: impl Into<String>) {
+    let _ = app.emit("feishu://log", text.into());
+}
+fn emit_status(app: &AppHandle, state: &str) {
+    let _ = app.emit("feishu://status", state.to_string());
+}
+
+/// 物化桥脚本到 ~/Polaris/feishu-bridge 并确保依赖已装。返回桥目录。
+fn ensure_bridge(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = bridge_dir().ok_or("无法定位用户目录")?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(dir.join("bridge.mjs"), BRIDGE_MJS).map_err(|e| e.to_string())?;
+    fs::write(dir.join("package.json"), BRIDGE_PKG).map_err(|e| e.to_string())?;
+    if !dir.join("node_modules").join("@larksuiteoapi").exists() {
+        emit_status(app, "installing");
+        emit_log(app, "首次启动：正在安装飞书 SDK 依赖（npm install，请稍候）…");
+        if !npm_install(&dir)? {
+            return Err("npm install 失败：请确认已安装 Node.js / npm".into());
+        }
+        emit_log(app, "依赖安装完成。");
+    }
+    Ok(dir)
+}
+
+fn npm_install(dir: &std::path::Path) -> Result<bool, String> {
+    #[allow(unused_mut)]
+    let mut cmd;
+    #[cfg(target_os = "windows")]
+    {
+        cmd = Command::new("cmd"); // CreateProcessW 不认 npm.cmd → 经 cmd /c
+        cmd.args([
+            "/C",
+            "npm",
+            "install",
+            "--no-audit",
+            "--no-fund",
+            "--registry=https://registry.npmmirror.com",
+        ]);
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        cmd = Command::new("npm");
+        cmd.args([
+            "install",
+            "--no-audit",
+            "--no-fund",
+            "--registry=https://registry.npmmirror.com",
+        ]);
+    }
+    cmd.current_dir(dir);
+    crate::doctor::harden_child_env(&mut cmd);
+    let out = cmd.output().map_err(|e| format!("调起 npm 失败: {e}"))?;
+    Ok(out.status.success())
+}
+
+/// 飞书机器人专用项目名：所有飞书会话都落在这个 Polaris 项目下，UI 里可见。
+const FEISHU_PROJECT_NAME: &str = "飞书机器人";
+
+/// 取/建「飞书机器人」项目下、对应该 chat_id 的对话，返回 conversation_id。
+/// 每个飞书会话 ↔ 一条 Polaris 对话（标题带 chat_id），跨重启可复用、平台上可见。
+fn ensure_feishu_conversation(chat_id: &str) -> Result<String, String> {
+    let pid = match crate::conv::conv_list_projects()
+        .into_iter()
+        .find(|p| p.name == FEISHU_PROJECT_NAME && !p.archived)
+    {
+        Some(p) => p.id,
+        None => crate::conv::conv_create_project(FEISHU_PROJECT_NAME.into())?.id,
+    };
+    let title = format!("飞书 · {chat_id}");
+    if let Some(c) = crate::conv::conversations_of_project(&pid)
+        .into_iter()
+        .find(|c| c.title == title)
+    {
+        return Ok(c.id);
+    }
+    let c = crate::conv::conv_create_conversation(pid)?;
+    let _ = crate::conv::conv_rename_conversation(c.id.clone(), title);
+    Ok(c.id)
+}
+
+/// 轮询对话，等到出现「比 before_asst 多」的 assistant 消息，返回其正文（剥掉产物 marker）。
+fn poll_new_assistant(conv_id: &str, before_asst: usize, timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let msgs = crate::conv::get_messages(conv_id);
+        let assts: Vec<&crate::conv::Message> =
+            msgs.iter().filter(|m| m.role == "assistant").collect();
+        if assts.len() > before_asst {
+            let mut content = assts.last().unwrap().content.clone();
+            if let Some(idx) = content.find(crate::chat::ARTIFACT_MARKER_PREFIX) {
+                content.truncate(idx);
+            }
+            return Some(content.trim().to_string());
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(800));
+    }
+}
+
+fn kill_pid(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        let mut c = Command::new("taskkill");
+        c.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+        let _ = c.output();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = Command::new("kill").arg(pid.to_string()).output();
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayStatus {
+    pub running: bool,
+}
+
+#[tauri::command]
+pub fn feishu_gateway_status() -> GatewayStatus {
+    GatewayStatus { running: SHOULD_RUN.load(Ordering::Relaxed) }
+}
+
+#[tauri::command]
+pub fn feishu_gateway_stop(app: AppHandle) -> Result<(), String> {
+    SHOULD_RUN.store(false, Ordering::Relaxed);
+    let mut g = GATEWAY.lock();
+    if let Some(pid) = g.pid.take() {
+        kill_pid(pid);
+    }
+    g.stdin = None;
+    g.running = false;
+    drop(g);
+    emit_status(&app, "stopped");
+    emit_log(&app, "网关已停止。");
+    Ok(())
+}
+
+/// 处理桥的一行 JSON 输出。message → 走 chat_send 真管线让 Claude Code 执行并回发飞书。
+fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, line: &str) {
+    let v: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "status" => match v.get("state").and_then(|s| s.as_str()) {
+            Some("connected") => {
+                emit_status(app, "connected");
+                emit_log(app, "长连接已建立，机器人在线。");
+            }
+            Some("reconnecting") => {
+                emit_status(app, "reconnecting");
+                emit_log(app, "连接中断，正在自动重连…");
+            }
+            _ => {}
+        },
+        "log" => emit_log(app, v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string()),
+        "fatal" => emit_log(
+            app,
+            format!("致命错误: {}", v.get("text").and_then(|t| t.as_str()).unwrap_or("")),
+        ),
+        "message" => {
+            let msg_id = v.get("messageId").and_then(|x| x.as_str()).unwrap_or("");
+            if GW_DEDUP.lock().seen(msg_id) {
+                return;
+            }
+            let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let chat_id = v.get("chatId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let ctx = IncomingCtx {
+                chat_type: v.get("chatType").and_then(|x| x.as_str()).unwrap_or("p2p"),
+                sender_open_id: v.get("senderOpenId").and_then(|x| x.as_str()).unwrap_or(""),
+                bot_open_id,
+                mentioned_bot: v.get("mentioned").and_then(|x| x.as_bool()).unwrap_or(false),
+            };
+            if text.is_empty() || !is_allowed(cfg, &ctx) {
+                return;
+            }
+            // 接进 Polaris 真对话管线：「飞书机器人」项目下建/取对话 → chat_send(AutoAll,全工具)
+            // 让 Claude Code 真执行(可操作软件/写文件) → 落库(UI 实时可见) → 轮询回复发回飞书。
+            let conv_id = match ensure_feishu_conversation(&chat_id) {
+                Ok(id) => id,
+                Err(e) => {
+                    emit_log(app, format!("建对话失败: {e}"));
+                    return;
+                }
+            };
+            let before_asst = crate::conv::get_messages(&conv_id)
+                .iter()
+                .filter(|m| m.role == "assistant")
+                .count();
+            emit_log(app, format!("收到：{text} → 交给 Claude Code（项目「飞书机器人」）执行…"));
+            let args = crate::chat::ChatSendArgs {
+                prompt: text.clone(),
+                permission_mode: crate::chat::PermissionMode::AutoAll,
+                use_sandbox: false,
+                skill_ids: None,
+                conversation_id: Some(conv_id.clone()),
+                goal: None,
+                consult_mao: false,
+                dynamic_workflow: false,
+                use_kb: false,
+                batch_build: false,
+                batch_size: None,
+            };
+            if let Err(e) = tauri::async_runtime::block_on(crate::chat::chat_send(app.clone(), args)) {
+                emit_log(app, format!("调起对话失败: {e}"));
+                return;
+            }
+            let reply = match poll_new_assistant(&conv_id, before_asst, Duration::from_secs(600)) {
+                Some(r) if !r.is_empty() => r,
+                _ => {
+                    emit_log(app, "等待 Claude 回复超时或为空。");
+                    return;
+                }
+            };
+            let payload = serde_json::json!({"type":"reply","chatId":chat_id,"text":reply}).to_string();
+            let mut g = GATEWAY.lock();
+            if let Some(si) = g.stdin.as_mut() {
+                let _ = si.write_all(payload.as_bytes());
+                let _ = si.write_all(b"\n");
+                let _ = si.flush();
+            }
+            drop(g);
+            emit_log(app, "已回复。");
+        }
+        _ => {}
+    }
+}
+
+/// 起一次桥进程并读到其退出；返回本次连接存活秒数（守护线程据此决定退避）。
+fn run_bridge_once(app: &AppHandle, dir: &std::path::Path, cfg: &FeishuConfig, bot_open_id: &str) -> u64 {
+    let started = Instant::now();
+    let mut cmd = Command::new("node");
+    cmd.arg(dir.join("bridge.mjs"))
+        .current_dir(dir)
+        .env("FEISHU_APP_ID", &cfg.app_id)
+        .env("FEISHU_APP_SECRET", &cfg.app_secret)
+        .env("FEISHU_DOMAIN", &cfg.domain)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    crate::doctor::harden_child_env(&mut cmd);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            emit_log(app, format!("调起 node 桥失败（确认已装 Node.js）: {e}"));
+            return 0;
+        }
+    };
+    let pid = child.id();
+    let stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => return 0,
+    };
+    {
+        let mut g = GATEWAY.lock();
+        g.pid = Some(pid);
+        g.stdin = child.stdin.take();
+        g.running = true;
+    }
+    let reader = BufReader::new(stdout);
+    for line in reader.lines().map_while(Result::ok) {
+        let line = line.trim();
+        if !line.is_empty() {
+            handle_bridge_line(app, cfg, bot_open_id, line);
+        }
+        if !SHOULD_RUN.load(Ordering::Relaxed) {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    {
+        let mut g = GATEWAY.lock();
+        g.stdin = None;
+        g.pid = None;
+        g.running = false;
+    }
+    started.elapsed().as_secs()
+}
+
+#[tauri::command]
+pub fn feishu_gateway_start(app: AppHandle) -> Result<(), String> {
+    if SHOULD_RUN.load(Ordering::Relaxed) {
+        return Err("网关已在运行".into());
+    }
+    let cfg = read_config();
+    if cfg.app_id.trim().is_empty() || cfg.app_secret.trim().is_empty() {
+        return Err("请先填写并保存 App ID 与 App Secret".into());
+    }
+    emit_status(&app, "starting");
+    let dir = ensure_bridge(&app)?;
+    // 机器人 open_id（「不回复自己」闸门），best-effort
+    let bot_open_id = fetch_tenant_token(&cfg)
+        .and_then(|t| fetch_bot_info(&cfg, &t))
+        .map(|(_, oid)| oid)
+        .unwrap_or_default();
+
+    // 守护线程：进程崩了/断了就带指数退避自动重起（防断）。
+    SHOULD_RUN.store(true, Ordering::Relaxed);
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let mut backoff = 1u64;
+        while SHOULD_RUN.load(Ordering::Relaxed) {
+            let lived = run_bridge_once(&app2, &dir, &cfg, &bot_open_id);
+            if !SHOULD_RUN.load(Ordering::Relaxed) {
+                break;
+            }
+            if lived >= 20 {
+                backoff = 1; // 连过一阵才断 → 重置退避
+            }
+            emit_status(&app2, "reconnecting");
+            emit_log(&app2, format!("网关进程退出，{backoff}s 后自动重起…"));
+            let mut waited = 0u64;
+            while waited < backoff * 10 && SHOULD_RUN.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+                waited += 1;
+            }
+            backoff = (backoff * 2).min(30);
+        }
+        let mut g = GATEWAY.lock();
+        g.running = false;
+        g.stdin = None;
+        g.pid = None;
+        drop(g);
+        emit_status(&app2, "stopped");
+        emit_log(&app2, "网关已停止。");
+    });
+
+    emit_log(&app, "网关启动中…");
+    Ok(())
+}
+
+/// App 启动时调用：若配置开了 auto_start 且凭证齐全，则后台自动拉起网关（不阻塞启动）。
+pub fn auto_start_if_enabled(app: &AppHandle) {
+    let cfg = read_config();
+    if !cfg.auto_start || cfg.app_id.trim().is_empty() || cfg.app_secret.trim().is_empty() {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // 等启动稳定（PATH/网络就绪）后再拉起
+        std::thread::sleep(Duration::from_secs(3));
+        let _ = feishu_gateway_start(app);
+    });
 }
 
 // ───────────────────────── 单元测试 ─────────────────────────

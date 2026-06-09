@@ -53,7 +53,23 @@ export const useChatStore = defineStore("chatRuntime", () => {
   // 本地「最近活跃时间」：发送/结束时打点。后端 updatedAt 在会话内不变，
   // 用它让刚交互过的对话在侧栏冒泡到最上（仿 Codex 最近对话置顶）。
   const activeAtByConv = ref<Record<string, number>>({});
+  // 最近一轮注入的估算 input token（后端 meta 事件给出）。分批编排据此自适应批量。
+  const tokensByConv = ref<Record<string, number>>({});
+  // 等待某对话「本轮 done」的 resolver 队列（分批编排循环逐轮 await）。
+  const doneWaiters: Record<string, Array<() => void>> = {};
   let started = false;
+
+  /** 等到指定对话「本轮跑完(done)」。当前不在发送态则立即兑现。 */
+  function waitForDone(convId: string): Promise<void> {
+    if (!sendingByConv.value[convId]) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      (doneWaiters[convId] ??= []).push(resolve);
+    });
+  }
+  function inputTokens(convId: string | null): number {
+    if (!convId) return 0;
+    return tokensByConv.value[convId] ?? 0;
+  }
 
   function bubblesFor(convId: string | null): Bubble[] {
     if (!convId) return [];
@@ -111,6 +127,8 @@ export const useChatStore = defineStore("chatRuntime", () => {
       consultMao?: boolean;
       dynamicWorkflow?: boolean;
       useKb?: boolean;
+      batchBuild?: boolean;
+      batchSize?: number;
     }
   ) {
     const sessions = useSessionsStore();
@@ -132,6 +150,8 @@ export const useChatStore = defineStore("chatRuntime", () => {
         consultMao: opts.consultMao,
         dynamicWorkflow: opts.dynamicWorkflow,
         useKb: opts.useKb,
+        batchBuild: opts.batchBuild,
+        batchSize: opts.batchSize,
         conversationId: convId,
       });
       reqByConv.value[convId] = reqId;
@@ -194,6 +214,10 @@ export const useChatStore = defineStore("chatRuntime", () => {
           if (!target.artifacts) target.artifacts = [];
           if (!target.artifacts.includes(path)) target.artifacts.push(path);
         }
+      } else if (ev.kind === "meta") {
+        // 上下文预算自检：后端估算的本轮 input token 数（纯数字文本）
+        const n = parseInt(ev.text ?? "", 10);
+        if (!Number.isNaN(n)) tokensByConv.value[cid] = n;
       } else if (ev.kind === "error") {
         // stderr 行 / 退出错误：仅展示，不作为终态（终态由 done 处理）
         arr.push({ role: "assistant", text: `[错误] ${ev.text ?? ""}` });
@@ -206,6 +230,12 @@ export const useChatStore = defineStore("chatRuntime", () => {
         const sessions = useSessionsStore();
         sessions.finish(cid);
         app.markUnread(cid);
+        // 唤醒分批编排循环：本轮已结束，可读清单决定续不续
+        const waiters = doneWaiters[cid];
+        if (waiters && waiters.length) {
+          doneWaiters[cid] = [];
+          for (const w of waiters) w();
+        }
       }
     });
   }
@@ -220,5 +250,7 @@ export const useChatStore = defineStore("chatRuntime", () => {
     send,
     cancel,
     init,
+    waitForDone,
+    inputTokens,
   };
 });

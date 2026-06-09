@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="minimal-white">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>演示标题 · Polaris Deck</title>
+<!-- 引擎 + 主题。生成「网页幻灯片」时，可把这两个文件的内容内联进 <style> 做成单文件可分享版；
+     生成「PPT」走截图导出时，保持相对链接即可（export-pptx.mjs 会就地起静态服务器）。 -->
+<link rel="stylesheet" href="../assets/base.css">
+<link rel="stylesheet" href="../assets/themes.css">
+</head>
+<body>
+  <div class="deck">
+
+    <!-- ① 封面 -->
+    <section class="slide" data-title="封面">
+      <div class="kicker anim-fade-up">POLARIS · DECK</div>
+      <h1 class="title gradient-text anim-fade-up" style="--i:1">这里是演示主标题</h1>
+      <p class="lede anim-fade-up" style="--i:2">一句话副标题，点明这份演示要回答的问题或带来的价值。</p>
+      <div class="row mt-l anim-fade-up" style="--i:3">
+        <span class="pill">2026</span><span class="pill pill-accent">主讲人 / 团队</span>
+      </div>
+    </section>
+
+    <!-- ② 要点列表（错峰入场） -->
+    <section class="slide" data-title="三个要点">
+      <div class="eyebrow">概览</div>
+      <h2 class="title">三个核心要点</h2>
+      <div class="grid g3 mt-m anim-stagger-list">
+        <div class="card card-hover" style="--i:0"><h3>要点一</h3><p class="dim">简短解释，一两句话说清楚这一点为什么重要。</p></div>
+        <div class="card card-hover" style="--i:1"><h3>要点二</h3><p class="dim">用具体、可感知的表述，避免空话套话。</p></div>
+        <div class="card card-hover" style="--i:2"><h3>要点三</h3><p class="dim">最好能落到一个数字、一个对比、一个动作。</p></div>
+      </div>
+      <div class="notes">演讲者备注：这页讲 30 秒，重点强调要点二。（观众看不到此备注）</div>
+    </section>
+
+    <!-- ③ 大数字 / 金句 -->
+    <section class="slide center" data-title="关键数字">
+      <div>
+        <div class="h1 gradient-text anim-zoom" style="font-size:120px">1.7 亿</div>
+        <p class="lede anim-fade-up" style="--i:1">用一个最有冲击力的数字或金句，让这一页只传递一个信息。</p>
+      </div>
+    </section>
+
+    <!-- ④ 两栏对比 -->
+    <section class="slide" data-title="对比">
+      <h2 class="title">左右对比</h2>
+      <div class="grid g2 mt-m">
+        <div class="card anim-slide-right"><div class="kicker">现状</div><h3>问题所在</h3><p class="dim">描述当前的痛点或旧方案的局限。</p></div>
+        <div class="card card-accent anim-slide-left"><div class="kicker">方案</div><h3>我们的做法</h3><p class="dim">给出对应的解法，与左侧一一对照。</p></div>
+      </div>
+    </section>
+
+    <!-- ⑤ 结尾 -->
+    <section class="slide center" data-title="结尾">
+      <div>
+        <h2 class="title anim-fade-up">谢谢</h2>
+        <p class="lede anim-fade-up" style="--i:1">一句行动号召，或留下联系方式 / 二维码。</p>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- chrome -->
+  <div class="deck-footer"><span>Polaris Deck</span><span class="slide-number"></span></div>
+  <div class="progress-bar"><span></span></div>
+  <div class="overview"></div>
+
+  <script src="../assets/runtime.js"></script>
+</body>
+</html>

@@ -615,13 +615,13 @@ function subtitleOf(p: ProviderView): string {
                       <ShieldCheck :size="14" :stroke-width="2" /> 已授权 ChatGPT
                     </p>
                     <p v-if="store.currentId === 'codex'" class="codex-note">
-                      Claude Code 正经本地翻译代理使用你的 ChatGPT 订阅(<code>gpt-5-codex</code>)<template
+                      Claude Code 正经本地翻译代理使用你的 ChatGPT 订阅(<code>gpt-5.5</code>)<template
                         v-if="store.codexProxy?.running"
                       > · 127.0.0.1:{{ store.codexProxy.port }}</template
                       >。
                     </p>
                     <p v-else class="codex-note">
-                      凭据已写入 <code>~/.codex/auth.json</code>。点「用 GPT 对话」即让 Claude Code 经本地翻译代理用上 ChatGPT 订阅(<code>gpt-5-codex</code>)。
+                      凭据已写入 <code>~/.codex/auth.json</code>。点「用 GPT 对话」即让 Claude Code 经本地翻译代理用上 ChatGPT 订阅(<code>gpt-5.5</code>)。
                     </p>
                     <p v-if="store.codexProxy?.lastError" class="codex-fail">
                       代理上次报错:{{ store.codexProxy.lastError }}

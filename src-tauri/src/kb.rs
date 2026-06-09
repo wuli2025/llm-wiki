@@ -465,6 +465,7 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+        crate::doctor::harden_child_env(&mut cmd); // loopback NO_PROXY + 清干扰变量
         compile_no_window(&mut cmd);
 
         let mut child = match cmd.spawn() {
@@ -663,6 +664,7 @@ fn run_claude_readonly<F: FnMut(&str, &str)>(
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
+    crate::doctor::harden_child_env(&mut cmd); // loopback NO_PROXY + 清干扰变量
     compile_no_window(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| format!("调起 claude 失败: {e}"))?;
@@ -1592,13 +1594,27 @@ pub fn kb_context_block_scoped(scope: Option<&str>) -> String {
     out
 }
 
+/// 把前端传入的相对路径解析为 KB root 子树内的真实路径。
+/// **canonicalize 后必须仍在 KB root 之下** —— 仅靠 `starts_with(root)` 是失效护栏:
+/// `root.join("../../x")` 的路径组件仍以 root 开头, 前缀检查会误判通过, 而 OS 读写时 `..`
+/// 会真的逃出库外。故规范化两端再比前缀, 同时挡住 `../../` 穿越与「绝对路径替换 join」。
+/// 仅用于「目标应当已存在」的入口 (read/delete); 文件不存在直接报错。
+fn resolve_within_kb(root: &Path, rel_path: &str) -> Result<PathBuf, String> {
+    let full = root.join(rel_path);
+    let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canon_full = full
+        .canonicalize()
+        .map_err(|_| "文件不存在或无法访问".to_string())?;
+    if !canon_full.starts_with(&canon_root) {
+        return Err("路径越界, 拒绝访问".into());
+    }
+    Ok(canon_full)
+}
+
 #[tauri::command]
 pub fn kb_read(rel_path: String) -> Result<String, String> {
     let root = KB_ROOT.read().clone();
-    let full = root.join(&rel_path);
-    if !full.starts_with(&root) {
-        return Err("path escapes KB root".into());
-    }
+    let full = resolve_within_kb(&root, &rel_path)?;
     fs::read_to_string(&full).map_err(|e| e.to_string())
 }
 
@@ -1607,13 +1623,8 @@ pub fn kb_read(rel_path: String) -> Result<String, String> {
 #[tauri::command]
 pub fn kb_delete(rel_path: String) -> Result<usize, String> {
     let root = KB_ROOT.read().clone();
-    let full = root.join(&rel_path);
-    // 防越界: 规范化后必须仍在 KB root 下
-    let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
-    let canon_full = full.canonicalize().map_err(|_| "文件不存在".to_string())?;
-    if !canon_full.starts_with(&canon_root) {
-        return Err("路径越界, 拒绝删除".into());
-    }
+    // 防越界: 规范化后必须仍在 KB root 下 (与 kb_read 共用同一护栏)
+    let canon_full = resolve_within_kb(&root, &rel_path)?;
     if !canon_full.is_file() {
         return Err("只能删除文件".into());
     }
@@ -2432,6 +2443,27 @@ mod tests {
         assert!(is_safe_wiki_relpath("/wiki/x.md").is_err()); // 绝对
         assert!(is_safe_wiki_relpath("C:/wiki/x.md").is_err()); // 盘符
         assert!(is_safe_wiki_relpath("\\\\srv\\wiki\\x.md").is_err()); // UNC
+    }
+
+    #[test]
+    fn resolve_within_kb_rejects_traversal() {
+        // 用真实临时目录验证运行期护栏 (区别于上面 is_safe_wiki_relpath 的纯函数校验)
+        let base = std::env::temp_dir().join(format!("polaris_kbguard_{}", std::process::id()));
+        let root = base.join("kb");
+        let _ = fs::create_dir_all(&root);
+        fs::write(root.join("inside.md"), "ok").unwrap();
+        fs::write(base.join("secret.txt"), "secret").unwrap();
+
+        // 库内文件: 放行, 且解析回真实路径
+        assert!(resolve_within_kb(&root, "inside.md").is_ok());
+        // `../` 穿越到库外: 必须拒 (旧 starts_with 护栏会误放)
+        assert!(resolve_within_kb(&root, "../secret.txt").is_err());
+        // 多级穿越同样拒
+        assert!(resolve_within_kb(&root, "../../Windows/System32/drivers/etc/hosts").is_err());
+        // 不存在的文件: 报错而非 panic
+        assert!(resolve_within_kb(&root, "nope.md").is_err());
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

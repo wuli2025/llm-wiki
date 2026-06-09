@@ -30,7 +30,7 @@ const WVP_BOOTSTRAP: &str = include_str!("templates/skills/web-video-presentatio
 // 以便：① 全新安装即可用；② 改了脚本后随 App 更新下发（靠 PVS_VERSION 比对覆盖）。
 const PVS_ID: &str = "polaris-video-studio";
 // 改动内嵌脚本/SKILL.md 后必须 +1，让已安装用户在下次启动时拿到更新。
-const PVS_VERSION: &str = "2";
+const PVS_VERSION: &str = "3";
 const PVS_SKILL_MD: &str = include_str!("templates/skills/polaris-video-studio/SKILL.md");
 const PVS_MANIFEST: &str = include_str!("templates/skills/polaris-video-studio/manifest.json");
 const PVS_INSTALL_DEPS: &str =
@@ -40,6 +40,40 @@ const PVS_RECORD: &str =
     include_str!("templates/skills/polaris-video-studio/scripts/pipeline/03-record.mjs");
 const PVS_WORKFLOW: &str =
     include_str!("templates/skills/polaris-video-studio/references/WORKFLOW.md");
+
+// ───────── 「演示工坊」多文件技能（PPT / 网页幻灯片，Polaris 自研，编译期内嵌，启动落盘）─────────
+// 支撑「PPT 演示」「网页幻灯片」两个 UI 入口的基础设施技能：幻灯片引擎(base.css，来自
+// open-design，MIT) + 17 套主题 + 自研 runtime.js + deck 模板 + PPTX 导出脚本 + SKILL.md。
+// 与 PVS 同套路：全部编译期内嵌、启动时确保落到 ~/Polaris/skills（靠 DECK_VERSION 比对覆盖）。
+const DECK_ID: &str = "polaris-deck-studio";
+// 改动任一内嵌资源后必须 +1，让已安装用户下次启动拿到更新。
+const DECK_VERSION: &str = "2";
+const DECK_SKILL_MD: &str = include_str!("templates/skills/polaris-deck-studio/SKILL.md");
+const DECK_LICENSE: &str = include_str!("templates/skills/polaris-deck-studio/LICENSE");
+const DECK_BASE_CSS: &str = include_str!("templates/skills/polaris-deck-studio/assets/base.css");
+const DECK_THEMES_CSS: &str =
+    include_str!("templates/skills/polaris-deck-studio/assets/themes.css");
+const DECK_RUNTIME_JS: &str =
+    include_str!("templates/skills/polaris-deck-studio/assets/runtime.js");
+const DECK_TEMPLATE: &str =
+    include_str!("templates/skills/polaris-deck-studio/templates/deck.html");
+const DECK_INSTALL_DEPS: &str =
+    include_str!("templates/skills/polaris-deck-studio/scripts/install-deps.mjs");
+const DECK_EXPORT_PPTX: &str =
+    include_str!("templates/skills/polaris-deck-studio/scripts/export-pptx.mjs");
+
+// ───────── 「网站生成」技能（落地页/单页站点，Polaris 自研，编译期内嵌，启动落盘）─────────
+// 支撑「网站生成」UI 入口。复用 deck-studio 的 17 套主题（DECK_THEMES_CSS，不重复源文件），
+// 配一套网站组件 site.css + 滚动揭示 runtime.js + 站点模板 + SKILL.md。
+const WEB_ID: &str = "polaris-web-studio";
+const WEB_VERSION: &str = "2";
+const WEB_SKILL_MD: &str = include_str!("templates/skills/polaris-web-studio/SKILL.md");
+const WEB_LICENSE: &str = include_str!("templates/skills/polaris-web-studio/LICENSE");
+const WEB_SITE_CSS: &str = include_str!("templates/skills/polaris-web-studio/assets/site.css");
+const WEB_RUNTIME_JS: &str =
+    include_str!("templates/skills/polaris-web-studio/assets/runtime.js");
+const WEB_TEMPLATE: &str =
+    include_str!("templates/skills/polaris-web-studio/templates/site.html");
 
 // ═══════════════════════════════════════════════════════════════
 // 统一目录 Catalog（编译期，只读）
@@ -157,6 +191,82 @@ fn catalog() -> Vec<CatalogSkill> {
             source: "third-party",
             preinstalled: false,
             system_prompt: include_str!("templates/skills/harness-practices.md"),
+        },
+        // ── 自媒体全链路运营（交互决策版，与「自动化」里的两条流程同源） ──
+        CatalogSkill {
+            id: "wechat-pipeline",
+            name: "微信公众号 · 全链路运营",
+            description: "选题→风格→成稿→排版出图一条龙；每个决策点先讲思考再给编号选项让你挑、也可直接输入覆盖；风格可调；支持全自动",
+            source: "third-party",
+            preinstalled: true,
+            system_prompt: include_str!("templates/skills/wechat-pipeline.md"),
+        },
+        CatalogSkill {
+            id: "xiaohongshu-pipeline",
+            name: "小红书 · 全链路运营",
+            description: "选题→风格→文案→图卡渲染一条龙；每个决策点先讲思考再给编号选项让你挑、也可直接输入覆盖；风格可调；支持全自动",
+            source: "third-party",
+            preinstalled: true,
+            system_prompt: include_str!("templates/skills/xiaohongshu-pipeline.md"),
+        },
+        // ── 自媒体全链路·配套三件套（选题前置 / 数据复盘 / 社群应对，补全闭环） ──
+        CatalogSkill {
+            id: "hot-topic-radar",
+            name: "选题雷达",
+            description: "联网抓热点+对标爆文，归纳成 3-5 个选题方向、每个给 2-3 个具体选题并做爆款拆解（为什么火/适合哪个平台/时效难度），编号供勾选；读 KB 避免撞题。可独立用，也是全链路第一步",
+            source: "third-party",
+            preinstalled: true,
+            system_prompt: include_str!("templates/skills/hot-topic-radar.md"),
+        },
+        CatalogSkill {
+            id: "content-analytics-report",
+            name: "数据复盘 · 运营周报",
+            description: "把一批已发文章/笔记的数据做成运营周报：逐篇打优劣势、找「哪类选题/标题/发布时机」数据好的规律、给下轮主攻方向，并回写 KB 反哺选题",
+            source: "third-party",
+            preinstalled: true,
+            system_prompt: include_str!("templates/skills/content-analytics-report.md"),
+        },
+        CatalogSkill {
+            id: "community-engagement",
+            name: "评论 · 社群应对",
+            description: "把评论/私信分类（提问/夸赞/抬杠/求合作/负面），按账号人格逐条起草回复，标出需本人亲自处理的高敏感项，并把高频疑问提炼成选题线索回写 KB",
+            source: "third-party",
+            preinstalled: true,
+            system_prompt: include_str!("templates/skills/community-engagement.md"),
+        },
+        CatalogSkill {
+            id: "xhs-mao-pipeline",
+            name: "小红书 · 毛选风格发布",
+            description: "调毛主席知识库析毛选文风→就给定主题写小红书爆款文案→出图(HTML图卡转截图 或 AI配图)→调 post-to-xhs 浏览器自动发布;发前必人工确认、可先预览、需扫码登录",
+            source: "third-party",
+            preinstalled: true,
+            system_prompt: include_str!("templates/skills/xhs-mao-pipeline.md"),
+        },
+        // ── 壹伴排版优化（公众号排版 + CloakBrowser 直送草稿，根治格式错） ──
+        CatalogSkill {
+            id: "wechat-md-typesetter",
+            name: "壹伴排版优化",
+            description: "把文章排成微信公众号兼容的内联样式 HTML（套主题/移动端字号/标题色块/引用块全内联），存成文件；再用 CloakBrowser 打开后台编辑器直接注入、图走素材库，保存为草稿（绝不自动发布）——根治粘贴格式错乱",
+            source: "third-party",
+            preinstalled: true,
+            system_prompt: include_str!("templates/skills/wechat-md-typesetter.md"),
+        },
+        // ── 源自 ClaudeSkills 合集的两个内容创作技能（全链路成稿/出图时调用） ──
+        CatalogSkill {
+            id: "gz-wechat-article-writer",
+            name: "公众号文章创作（ClaudeSkills）",
+            description: "微信公众号文章创作助手：风格灵活适配（企业官号/个人技术博客/活动回顾/产品评测），优化标题与结构。全链路成稿阶段的内容引擎",
+            source: "third-party",
+            preinstalled: true,
+            system_prompt: include_str!("templates/skills/gz-wechat-article-writer.md"),
+        },
+        CatalogSkill {
+            id: "gz-notion-infographic",
+            name: "信息图 / 小红书图文（ClaudeSkills）",
+            description: "按大纲自动研究并生成高质量可视化：Notion 手绘风信息图组图 / PPTX，适合小红书图文与社媒传播图。全链路渲染阶段的图卡引擎",
+            source: "third-party",
+            preinstalled: true,
+            system_prompt: include_str!("templates/skills/gz-notion-infographic.md"),
         },
         // ── 默认浏览器插件（预装、默认开启，可随时移除） ──
         CatalogSkill {
@@ -701,6 +811,86 @@ pub fn seed_video_studio_skill() {
     if write_video_studio_files(&dest).is_ok() {
         let _ = fs::write(&ver_file, PVS_VERSION);
     }
+
+    // 顺带刷新已安装的 web-video-presentation 里的 Polaris 助手 minimax-tts.mjs，
+    // 让「多语言配音」(language_boost) 的引擎修复随同一次版本更新下发——
+    // 不动 ConardLi 原包文件，只覆盖我们自己叠加的助手脚本，且仅在它已存在时。
+    let wvp_tts = root.join(WVP_ID).join("polaris").join("minimax-tts.mjs");
+    if wvp_tts.exists() {
+        let _ = fs::write(&wvp_tts, WVP_MINIMAX_TTS);
+    }
+}
+
+/// 启动时确保「演示工坊」技能在 ~/Polaris/skills 落盘（多文件，含资源 + 导出脚本）。
+///
+/// 与 `seed_video_studio_skill` 同策略：目录缺失 / 版本旧（`.polaris_version` < `DECK_VERSION`）
+/// 就（重）写；已是最新则跳过。best-effort，失败只让该 UI 暂不可用，不阻断启动。
+pub fn seed_deck_studio_skill() {
+    let Some(root) = skills_dir() else {
+        return;
+    };
+    let dest = root.join(DECK_ID);
+    let ver_file = dest.join(".polaris_version");
+    let stored = fs::read_to_string(&ver_file).unwrap_or_default();
+    let present = dest.join("skill.md").exists();
+    if present && stored.trim() == DECK_VERSION {
+        return;
+    }
+    if write_deck_studio_files(&dest).is_ok() {
+        let _ = fs::write(&ver_file, DECK_VERSION);
+    }
+}
+
+/// 把内嵌的「演示工坊」全部文件写到目标目录（建好子目录树）。
+/// 技能正文写成小写 `skill.md`，与扫描约定一致。
+fn write_deck_studio_files(dest: &Path) -> Result<(), String> {
+    let assets = dest.join("assets");
+    let templates = dest.join("templates");
+    let scripts = dest.join("scripts");
+    fs::create_dir_all(&assets).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&templates).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&scripts).map_err(|e| e.to_string())?;
+    fs::write(dest.join("skill.md"), DECK_SKILL_MD).map_err(|e| e.to_string())?;
+    fs::write(dest.join("LICENSE"), DECK_LICENSE).map_err(|e| e.to_string())?;
+    fs::write(assets.join("base.css"), DECK_BASE_CSS).map_err(|e| e.to_string())?;
+    fs::write(assets.join("themes.css"), DECK_THEMES_CSS).map_err(|e| e.to_string())?;
+    fs::write(assets.join("runtime.js"), DECK_RUNTIME_JS).map_err(|e| e.to_string())?;
+    fs::write(templates.join("deck.html"), DECK_TEMPLATE).map_err(|e| e.to_string())?;
+    fs::write(scripts.join("install-deps.mjs"), DECK_INSTALL_DEPS).map_err(|e| e.to_string())?;
+    fs::write(scripts.join("export-pptx.mjs"), DECK_EXPORT_PPTX).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 启动时确保「网站生成」技能在 ~/Polaris/skills 落盘。策略同上（版本号比对覆盖）。
+pub fn seed_web_studio_skill() {
+    let Some(root) = skills_dir() else {
+        return;
+    };
+    let dest = root.join(WEB_ID);
+    let ver_file = dest.join(".polaris_version");
+    let stored = fs::read_to_string(&ver_file).unwrap_or_default();
+    let present = dest.join("skill.md").exists();
+    if present && stored.trim() == WEB_VERSION {
+        return;
+    }
+    if write_web_studio_files(&dest).is_ok() {
+        let _ = fs::write(&ver_file, WEB_VERSION);
+    }
+}
+
+/// 把内嵌的「网站生成」全部文件写到目标目录。themes.css 复用 deck-studio 的同一份内容。
+fn write_web_studio_files(dest: &Path) -> Result<(), String> {
+    let assets = dest.join("assets");
+    let templates = dest.join("templates");
+    fs::create_dir_all(&assets).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&templates).map_err(|e| e.to_string())?;
+    fs::write(dest.join("skill.md"), WEB_SKILL_MD).map_err(|e| e.to_string())?;
+    fs::write(dest.join("LICENSE"), WEB_LICENSE).map_err(|e| e.to_string())?;
+    fs::write(assets.join("site.css"), WEB_SITE_CSS).map_err(|e| e.to_string())?;
+    fs::write(assets.join("themes.css"), DECK_THEMES_CSS).map_err(|e| e.to_string())?;
+    fs::write(assets.join("runtime.js"), WEB_RUNTIME_JS).map_err(|e| e.to_string())?;
+    fs::write(templates.join("site.html"), WEB_TEMPLATE).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 把内嵌的「课件视频工坊」全部文件写到目标目录（建好子目录树）。

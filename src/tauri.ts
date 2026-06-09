@@ -46,6 +46,8 @@ export interface FeishuConfig {
   appSecret: string;
   /** "feishu"(国内) | "lark"(国际) */
   domain: string;
+  /** App 启动时自动开启网关 */
+  autoStart?: boolean;
   /** "open" | "allowlist" | "disabled" */
   dmPolicy: string;
   groupRequireMention: boolean;
@@ -58,11 +60,60 @@ export interface FeishuTestResult {
   message: string;
 }
 
+export interface FeishuQrResult {
+  /** 二维码 SVG（本地生成，可直接内联渲染） */
+  svg: string;
+  /** 二维码指向的飞书开放平台建应用 URL */
+  url: string;
+}
+
+export interface WecomBotInfo {
+  botId: string;
+  secret: string;
+}
+
 export const feishu = {
   getConfig: () => invoke<FeishuConfig>("feishu_get_config"),
   setConfig: (config: FeishuConfig) =>
     invoke<void>("feishu_set_config", { config }),
   test: () => invoke<FeishuTestResult>("feishu_test_connection"),
+  /** 「扫码创建机器人」：生成飞书建应用入口二维码 */
+  createQr: () => invoke<FeishuQrResult>("feishu_create_qr"),
+  /** 在系统浏览器打开飞书开放平台建应用页（扫码桌面兜底） */
+  openConsole: () => invoke<void>("feishu_open_console"),
+  /** 企业微信扫码自动配置（OAuth 回环：开系统浏览器扫码 → 自动回传 botId/secret） */
+  wecomScanCreate: (source: string) =>
+    invoke<WecomBotInfo>("wecom_scan_create", { source }),
+  /** 飞书对话引擎：启动长连接网关（Node 桥 → headless claude → 回发） */
+  gatewayStart: () => invoke<void>("feishu_gateway_start"),
+  /** 停止网关 */
+  gatewayStop: () => invoke<void>("feishu_gateway_stop"),
+  /** 查询网关运行状态 */
+  gatewayStatus: () => invoke<{ running: boolean }>("feishu_gateway_status"),
+  /** 订阅网关日志（feishu://log） */
+  onGatewayLog: (cb: (text: string) => void) => listen<string>("feishu://log", cb),
+  /** 订阅网关状态（feishu://status: starting|installing|connected|stopped） */
+  onGatewayStatus: (cb: (state: string) => void) => listen<string>("feishu://status", cb),
+};
+
+// ──────────────────────────────────────────────────────────────
+// 自媒体「账号管理」
+// ──────────────────────────────────────────────────────────────
+export interface MediaAccountStatus {
+  platform: "wechat" | "xhs";
+  label: string;
+  bound: boolean;
+  profileDir: string;
+  /** profile 最近活动时间（unix 秒）；未绑定为 null */
+  lastActive: number | null;
+  detail: string;
+}
+export const mediaAccounts = {
+  /** 探测各平台登录态（读固定 profile 目录） */
+  status: () => invoke<MediaAccountStatus[]>("media_accounts_status"),
+  /** 解绑某平台：清除登录态 profile，强制下次重新扫码 */
+  forget: (platform: "wechat" | "xhs") =>
+    invoke<string>("media_account_forget", { platform }),
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -194,14 +245,35 @@ export interface ChatSendArgs {
   dynamicWorkflow?: boolean;
   /** 「知识库严格搜索」：打开时才把 KB 结构化 wiki + 双链地图注入上下文。默认 false。 */
   useKb?: boolean;
+  /** 「分批长任务」：把超长生成拆成多轮有界批次（注入 polaris.build.json 清单协议）。 */
+  batchBuild?: boolean;
+  /** 每批最多构建几个单元（页/章/文件）。 */
+  batchSize?: number;
 }
 
 export interface ChatStreamEvent {
   reqId: string;
-  kind: "delta" | "tool" | "error" | "done" | "artifact";
+  kind: "delta" | "tool" | "error" | "done" | "artifact" | "meta";
   text?: string;
   tool?: string;
   conversationId?: string;
+}
+
+/** 分批构建清单 polaris.build.json 的一个单元 */
+export interface BuildUnit {
+  id: string;
+  title: string;
+  status: "pending" | "done" | string;
+  artifact?: string;
+}
+
+/** 分批构建清单（断点续传凭据） */
+export interface BuildManifest {
+  goal?: string;
+  kind?: string;
+  batch_size?: number;
+  output?: string;
+  units: BuildUnit[];
 }
 
 /** 对话拖拽上传的附件（复制进会话 uploads 目录） */
@@ -220,6 +292,11 @@ export const chat = {
   send: (args: ChatSendArgs) =>
     invoke<string>("chat_send", { args: args as unknown as Record<string, unknown> }),
   cancel: (reqId: string) => invoke<void>("chat_cancel", { reqId }),
+  /** 读取分批构建清单 polaris.build.json（分批长任务的断点/进度凭据）。不存在返回 null。 */
+  buildManifest: (conversationId: string | undefined) =>
+    invoke<BuildManifest | null>("chat_build_manifest", {
+      conversationId: conversationId ?? null,
+    }),
   /** 拖拽上传：把文件复制进当前会话，返回附件清单 */
   attachFiles: (conversationId: string | undefined, paths: string[]) =>
     invoke<AttachedFile[]>("chat_attach_files", {
@@ -830,6 +907,7 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         enabled: false,
         appId: "",
         appSecret: "",
+        autoStart: false,
         domain: "feishu",
         dmPolicy: "open",
         groupRequireMention: true,
@@ -844,6 +922,21 @@ function browserStub(cmd: string, _args?: Record<string, unknown>): unknown {
         botOpenId: "",
         message: "浏览器模式无法连接飞书，请在桌面应用中测试。",
       };
+    case "feishu_create_qr":
+      return {
+        svg: "<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><rect width='240' height='240' fill='#fff'/><text x='120' y='124' font-size='12' fill='#999' text-anchor='middle'>浏览器模式无二维码</text></svg>",
+        url: "https://open.feishu.cn/app",
+      };
+    case "feishu_open_console":
+      return undefined;
+    case "wecom_scan_create":
+      throw new Error("浏览器模式无法扫码创建，请在桌面应用中操作。");
+    case "feishu_gateway_status":
+      return { running: false };
+    case "feishu_gateway_start":
+      throw new Error("浏览器模式无法启动网关，请在桌面应用中操作。");
+    case "feishu_gateway_stop":
+      return undefined;
     case "persona_list":
       return [
         { id: "stock-expert", name: "股票助手", icon: "📈", description: "A 股深度分析 / 公告监控 / 行情查询。", kbScope: "raw/股票", body: "(browser stub)" },

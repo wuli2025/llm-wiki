@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="minimal-white">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>站点标题 · Polaris Web</title>
+<!-- 生成时把 site.css + themes.css 内联进 <style>、runtime.js 内联进 <script>，做成单文件可分享站点。 -->
+<link rel="stylesheet" href="../assets/site.css">
+<link rel="stylesheet" href="../assets/themes.css">
+</head>
+<body>
+  <!-- NAV -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <span class="brand gradient-text">品牌名</span>
+      <div class="nav-links">
+        <a href="#features">功能</a><a href="#pricing">价格</a><a href="#faq">常见问题</a>
+      </div>
+      <a class="btn btn-primary" href="#cta">立即开始</a>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <header class="hero">
+    <div class="container">
+      <span class="eyebrow reveal">PRODUCT · 2026</span>
+      <h1 class="reveal">一句话<br><span class="gradient-text">点燃用户的主张</span></h1>
+      <p class="lede reveal">副标题：用一两句把价值说清楚——你解决谁的什么问题，凭什么更好。</p>
+      <div class="hero-cta reveal">
+        <a class="btn btn-grad" href="#cta">免费试用 →</a>
+        <a class="btn btn-ghost" href="#features">看看功能</a>
+      </div>
+      <div class="hero-pills reveal">
+        <span class="pill pill-accent">✦ 无需信用卡</span><span class="pill">5 分钟上手</span><span class="pill">本地优先</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- FEATURES (bento) -->
+  <section class="section" id="features">
+    <div class="container">
+      <div class="center" style="margin-bottom:48px">
+        <div class="eyebrow reveal">FEATURES</div>
+        <h2 class="section-title reveal">为什么选我们</h2>
+        <p class="section-sub reveal">三到六个核心能力，每个配一个图标、一句标题、一句说明。</p>
+      </div>
+      <div class="bento">
+        <div class="card wide reveal"><div class="ico">⚡</div><h3>主打能力</h3><p>最重要的那个卖点放大格，多写一句把价值讲透。</p></div>
+        <div class="card reveal"><div class="ico">🎯</div><h3>能力二</h3><p>简短一句。</p></div>
+        <div class="card reveal"><div class="ico">🔒</div><h3>能力三</h3><p>简短一句。</p></div>
+        <div class="card reveal"><div class="ico">🚀</div><h3>能力四</h3><p>简短一句。</p></div>
+        <div class="card wide reveal"><div class="ico">🧩</div><h3>能力五</h3><p>次重要的也可以放大格，形成节奏。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STATS -->
+  <section class="section tight">
+    <div class="container">
+      <div class="stats">
+        <div class="stat reveal"><div class="num gradient-text">10k+</div><div class="lbl">活跃用户</div></div>
+        <div class="stat reveal"><div class="num gradient-text">99.9%</div><div class="lbl">可用性</div></div>
+        <div class="stat reveal"><div class="num gradient-text">4.9★</div><div class="lbl">用户评分</div></div>
+        <div class="stat reveal"><div class="num gradient-text">24/7</div><div class="lbl">支持</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRICING -->
+  <section class="section" id="pricing">
+    <div class="container">
+      <div class="center" style="margin-bottom:48px">
+        <div class="eyebrow reveal">PRICING</div>
+        <h2 class="section-title reveal">简单透明的价格</h2>
+      </div>
+      <div class="grid cols-3">
+        <div class="price-card reveal"><div class="eyebrow">入门</div><div class="amount">¥0</div><ul><li>基础功能</li><li>社区支持</li><li>1 个项目</li></ul><a class="btn btn-ghost" href="#cta">开始</a></div>
+        <div class="price-card featured reveal"><span class="pill pill-accent">最受欢迎</span><div class="eyebrow">专业</div><div class="amount">¥39<span style="font-size:16px;color:var(--text-3)">/月</span></div><ul><li>全部功能</li><li>优先支持</li><li>无限项目</li></ul><a class="btn btn-grad" href="#cta">升级</a></div>
+        <div class="price-card reveal"><div class="eyebrow">团队</div><div class="amount">联系</div><ul><li>SSO / 审计</li><li>专属客服</li><li>定制部署</li></ul><a class="btn btn-ghost" href="#cta">咨询</a></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="section" id="cta">
+    <div class="container">
+      <div class="cta reveal">
+        <h2>准备好开始了吗？</h2>
+        <p>一句行动号召，降低决策成本。</p>
+        <a class="btn btn-ghost" href="#">免费创建账户</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="footer" id="faq">
+    <div class="container">
+      <div class="footer-grid">
+        <div><div class="brand gradient-text" style="font-size:20px">品牌名</div><p style="color:var(--text-3);margin-top:10px">一句品牌简介。</p></div>
+        <div><h4>产品</h4><a href="#features">功能</a><a href="#pricing">价格</a></div>
+        <div><h4>公司</h4><a href="#">关于</a><a href="#">博客</a></div>
+        <div><h4>支持</h4><a href="#">文档</a><a href="#">联系</a></div>
+      </div>
+      <div class="footer-bottom">© 2026 品牌名 · Built with Polaris</div>
+    </div>
+  </footer>
+
+  <script src="../assets/runtime.js"></script>
+</body>
+</html>

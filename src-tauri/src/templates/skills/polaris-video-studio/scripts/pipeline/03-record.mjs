@@ -4,6 +4,14 @@
  *
  * 用法:
  *   node 03-record.mjs --project=<presentation 目录> [--output=~/Desktop/x.mp4] [--port=5174]
+ *                      [--subtitles=zh-Hans,en] [--burn=zh-Hans,en | --no-burn]
+ *
+ * 字幕:
+ *   --subtitles  逗号分隔的字幕语言（顺序敏感）。每段台词从 audio-segments.json
+ *                的 subtitles[lang] 取，缺则回退到该段 text。每种语言另存一份 .srt，
+ *                并作为可切换软字幕轨嵌入 MP4。
+ *   --burn       其中要烧进画面的语言（最多 2 种叠成双语硬字幕）。默认烧前 2 种。
+ *   --no-burn    一种都不烧，全部作软字幕。
  *
  * 与旧版的区别（旧版只能跑当年那个 demo）:
  *   - 不再写死 ROOT / OUT / CHAPTERS：
@@ -30,12 +38,21 @@ function resolveHome(p) {
 }
 
 function parseArgs() {
-  const out = { project: null, output: null, port: 5174 };
+  const out = { project: null, output: null, port: 5174, subtitles: [], burn: [], noBurn: false };
+  const list = (v) => v.split(',').map((s) => s.trim()).filter(Boolean);
   for (const a of process.argv.slice(2)) {
     if (a.startsWith('--project=')) out.project = a.slice('--project='.length);
     else if (a.startsWith('--output=')) out.output = a.slice('--output='.length);
     else if (a.startsWith('--port=')) out.port = parseInt(a.slice('--port='.length), 10) || 5174;
+    else if (a.startsWith('--subtitles=')) out.subtitles = list(a.slice('--subtitles='.length));
+    else if (a.startsWith('--burn=')) out.burn = list(a.slice('--burn='.length));
+    else if (a === '--no-burn') out.noBurn = true;
   }
+  // 未显式给 --burn 时，默认烧录前 2 种字幕（除非 --no-burn）
+  if (!out.noBurn && out.subtitles.length && !out.burn.length) out.burn = out.subtitles.slice(0, 2);
+  if (out.noBurn) out.burn = [];
+  // burn 必须是 subtitles 的子集
+  out.burn = out.burn.filter((c) => out.subtitles.includes(c));
   return out;
 }
 
@@ -49,6 +66,31 @@ if (!args.project) {
 const PROJECT = resolveHome(args.project);
 const OUT = resolveHome(args.output || '~/Desktop/polaris-video.mp4');
 const PORT = args.port;
+const SUB_LANGS = args.subtitles; // 要生成的字幕语言（顺序敏感）
+const BURN_LANGS = args.burn;     // 其中要烧进画面的语言（最多 2 种叠成双语）
+
+// 字幕语言 → 显示名 / ISO 639-2 轨道标签
+const SUB_META = {
+  'zh-Hans': { name: '简体中文', iso: 'chi' },
+  'zh-Hant': { name: '繁體中文', iso: 'chi' },
+  yue: { name: '粤语', iso: 'yue' },
+  en: { name: 'English', iso: 'eng' },
+  ja: { name: '日本語', iso: 'jpn' },
+  ko: { name: '한국어', iso: 'kor' },
+  es: { name: 'Español', iso: 'spa' },
+  fr: { name: 'Français', iso: 'fra' },
+  de: { name: 'Deutsch', iso: 'deu' },
+  ru: { name: 'Русский', iso: 'rus' },
+  pt: { name: 'Português', iso: 'por' },
+  it: { name: 'Italiano', iso: 'ita' },
+  ar: { name: 'العربية', iso: 'ara' },
+  hi: { name: 'हिन्दी', iso: 'hin' },
+  th: { name: 'ไทย', iso: 'tha' },
+  vi: { name: 'Tiếng Việt', iso: 'vie' },
+  id: { name: 'Indonesia', iso: 'ind' },
+};
+const subName = (c) => (SUB_META[c]?.name) || c;
+const subIso = (c) => (SUB_META[c]?.iso) || 'und';
 
 if (!existsSync(path.join(PROJECT, 'package.json'))) {
   console.error(`✗ ${PROJECT} 下没有 package.json，不是一个有效的 presentation 项目`);
@@ -74,11 +116,13 @@ function loadSegments() {
     console.error('✗ audio-segments.json 为空，没有可录制的步骤');
     process.exit(1);
   }
-  // 每段: { chapter, step, audio: "<chapter>/<step>.mp3" }
+  // 每段: { chapter, step, audio, text, subtitles? }
   return list.map((s) => ({
     chapter: s.chapter,
     step: s.step,
     audio: path.join(PROJECT, 'public', 'audio', s.audio || `${s.chapter}/${s.step}.mp3`),
+    text: typeof s.text === 'string' ? s.text : '',
+    subs: s.subtitles && typeof s.subtitles === 'object' ? s.subtitles : {},
   }));
 }
 
@@ -156,6 +200,65 @@ async function getAudioDuration(mp3Path) {
   return parseFloat(out.trim());
 }
 
+// ───────── 字幕生成（按每段音频精确时长排时间轴）─────────
+function srtTime(sec) {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  const ms = Math.round(sec * 1000);
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const r = ms % 1000;
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  return `${p(h)}:${p(m)}:${p(s)},${p(r, 3)}`;
+}
+
+/** 取某段在某语言下的字幕文本：优先 subtitles[lang]，否则回退到该段 text。 */
+function cueText(seg, langs) {
+  return langs
+    .map((l) => (seg.subs && seg.subs[l]) || seg.text || '')
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** 用 shots（含 duration）+ segments 生成一份 SRT 文本。langs 多于 1 个时叠成多行（双语）。 */
+function buildSrt(shots, segments, langs) {
+  let t = 0;
+  let idx = 0;
+  const blocks = [];
+  for (let i = 0; i < shots.length; i++) {
+    const dur = shots[i].duration > 0 ? shots[i].duration : 2.0;
+    const start = t;
+    const end = t + dur;
+    t = end;
+    const text = cueText(segments[i], langs);
+    if (text) {
+      idx++;
+      blocks.push(`${idx}\n${srtTime(start)} --> ${srtTime(end)}\n${text}\n`);
+    }
+  }
+  return blocks.join('\n');
+}
+
+/** ffmpeg subtitles 滤镜的路径转义：反斜杠→正斜杠，冒号需转义。 */
+function ffSubPath(p) {
+  return p.replace(/\\/g, '/').replace(/:/g, '\\:');
+}
+
+// MP4 旁同名字幕文件路径：<out 去扩展名>.<lang>.srt
+function sidecarSrt(lang) {
+  const ext = path.extname(OUT);
+  const base = OUT.slice(0, OUT.length - ext.length);
+  return `${base}.${lang}.srt`;
+}
+
+const SUB_STYLE =
+  process.platform === 'win32'
+    ? "FontName=Microsoft YaHei,FontSize=22,Outline=2,Shadow=0,MarginV=42,Alignment=2"
+    : process.platform === 'darwin'
+      ? "FontName=PingFang SC,FontSize=22,Outline=2,Shadow=0,MarginV=42,Alignment=2"
+      : "FontName=Noto Sans CJK SC,FontSize=22,Outline=2,Shadow=0,MarginV=42,Alignment=2";
+
 // ───────── 主流程 ─────────
 async function main() {
   const segments = loadSegments();
@@ -194,7 +297,7 @@ async function main() {
   // 2. 逐步截图（每段对应一次 ArrowRight 推进）
   console.log('▶ 截图每一步...');
   const browser = await chromium.launch({ headless: true });
-  let shotsDir, clipsDir, concatFile;
+  let shotsDir, clipsDir, concatFile, concatTmp, burnSrtFile;
   try {
     const context = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
     const page = await context.newPage();
@@ -255,7 +358,52 @@ async function main() {
     concatFile = path.join(PROJECT, '.polaris-concat.txt');
     await fs.writeFile(concatFile, concatList.join('\n'));
     await fs.mkdir(path.dirname(OUT), { recursive: true });
-    await execAsync('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', OUT]);
+
+    if (!SUB_LANGS.length) {
+      // 无字幕：直接拼到成品
+      await execAsync('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', OUT]);
+    } else {
+      // 有字幕：先拼到临时文件，再做一次字幕合成
+      concatTmp = path.join(PROJECT, '.polaris-concat-out.mp4');
+      await execAsync('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', concatTmp]);
+
+      // 4a. 每种语言生成一份 .srt 边车文件
+      console.log(`▶ 生成字幕（${SUB_LANGS.map(subName).join('、')}）...`);
+      const srtPaths = {};
+      for (const lang of SUB_LANGS) {
+        const srt = buildSrt(shots, segments, [lang]);
+        const p = sidecarSrt(lang);
+        await fs.writeFile(p, srt, 'utf-8');
+        srtPaths[lang] = p;
+        console.log(`  · ${subName(lang)} → ${p}`);
+      }
+
+      // 4b. 组 ffmpeg：软字幕轨 + 可选硬烧录
+      const ff = ['-y', '-i', concatTmp];
+      for (const lang of SUB_LANGS) ff.push('-i', srtPaths[lang]);
+      ff.push('-map', '0:v', '-map', '0:a');
+      for (let k = 0; k < SUB_LANGS.length; k++) ff.push('-map', String(k + 1));
+
+      if (BURN_LANGS.length) {
+        // 前 1–2 种叠成（双语）硬字幕烧进画面
+        const burnSrt = buildSrt(shots, segments, BURN_LANGS);
+        burnSrtFile = path.join(PROJECT, '.polaris-burn.srt');
+        await fs.writeFile(burnSrtFile, burnSrt, 'utf-8');
+        ff.push('-vf', `subtitles='${ffSubPath(burnSrtFile)}':force_style='${SUB_STYLE}'`);
+        ff.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '20', '-preset', 'medium');
+        console.log(`▶ 烧录硬字幕：${BURN_LANGS.map(subName).join(' + ')}`);
+      } else {
+        ff.push('-c:v', 'copy');
+      }
+      ff.push('-c:a', 'copy', '-c:s', 'mov_text');
+      // 软字幕轨语言/标题标签
+      for (let k = 0; k < SUB_LANGS.length; k++) {
+        ff.push(`-metadata:s:s:${k}`, `language=${subIso(SUB_LANGS[k])}`);
+        ff.push(`-metadata:s:s:${k}`, `title=${subName(SUB_LANGS[k])}`);
+      }
+      ff.push(OUT);
+      await execAsync('ffmpeg', ff);
+    }
   } finally {
     await browser.close().catch(() => {});
     cleanupServer();
@@ -263,11 +411,20 @@ async function main() {
     if (shotsDir) await fs.rm(shotsDir, { recursive: true, force: true }).catch(() => {});
     if (clipsDir) await fs.rm(clipsDir, { recursive: true, force: true }).catch(() => {});
     if (concatFile) await fs.rm(concatFile, { force: true }).catch(() => {});
+    if (concatTmp) await fs.rm(concatTmp, { force: true }).catch(() => {});
+    if (burnSrtFile) await fs.rm(burnSrtFile, { force: true }).catch(() => {});
   }
 
   const stat = await fs.stat(OUT);
   console.log(`✓ 视频已生成: ${OUT}`);
   console.log(`  大小: ${(stat.size / 1024 / 1024).toFixed(2)} MB · ${segments.length} 步`);
+  if (SUB_LANGS.length) {
+    console.log(
+      `  字幕: ${SUB_LANGS.map(subName).join('、')}` +
+        (BURN_LANGS.length ? `（烧录 ${BURN_LANGS.map(subName).join(' + ')}）` : '（全软字幕轨）') +
+        ` · 另存 ${SUB_LANGS.length} 份 .srt`,
+    );
+  }
 }
 
 main().catch((e) => {

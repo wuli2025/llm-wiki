@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use directories::UserDirs;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -124,6 +124,16 @@ pub struct ChatSendArgs {
     /// 默认 false 以节省 token，日常任务不注入大段 KB 导航。
     #[serde(default)]
     pub use_kb: bool,
+    /// 「分批长任务」：把一次超长生成(如 60 页 PPT)拆成多轮有界批次。
+    /// 注入分批构建协议——先产 `polaris.build.json` 计划清单, 每轮只建 ≤batch_size 个
+    /// pending 单元并回写状态; 由前端编排循环驱动多轮、断线从清单下一个 pending 续跑。
+    /// 缘由: 单轮把 60 页全吐完会让流式连接跑太久被掐(socket closed → exit 1), 分批让
+    /// 每轮输出有界、context 不随页数膨胀、崩了也不丢已落盘的批次。
+    #[serde(default)]
+    pub batch_build: bool,
+    /// 每批最多构建几个单元(页/章/文件)。None 时用默认值。
+    #[serde(default)]
+    pub batch_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,6 +154,12 @@ pub struct ChatStreamEvent {
 static CHILDREN: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, Child>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 static REQ_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// 单轮 assistant 文本落库缓冲上限 (字节): 防 claude 异常死循环狂打输出把内存撑爆。
+/// 超限后实时 delta 仍照常 emit 给前端, 只是不再增长落库缓冲, 末尾加一次截断标记。
+const MAX_ASSISTANT_BYTES: usize = 8 * 1024 * 1024;
+/// 单轮 stderr 累积上限 (字节)。
+const MAX_STDERR_BYTES: usize = 1024 * 1024;
 
 fn next_req_id() -> String {
     let ts = SystemTime::now()
@@ -230,6 +246,15 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     final_prompt.push_str(&project_convention(&art_dir));
     final_prompt.push_str("\n\n---\n\n");
 
+    // 2.15 分批长任务: 超长生成(60 页 PPT 这类)拆成有界批次, 每轮只建 ≤K 个 pending 单元,
+    //      用 polaris.build.json 清单做 checkpoint, 断线从下一个 pending 续跑 ——
+    //      规避单轮输出过长把流式连接拖死(socket closed → 进程坏死)。
+    if args.batch_build {
+        let bs = args.batch_size.unwrap_or(8).clamp(1, 50);
+        final_prompt.push_str(&batch_build_directive(&art_dir, bs));
+        final_prompt.push_str("\n\n---\n\n");
+    }
+
     // 2.5 目标模式: 用户设了完成条件时, 注入「持续推进直到达成」指令
     if let Some(goal) = args
         .goal
@@ -309,16 +334,34 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     let perm = args.permission_mode.cli_value();
     let conv_id_opt = args.conversation_id.clone();
 
+    // 上下文预算自检: 估算本轮注入的总 token 并 emit 给前端(kind=meta) —— 分批编排据此
+    // 自适应批量大小(input 越大则每批越小), 也让「自动检测上下文优化」有据可依。
+    let est_tokens = estimate_tokens(&final_prompt);
+    emit_event(
+        &app,
+        ChatStreamEvent {
+            req_id: req_id.clone(),
+            kind: "meta".into(),
+            text: Some(est_tokens.to_string()),
+            tool: None,
+            conversation_id: conv_id_opt.clone(),
+        },
+    );
+
     // 默认走宿主机执行（沙箱可选，但默认关闭）；动态编排时放行 Task 子代理
     let mut child = spawn_on_host(&final_prompt, perm, &art_dir, args.dynamic_workflow)?;
 
     // prompt 经 stdin 喂给 claude (而非命令行参数): 大 prompt 不会撞 Windows 命令行
     // 长度上限, 也不会因 prompt 以 `-` 开头被当成 flag。spawn 后立刻写 + drop, claude 读到 EOF 就开始处理。
+    // stdin 写放独立线程: 大 prompt 超过 OS 管道缓冲(~64KB)且 claude 尚未开始读时,
+    // write_all 会阻塞 —— 放后台线程就不会卡住本 async 命令的执行线程(影响其它并发命令)。
+    // 写完线程结束时 drop(stdin) 关管道 → claude 读到 EOF 开工。失败不致命(claude 有 fallback)。
     if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        // 失败不致命: claude 还有 fallback; 但 99% 写 KB 级别的 prompt 不会失败。
-        let _ = stdin.write_all(final_prompt.as_bytes());
-        // drop 在作用域结束时自动关, 不需要显式调用
+        let payload = std::mem::take(&mut final_prompt);
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(payload.as_bytes());
+        });
     }
 
     let stdout = child
@@ -345,8 +388,14 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
             if line.trim().is_empty() {
                 continue;
             }
-            stderr_buf_clone.lock().push_str(&line);
-            stderr_buf_clone.lock().push('\n');
+            {
+                // 单次加锁 + 封顶: 异常时 stderr 也可能狂刷, 不让它无界累积。
+                let mut buf = stderr_buf_clone.lock();
+                if buf.len() < MAX_STDERR_BYTES {
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
+            }
             emit_event(
                 &app_err,
                 ChatStreamEvent {
@@ -387,24 +436,29 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         // 本轮生成的成品文件 (绝对路径, 正斜杠), 既来自 Write/Edit 工具调用,
         // 也来自产物目录的前后快照 diff (覆盖 Bash/脚本生成的文件)
         let mut artifacts: Vec<String> = Vec::new();
+        // 落库缓冲封顶: claude 若异常死循环狂打输出, 不让 assistant_text 无界增长撑爆内存。
+        // 超限后改写入可丢弃的 scrap (实时 delta 仍照常 emit, 前端实时可见), 不再增长落库缓冲。
+        let mut scrap = String::new();
+        let mut capped = false;
         for line in reader.lines() {
             let Ok(line) = line else { continue };
             if line.trim().is_empty() {
                 continue;
             }
+            let target = if capped { &mut scrap } else { &mut assistant_text };
             match serde_json::from_str::<Value>(&line) {
                 Ok(v) => handle_stream_event(
                     &app_out,
                     &req_out,
                     conv_id_thread.as_deref(),
                     &v,
-                    &mut assistant_text,
+                    target,
                     &mut artifacts,
                 ),
                 Err(_) => {
                     // 非 JSON 行: 当作 delta 直接显示 (调试友好)
-                    assistant_text.push_str(&line);
-                    assistant_text.push('\n');
+                    target.push_str(&line);
+                    target.push('\n');
                     emit_event(
                         &app_out,
                         ChatStreamEvent {
@@ -416,6 +470,12 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
                         },
                     );
                 }
+            }
+            if capped {
+                scrap.clear(); // scrap 只为让上面 emit 继续工作, 不能自己变成无界
+            } else if assistant_text.len() > MAX_ASSISTANT_BYTES {
+                assistant_text.push_str("\n\n[⚠️ 输出过长，后续内容已省略]");
+                capped = true;
             }
         }
 
@@ -515,9 +575,53 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
 #[tauri::command]
 pub fn chat_cancel(req_id: String) -> Result<(), String> {
     if let Some(mut child) = CHILDREN.lock().remove(&req_id) {
-        let _ = child.kill();
+        kill_tree(child.id()); // 先杀整树: claude 扇出的 python/node/dev server 等子孙
+        let _ = child.kill(); // 再杀 claude 本体 (taskkill /T 通常已带走它, 这步兜底)
+        let _ = child.wait(); // reap, 防 Unix 僵尸进程泄漏
     }
     Ok(())
+}
+
+/// 读取某会话的分批构建清单 `polaris.build.json`(分批长任务的断点/进度凭据)。
+/// 前端编排循环每轮结束后读它, 算还剩几个 pending 来决定续不续、断了从哪接。
+/// 不存在或解析失败返回 None(前端据此判定「还没规划」或「读不到, 当作未完成重试」)。
+#[tauri::command]
+pub fn chat_build_manifest(conversation_id: Option<String>) -> Option<Value> {
+    let path = artifacts_dir(conversation_id.as_deref()).join("polaris.build.json");
+    let txt = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<Value>(&txt).ok()
+}
+
+/// App 退出 (关窗 / 主动退出) 时回收所有在飞的 claude 子进程, 连同它们扇出的整棵进程树。
+/// 否则用户在 claude 跑长任务 (起 dev server / Task 扇出) 时直接关 App, claude 及其子孙
+/// 会变孤儿继续在后台占端口/CPU/写文件。由 lib.rs 的 RunEvent 钩子调用。
+pub fn kill_all_children() {
+    let mut map = CHILDREN.lock();
+    for (_id, mut child) in map.drain() {
+        kill_tree(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// 按 PID kill 整个进程树。claude 在 Bash/PowerShell/Task 工具下会拉起 python/node/dev server
+/// 等子进程, 只 kill claude 本体会留孤儿占着端口。与 project.rs::kill_tree 同策略。
+fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        no_window(&mut cmd);
+        let _ = cmd.output();
+    }
+    #[cfg(not(windows))]
+    {
+        // 杀进程组 (shell -c 起的子孙); 失败再退化为 kill 单进程。
+        let _ = Command::new("kill")
+            .args(["-TERM", &format!("-{}", pid)])
+            .output()
+            .or_else(|_| Command::new("kill").arg(pid.to_string()).output());
+    }
 }
 
 // ───────────────────────── Internals ─────────────────────
@@ -744,6 +848,9 @@ fn spawn_on_host(prompt: &str, perm: &str, art_dir: &Path, with_task: bool) -> R
             cmd.env("CLAUDE_CODE_GIT_BASH_PATH", bash);
         }
     }
+    // 子进程环境净化: loopback 强制 NO_PROXY (切 Codex 时 claude 走 127.0.0.1 本地代理,
+    // 系统代理会劫持回环 → 连不上) + 清 DEBUG/LD_PRELOAD。见 doctor::harden_child_env。
+    crate::doctor::harden_child_env(&mut cmd);
     no_window(&mut cmd); // 隐藏式: 每次发消息不再弹出黑色终端窗口
 
     cmd.spawn().map_err(|e| {
@@ -1073,6 +1180,68 @@ fn project_convention(art_dir: &Path) -> String {
     )
 }
 
+/// 粗估文本 token 数(无需 tokenizer 依赖)。ASCII 约 4 字符/token; 非 ASCII(中日韩等)
+/// 按 1 token/字保守计(实际多在 0.5~1.5, 取上界让预算自检偏紧不偏松)。仅用于上下文
+/// 预算自检与分批编排的自适应批量, 不求精确。
+fn estimate_tokens(s: &str) -> usize {
+    let mut ascii = 0usize;
+    let mut wide = 0usize;
+    for c in s.chars() {
+        if c.is_ascii() {
+            ascii += 1;
+        } else {
+            wide += 1;
+        }
+    }
+    ascii / 4 + wide + 1
+}
+
+/// 分批长任务指令 (Polaris · Batch Build) —— 本轮目标的核心之一。
+///
+/// 把一次性的超长生成(典型: 60 页 PPT / 长文档 / 多文件项目)改成「先规划成清单, 再每轮
+/// 只建有界一小批」的形态。单轮输出因此恒定有界, 流式连接不会因一口气吐几万 token 跑太久
+/// 被掐死; `polaris.build.json` 清单落盘做 checkpoint, 某一轮崩了, 下一轮读清单从下一个
+/// pending 单元接着干, 已建的不重做、不丢失。前端编排循环负责把多轮串起来跑到清单清空。
+fn batch_build_directive(art_dir: &Path, batch_size: usize) -> String {
+    let dir = art_dir.to_string_lossy().replace('\\', "/");
+    format!(
+        "## 分批长任务模式 (Polaris · Batch Build) —— 关键, 必须严格遵守\n\n\
+本轮是一个**超长生成任务的其中一批**, **不是**要你一口气把全部产出做完。请把活儿拆成清单, \
+**每轮只建一小批**, 用清单文件做断点续传。这样每轮输出有界、连接不会被拖死、崩了也能续。\n\n\
+**清单文件(唯一事实源)**: `{dir}/polaris.build.json`, 结构:\n\
+```json\n\
+{{\n\
+  \"goal\": \"用一句话复述总目标\",\n\
+  \"kind\": \"ppt | doc | web | generic\",\n\
+  \"batch_size\": {bs},\n\
+  \"output\": \"最终产物的相对/绝对路径(单文件或目录, 如 deck.pptx 或 build_deck.py)\",\n\
+  \"units\": [\n\
+    {{ \"id\": \"u01\", \"title\": \"该单元(页/章/文件)简述\", \"status\": \"pending\", \"artifact\": \"\" }}\n\
+  ]\n\
+}}\n\
+```\n\n\
+**每轮的固定动作**:\n\
+1. **先读清单**: 用 Read 看 `{dir}/polaris.build.json` 是否存在。\n\
+2. **不存在 → 本轮是规划轮**: 把总目标拆成**全部**单元(每页/每章一个), 全部 `status:\"pending\"`, \
+写出完整清单到上面那个路径。然后**接着**构建**前 {bs} 个** pending 单元(见第 4 步), 不要只规划不动手。\n\
+3. **已存在 → 本轮是构建轮**: 读出清单, 找出仍为 `pending` 的单元。\n\
+4. **只建这一批(≤{bs} 个)**: 按顺序取最多 **{bs}** 个 pending 单元, 认真做出每个单元的实际内容, \
+**增量写入磁盘**——把每个单元的产物追加/写进 `output` 指向的文件(脚本就 Edit 追加对应代码段, \
+文档就追加对应章节; **绝不**把整份产出堆在一条聊天消息里)。做完一个就把它的 `status` 改成 \
+`\"done\"`、填上 `artifact` 路径, **立刻回写清单文件**。\n\
+5. **本批做完即停**: 即使剩下的看着很简单, 也**不要**在这一轮继续往下做更多单元 —— 有界输出是本模式的全部意义。\n\
+6. **末尾报进度**: 用一行写明 `BATCH 本轮完成 X 个; 累计 done D / 总 N; 剩余 P 个 pending`。\n\n\
+**硬约束**:\n\
+- 任何一轮都不得尝试超过 {bs} 个单元; 宁可多跑几轮, 不可让单轮输出过长。\n\
+- 每建完一个单元就回写清单 + 落盘产物, 保证中途崩溃时进度不丢。\n\
+- 最终产物始终写到这个可写目录(用绝对路径)之下: `{dir}`。\n\
+- 当清单中**所有**单元都 `done` 时, 本轮额外做一次收尾(如把分段脚本跑一遍生成最终 .pptx/.pdf, \
+或合并校验), 并在末尾写明 `BUILD COMPLETE: <最终产物绝对路径>`。",
+        dir = dir,
+        bs = batch_size
+    )
+}
+
 /// 目标模式指令: 把用户设定的「完成条件」当作直接指令, 引导 claude 持续推进直到达成,
 /// 对应 Claude Code 的 goal 模式 —— 条件未满足前不收尾、不反问, 自行规划下一步。
 fn goal_directive(goal: &str) -> String {
@@ -1276,7 +1445,7 @@ pub struct ArtifactPayload {
 
 #[tauri::command]
 pub fn artifact_read(path: String) -> Result<ArtifactPayload, String> {
-    let p = PathBuf::from(&path);
+    let p = ensure_artifact_path(&path)?;
     let meta = std::fs::metadata(&p).map_err(|_| format!("文件不存在或无法访问: {}", path))?;
     if !meta.is_file() {
         return Err("目标不是文件".into());
@@ -1342,6 +1511,8 @@ pub fn artifact_read(path: String) -> Result<ArtifactPayload, String> {
 /// 用系统默认程序打开产物文件 (浏览器开 HTML / 看图器开图片等)
 #[tauri::command]
 pub fn artifact_open_external(path: String) -> Result<(), String> {
+    // 护栏 + 规范化: 只允许打开 App 管理目录内的文件, 且用解析后的绝对路径喂给系统命令
+    let path = ensure_artifact_path(&path)?.to_string_lossy().to_string();
     #[cfg(target_os = "windows")]
     {
         Command::new("cmd")
@@ -1370,6 +1541,8 @@ pub fn artifact_open_external(path: String) -> Result<(), String> {
 /// Linux 无统一「选中文件」语义, 退化为打开其所在目录。
 #[tauri::command]
 pub fn artifact_reveal(path: String) -> Result<(), String> {
+    // 护栏 + 规范化: 只允许定位 App 管理目录内的文件
+    let path = ensure_artifact_path(&path)?.to_string_lossy().to_string();
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -1476,6 +1649,39 @@ pub struct ArtifactSearchHit {
     pub snippet: String,
     pub modified: u64,
     pub score: i32,
+}
+
+/// 产物命令 (read/open/reveal) 允许访问的根目录集合 (已规范化)。
+/// = `~/Polaris` (含 data/artifacts、projects) + KB root (含 conversations 与 KB 资料)。
+/// 这些是 App 自己产出/管理文件的地方; 命令传入的路径 canonicalize 后必须落在其一之内。
+fn allowed_open_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(u) = UserDirs::new() {
+        roots.push(u.home_dir().join("Polaris"));
+    }
+    let kb_root = PathBuf::from(kb::kb_root());
+    if !kb_root.as_os_str().is_empty() {
+        roots.push(kb_root);
+    }
+    roots
+        .into_iter()
+        .filter_map(|r| r.canonicalize().ok())
+        .collect()
+}
+
+/// 产物访问护栏: 把前端传入的路径 canonicalize 后, 校验其落在某个允许根之内。
+/// 挡前端 (或被构造的会话内容) 用任意系统路径去读取 / 用默认程序打开 / 资源管理器
+/// 定位库外文件 (e.g. `C:\Windows\...`、`../../` 穿越)。返回规范化后的绝对路径。
+fn ensure_artifact_path(path: &str) -> Result<PathBuf, String> {
+    let canon = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|_| format!("文件不存在或无法访问: {path}"))?;
+    let roots = allowed_open_roots();
+    if roots.iter().any(|r| canon.starts_with(r)) {
+        Ok(canon)
+    } else {
+        Err("路径越界, 拒绝访问".into())
+    }
 }
 
 /// 所有「会话根目录」候选: 工作文件夹(KB root)/conversations 与回退目录。

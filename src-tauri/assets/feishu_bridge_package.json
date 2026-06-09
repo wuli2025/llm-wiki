@@ -1,0 +1,10 @@
+{
+  "name": "polaris-feishu-bridge",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Polaris 飞书对话引擎 Node 桥（官方 WSClient 长连接）",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.40.0"
+  }
+}

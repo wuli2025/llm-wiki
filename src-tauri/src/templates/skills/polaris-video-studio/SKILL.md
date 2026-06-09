@@ -144,13 +144,42 @@ npm run synthesize-audio     # MiniMax T2A 逐段合成 mp3
 
 **输出**：`work/presentation/public/audio/*/*.mp3`
 
+**多语言配音**：narrations.ts 里的台词用**目标语言**书写（英语视频就写英语口播稿、粤语就写粤语…），
+并启用 MiniMax `language_boost` 提升该语言的发音准确度。两种设法：
+
+- 全局：合成前设环境变量，如 `MINIMAX_LANGUAGE_BOOST="English"`（Windows: `$env:MINIMAX_LANGUAGE_BOOST="English"`）。
+- 按段：在 `audio-segments.json` 每段加 `"language_boost": "Chinese,Yue"`（按段覆盖全局）。
+
+常用 `language_boost` 取值：`Chinese`、`Chinese,Yue`（粤语）、`English`、`Japanese`、`Korean`、
+`Spanish`、`French`、`German`、`Russian`、`Portuguese`、`Italian`、`Arabic`、`Hindi`、`Thai`、
+`Vietnamese`、`Indonesian`、`auto`。
+
 ### Phase 4 · 出片（脚本自动）
 
 ```bash
 node ~/Polaris/skills/polaris-video-studio/scripts/pipeline/03-record.mjs \
   --project=<presentation 目录的绝对路径> \
-  --output=~/Desktop/output.mp4
+  --output=~/Desktop/output.mp4 \
+  --subtitles=zh-Hans,en --burn=zh-Hans,en   # 可选：多语言字幕
 ```
+
+**多语言字幕**（可选）：
+
+1. 配音、`extract-narrations` 之后，给 `audio-segments.json` **每一段**补 `subtitles` 字段，
+   把该段台词译成各目标语言：
+   ```json
+   { "chapter": "intro", "step": 1, "text": "……", "audio": "intro/1.mp3",
+     "subtitles": { "zh-Hans": "简体文本", "zh-Hant": "繁體文本", "en": "English text" } }
+   ```
+   缺某语言时该段会回退用 `text`。
+2. 给 `03-record.mjs` 传 `--subtitles=<逗号分隔语言>`：
+   - 每种语言在 MP4 旁生成同名 `.srt`，并作为**可切换软字幕轨**嵌入 MP4；
+   - `--burn=<语言>` 把其中 1–2 种叠成（双语）**硬字幕烧进画面**（任何播放器都能看到）；
+     不传 `--burn` 默认烧前 2 种，`--no-burn` 则一种都不烧。
+   - 字幕时间轴按每段音频的精确时长自动对齐，无需手填时间码。
+
+字幕语言代码：`zh-Hans`(简) `zh-Hant`(繁) `en` `yue`(粤) `ja` `ko` `es` `fr` `de` `ru` `pt`
+`it` `ar` `hi` `th` `vi` `id`。
 
 > ⚠️ `--project` 必须指向 Phase 2 脚手架生成的 presentation 项目目录（含 `package.json`），
 > **不是** skill 自己的目录。脚本会从该目录读 `audio-segments.json` 自动发现章节/步骤结构，

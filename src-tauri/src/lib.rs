@@ -1,3 +1,4 @@
+mod accounts;
 mod chat;
 mod claude_md;
 mod codex_proxy;
@@ -10,6 +11,8 @@ mod persona;
 mod project;
 mod provider;
 mod skills;
+mod updater;
+mod wecom;
 
 use polaris_core::KbLocator;
 use std::sync::Arc;
@@ -50,9 +53,17 @@ pub fn run() {
             // 确保「课件视频工坊」技能落盘（支撑「生成课件类视频」UI 的基础设施技能，
             // 编译期内嵌 → 全新安装即可用、脚本修复随 App 更新下发）。best-effort，不阻断启动。
             skills::seed_video_studio_skill();
+            // 确保「演示工坊」技能落盘（支撑「PPT 演示」入口）。
+            skills::seed_deck_studio_skill();
+            // 确保「网站生成」技能落盘（支撑「网站生成」入口）。
+            skills::seed_web_studio_skill();
             // 环境预热: 后台把 claude / pwsh 目录塞进进程 PATH + 设 Git Bash 路径,
             // 让之后 spawn 的 claude CLI 直接「找得到、有 shell」, 无需重启 (见 doctor.rs)。
             doctor::prime_path_for_claude();
+            // 自动更新状态机初始化（记录当前版本 + 持久化路径 + 重启续提示）。best-effort。
+            let _ = updater::init(h);
+            // 飞书网关「开机自动启动」：若用户开了 auto_start 且凭证齐全，后台自动拉起（不阻塞启动）。
+            feishu::auto_start_if_enabled(h);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -101,10 +112,22 @@ pub fn run() {
             feishu::feishu_get_config,
             feishu::feishu_set_config,
             feishu::feishu_test_connection,
+            feishu::feishu_create_qr,
+            feishu::feishu_open_console,
+            // 飞书对话引擎（阶段B：Node 桥长连接 → headless claude → 回发）
+            feishu::feishu_gateway_start,
+            feishu::feishu_gateway_stop,
+            feishu::feishu_gateway_status,
+            // 企业微信智能机器人「扫码自动配置」(OAuth 回环, 绕开 Tauri 弹窗限制)
+            wecom::wecom_scan_create,
+            // 自媒体「账号管理」: 探测平台登录态 + 解绑（删 profile）
+            accounts::media_accounts_status,
+            accounts::media_account_forget,
             // Chat
             chat::chat_send,
             chat::chat_cancel,
             chat::chat_attach_files,
+            chat::chat_build_manifest,
             chat::artifact_read,
             chat::artifact_open_external,
             chat::artifact_reveal,
@@ -146,7 +169,20 @@ pub fn run() {
             doctor::env_claude_update_check,
             doctor::env_update_claude,
             doctor::env_cancel,
+            // 自动更新状态机 (借鉴 OpenCode updater-controller: 单飞 + 可观测 + 持久化续提示)
+            updater::updater_get_state,
+            updater::updater_check,
+            updater::updater_apply,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Polaris application");
+        .build(tauri::generate_context!())
+        .expect("error while building Polaris application")
+        .run(|_app, event| {
+            // App 退出 (关窗 / 主动退出) 时回收所有在飞的 claude 子进程树, 防孤儿继续占端口/CPU。
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                chat::kill_all_children();
+            }
+        });
 }

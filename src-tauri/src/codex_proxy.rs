@@ -11,7 +11,7 @@
 //! - 翻译: system→instructions、messages→input、tools→function、tool_use/tool_result ↔
 //!   function_call/function_call_output; 流式把 Responses 的 output_text/function_call_arguments
 //!   增量翻成 Anthropic 的 content_block_delta。reasoning(思维链)在 v1 直接不透传。
-//! - 模型: 默认 gpt-5-codex(codex 后端默认模型); 收到 gpt-*/o* 透传, 其余(claude-*)回落默认。
+//! - 模型: 默认 gpt-5.5(最新 ChatGPT 模型); 收到 gpt-*/o* 透传, 其余(claude-*)回落默认。
 //!
 //! 注: ChatGPT 后端的请求契约(必需头/字段)可能随官方调整, 出错文案会经 `last_error()` 暴露到坞里。
 
@@ -24,13 +24,22 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BACKEND_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const DEFAULT_MODEL: &str = "gpt-5-codex";
+const DEFAULT_MODEL: &str = "gpt-5.5";
 const USER_AGENT: &str = "polaris-codex-proxy";
 const BASE_PORT: u16 = 8765;
 const PORT_TRIES: u16 = 25;
+/// 入站 socket 读/写超时: 半发请求或谎报 Content-Length 的慢连接不会让连接线程永久阻塞泄漏。
+const IO_TIMEOUT: Duration = Duration::from_secs(60);
+/// 上游连接建立超时。
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// 上游 SSE 流「两次读之间」的最大静默 (超过即判上游半死) —— **不是整条流的总时长上限**,
+/// 故不会误杀真的在持续吐 token 的长回复; 只在上游接受连接后彻底不发数据时兜底解除阻塞。
+const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(120);
+/// 请求体大小硬上限: 挡 `Content-Length` 谎报超大值导致 `vec![0u8; N]` 瞬时巨量分配的内存放大 DoS。
+const MAX_BODY: usize = 64 * 1024 * 1024;
 
 static PROXY_PORT: Lazy<RwLock<Option<u16>>> = Lazy::new(|| RwLock::new(None));
 static LAST_ERROR: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
@@ -95,7 +104,12 @@ fn accept_loop(listener: TcpListener) {
 // ───────────────────────── HTTP/1.1 入站 ─────────────────────────
 
 fn handle_conn(mut stream: TcpStream) -> std::io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+    // 入站读/写都设超时, 防慢连接/半发请求把连接线程永久阻塞 → 线程只增不减泄漏。
+    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    let clone = stream.try_clone()?;
+    let _ = clone.set_read_timeout(Some(IO_TIMEOUT));
+    let mut reader = BufReader::new(clone);
 
     // 请求行: METHOD PATH HTTP/1.1
     let mut request_line = String::new();
@@ -124,6 +138,10 @@ fn handle_conn(mut stream: TcpStream) -> std::io::Result<()> {
         }
     }
 
+    if content_length > MAX_BODY {
+        anthropic_error(&mut stream, 413, "请求体过大");
+        return Ok(());
+    }
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
         reader.read_exact(&mut body)?;
@@ -155,6 +173,7 @@ fn write_simple(stream: &mut TcpStream, code: u16, ctype: &str, body: &[u8]) {
         400 => "400 Bad Request",
         401 => "401 Unauthorized",
         404 => "404 Not Found",
+        413 => "413 Payload Too Large",
         502 => "502 Bad Gateway",
         _ => "500 Internal Server Error",
     };
@@ -255,9 +274,20 @@ impl UpstreamErr {
     }
 }
 
+/// 带超时的上游 agent: connect/read/write 都设上限。read 用 per-read 超时 (见 UPSTREAM_READ_TIMEOUT
+/// 注释), 不设整条 call 的全局 deadline, 以免误杀正在持续吐 token 的长 SSE 回复。
+fn upstream_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(UPSTREAM_CONNECT_TIMEOUT)
+        .timeout_read(UPSTREAM_READ_TIMEOUT)
+        .timeout_write(IO_TIMEOUT)
+        .build()
+}
+
 fn call_upstream(auth: &Auth, body: &Value) -> Result<ureq::Response, UpstreamErr> {
     let session = gen_uuid();
-    let r = ureq::post(BACKEND_URL)
+    let r = upstream_agent()
+        .post(BACKEND_URL)
         .set("Authorization", &format!("Bearer {}", auth.access_token))
         .set("chatgpt-account-id", &auth.account_id)
         .set("OpenAI-Beta", "responses=experimental")
@@ -300,7 +330,7 @@ fn build_responses_body(req: &Value) -> Result<Value, String> {
         "input": input,
         "store": false,
         "stream": true,
-        // gpt-5* 系列是推理模型; 非推理模型后端会忽略该字段
+        // gpt-5.5 是最新 ChatGPT 模型; 推理模型(o1/o3)用 reasoning 字段
         "reasoning": { "effort": "medium" },
     });
     let obj = body.as_object_mut().unwrap();
@@ -842,7 +872,10 @@ fn refresh_auth(auth: &Auth) -> Result<Auth, String> {
     if auth.refresh_token.is_empty() {
         return Err("缺少 refresh_token, 请重新授权 ChatGPT".into());
     }
-    let resp = ureq::post(CODEX_OAUTH_TOKEN_URL)
+    let resp = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .post(CODEX_OAUTH_TOKEN_URL)
         .set("User-Agent", USER_AGENT)
         .send_form(&[
             ("grant_type", "refresh_token"),
@@ -959,5 +992,78 @@ pub fn codex_proxy_info() -> CodexProxyInfo {
         running: p.is_some(),
         port: p.unwrap_or(0),
         last_error: last_error(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn map_model_passthrough_and_default() {
+        assert_eq!(map_model("gpt-5-codex"), "gpt-5-codex");
+        assert_eq!(map_model("o3-mini"), "o3-mini");
+        assert_eq!(map_model("codex-foo"), "codex-foo");
+        // 空 / claude-* / 未知 → 回落默认 codex 模型
+        assert_eq!(map_model("").as_str(), DEFAULT_MODEL);
+        assert_eq!(map_model("claude-opus-4").as_str(), DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn extract_system_handles_all_shapes() {
+        assert_eq!(extract_system(&json!({"system": "hi"})), "hi");
+        assert_eq!(
+            extract_system(&json!({"system": [{"text":"a"},{"text":"b"}]})),
+            "a\n\nb"
+        );
+        assert_eq!(extract_system(&json!({})), "");
+        // 畸形: system 是数字 / block 缺 text → 不 panic, 返回空串
+        assert_eq!(extract_system(&json!({"system": 42})), "");
+        assert_eq!(extract_system(&json!({"system": [{"nope": 1}]})), "");
+    }
+
+    #[test]
+    fn build_responses_body_rejects_empty_messages() {
+        // 空 / 缺 messages → Err (而非 panic)
+        assert!(build_responses_body(&json!({"model":"gpt-5","messages":[]})).is_err());
+        assert!(build_responses_body(&json!({})).is_err());
+    }
+
+    #[test]
+    fn build_responses_body_minimal_ok() {
+        let req = json!({
+            "model": "gpt-5-codex",
+            "messages": [{"role":"user","content":"hello"}],
+            "max_tokens": 100,
+            "temperature": 0.5,
+        });
+        let body = build_responses_body(&req).expect("应翻译成功");
+        assert_eq!(body["model"], "gpt-5-codex");
+        assert_eq!(body["max_output_tokens"], 100);
+        assert_eq!(body["stream"], true);
+        assert!(body["input"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn build_responses_body_tolerates_malformed_messages() {
+        // content/结构各种畸形: 只要求不 panic (健壮性回归保护)
+        let weird = json!({
+            "model": "gpt-5",
+            "messages": [
+                {"role":"user","content": 12345},
+                {"role":"assistant"},
+                {"content": [{"type":"text"}]},
+                {"role":"user","content":[{"type":"image","source":{}}]},
+                {"role":"user","content":[{"type":"tool_use"}]},
+                {"role":"user","content":[{"type":"tool_result"}]},
+                "not-an-object",
+                42
+            ]
+        });
+        let _ = build_responses_body(&weird);
     }
 }

@@ -1,0 +1,10 @@
+{
+  "id": "polaris-story-video",
+  "name": "Polaris 故事视频（AI 生图 · 旁白 · 一键成片）",
+  "version": "1.0.0",
+  "category": "Video Production / Storytelling",
+  "description": "把文案/主题做成带 AI 高清插画的故事短视频并输出 MP4。链路：文案→分镜→角色设定→MiniMax 生图（人物+环境，跨镜一致）→MiniMax 配音→ffmpeg 运镜/字幕/BGM 合成。竖屏 9:16 / 横屏 16:9 / 方图 1:1，无需浏览器录屏。",
+  "author": "Polaris",
+  "source": "official",
+  "compat": ["claude-code", "claude-ai"]
+}

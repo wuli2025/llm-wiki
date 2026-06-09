@@ -19,7 +19,10 @@ export type ViewKey =
   | "update"
   | "feishu"
   | "settings"
-  | "video_course";
+  | "video_course"
+  | "media_ops"
+  | "deck"
+  | "web_studio";
 
 export const useAppStore = defineStore("app", () => {
   const view = ref<ViewKey>("chat");

@@ -1,0 +1,132 @@
+/* polaris-web-studio :: site.css — responsive landing/site primitives
+ *
+ * Web-page counterpart of the deck engine. Reuses the SAME design tokens as
+ * polaris-deck-studio (themes.css overrides them per [data-theme]), so the 17
+ * themes work here too. Component vocabulary (glass nav / hero / bento / pricing /
+ * CTA / footer) is Polaris-authored, borrowing the open-design aesthetic.
+ */
+:root{
+  --bg:#ffffff;--bg-soft:#f7f7f8;--surface:#ffffff;--surface-2:#f2f2f4;
+  --border:rgba(0,0,0,.08);--border-strong:rgba(0,0,0,.16);
+  --text-1:#111216;--text-2:#55596a;--text-3:#8a8f9e;
+  --accent:#3b6cff;--accent-2:#7a5cff;--accent-3:#ff5c8a;
+  --good:#1aaf6c;--warn:#f5a524;--bad:#e0445a;
+  --grad:linear-gradient(135deg,#3b6cff,#7a5cff 55%,#ff5c8a);
+  --grad-soft:linear-gradient(135deg,#eef2ff,#f5ecff 55%,#ffeef5);
+  --radius:18px;--radius-sm:12px;--radius-lg:26px;
+  --shadow:0 10px 30px rgba(18,24,40,.08),0 2px 6px rgba(18,24,40,.04);
+  --shadow-lg:0 24px 60px rgba(18,24,40,.14),0 6px 16px rgba(18,24,40,.06);
+  --font-sans:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;
+  --font-serif:'Playfair Display','Noto Serif SC',Georgia,serif;
+  --font-mono:'JetBrains Mono','IBM Plex Mono',SFMono-Regular,Menlo,monospace;
+  --font-display:var(--font-sans);
+  --letter-tight:-.03em;--ease:cubic-bezier(.4,0,.2,1);
+  --maxw:1160px;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text-1);font-family:var(--font-sans);line-height:1.7;
+  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+img,svg,video{max-width:100%;display:block}
+a{color:var(--accent);text-decoration:none}
+h1,h2,h3,h4{margin:0;line-height:1.12;letter-spacing:var(--letter-tight);font-family:var(--font-display)}
+
+/* ===== layout ===== */
+.container{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+.section{padding:96px 0}
+.section.tight{padding:64px 0}
+.eyebrow{font-size:13px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--accent)}
+.section-title{font-size:clamp(28px,4vw,46px);font-weight:800;margin:10px 0 14px}
+.section-sub{font-size:18px;color:var(--text-2);max-width:64ch;font-weight:300}
+.gradient-text{background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent}
+.center{text-align:center}.center .section-sub{margin-left:auto;margin-right:auto}
+
+/* ===== nav (sticky glass) ===== */
+.nav{position:sticky;top:0;z-index:50;backdrop-filter:saturate(180%) blur(14px);-webkit-backdrop-filter:saturate(180%) blur(14px);
+  background:color-mix(in srgb,var(--bg) 78%,transparent);border-bottom:1px solid var(--border)}
+.nav-inner{max-width:var(--maxw);margin:0 auto;padding:14px 24px;display:flex;align-items:center;gap:20px}
+.brand{font-weight:800;font-size:18px;letter-spacing:-.02em}
+.nav-links{display:flex;gap:26px;margin-left:auto}
+.nav-links a{color:var(--text-2);font-size:14.5px;font-weight:500}
+.nav-links a:hover{color:var(--text-1)}
+@media(max-width:720px){.nav-links{display:none}}
+
+/* ===== buttons ===== */
+.btn{display:inline-flex;align-items:center;gap:8px;padding:12px 22px;border-radius:999px;font-size:15px;font-weight:600;
+  border:1px solid transparent;cursor:pointer;transition:transform .15s var(--ease),box-shadow .15s,filter .15s}
+.btn-primary{background:var(--accent);color:#fff;box-shadow:var(--shadow)}
+.btn-primary:hover{transform:translateY(-2px);filter:brightness(1.06)}
+.btn-ghost{background:transparent;color:var(--text-1);border-color:var(--border-strong)}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
+.btn-grad{background:var(--grad);color:#fff;box-shadow:var(--shadow)}
+.btn-grad:hover{transform:translateY(-2px);filter:brightness(1.05)}
+
+/* ===== hero ===== */
+.hero{position:relative;padding:120px 0 96px;overflow:hidden}
+.hero::before{content:"";position:absolute;inset:-20% -10% auto -10%;height:520px;background:var(--grad-soft);
+  filter:blur(40px);opacity:.7;z-index:-1;border-radius:50%}
+.hero h1{font-size:clamp(40px,7vw,84px);font-weight:850;letter-spacing:-.035em}
+.hero .lede{font-size:clamp(17px,2.2vw,22px);color:var(--text-2);max-width:60ch;margin:22px 0 0;font-weight:300}
+.hero-cta{display:flex;gap:14px;flex-wrap:wrap;margin-top:34px}
+.hero-pills{display:flex;gap:10px;flex-wrap:wrap;margin-top:30px}
+
+/* ===== pills / badges ===== */
+.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:500;
+  background:var(--surface-2);color:var(--text-2);border:1px solid var(--border)}
+.pill-accent{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 28%,transparent)}
+
+/* ===== cards / bento ===== */
+.grid{display:grid;gap:22px}
+.cols-2{grid-template-columns:repeat(2,1fr)}
+.cols-3{grid-template-columns:repeat(3,1fr)}
+.cols-4{grid-template-columns:repeat(4,1fr)}
+@media(max-width:900px){.cols-3,.cols-4{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:600px){.cols-2,.cols-3,.cols-4{grid-template-columns:1fr}}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px;
+  box-shadow:var(--shadow);transition:transform .25s var(--ease),box-shadow .25s}
+.card:hover{transform:translateY(-4px);box-shadow:var(--shadow-lg)}
+.card .ico{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+  background:var(--grad-soft);color:var(--accent);font-size:22px;margin-bottom:16px}
+.card h3{font-size:21px;font-weight:700;margin-bottom:8px}
+.card p{color:var(--text-2);margin:0}
+/* bento: first cell spans 2 cols on wide screens */
+.bento{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+.bento .card.wide{grid-column:span 2}
+.bento .card.tall{grid-row:span 2}
+@media(max-width:900px){.bento{grid-template-columns:1fr 1fr}.bento .card.wide{grid-column:span 2}}
+@media(max-width:600px){.bento{grid-template-columns:1fr}.bento .card.wide{grid-column:auto}}
+
+/* ===== stats ===== */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:22px;text-align:center}
+@media(max-width:700px){.stats{grid-template-columns:repeat(2,1fr)}}
+.stat .num{font-size:clamp(34px,5vw,56px);font-weight:850;letter-spacing:-.03em}
+.stat .lbl{color:var(--text-3);font-size:14px;margin-top:4px}
+
+/* ===== pricing ===== */
+.price-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:34px 28px;
+  display:flex;flex-direction:column;gap:14px;box-shadow:var(--shadow)}
+.price-card.featured{border:2px solid var(--accent);transform:scale(1.03);box-shadow:var(--shadow-lg)}
+.price-card .amount{font-size:46px;font-weight:850;letter-spacing:-.03em}
+.price-card ul{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:10px}
+.price-card li{display:flex;gap:10px;align-items:flex-start;color:var(--text-2);font-size:14.5px}
+.price-card li::before{content:"✓";color:var(--good);font-weight:800}
+
+/* ===== CTA band ===== */
+.cta{background:var(--grad);color:#fff;border-radius:var(--radius-lg);padding:64px 40px;text-align:center;box-shadow:var(--shadow-lg)}
+.cta h2{font-size:clamp(28px,4vw,44px);font-weight:850;color:#fff}
+.cta p{opacity:.92;font-size:18px;margin:14px 0 28px}
+.cta .btn-ghost{color:#fff;border-color:rgba(255,255,255,.6)}
+.cta .btn-ghost:hover{background:rgba(255,255,255,.12);border-color:#fff}
+
+/* ===== footer ===== */
+.footer{border-top:1px solid var(--border);padding:56px 0 40px;color:var(--text-3)}
+.footer-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:32px}
+@media(max-width:760px){.footer-grid{grid-template-columns:1fr 1fr}}
+.footer h4{font-size:14px;color:var(--text-2);margin-bottom:12px}
+.footer a{display:block;color:var(--text-3);font-size:14px;padding:4px 0}
+.footer a:hover{color:var(--accent)}
+.footer-bottom{margin-top:40px;padding-top:20px;border-top:1px solid var(--border);font-size:13px;text-align:center}
+
+/* ===== reveal on scroll (runtime adds .in) ===== */
+.reveal{opacity:0;transform:translateY(26px);transition:opacity .7s var(--ease),transform .7s var(--ease)}
+.reveal.in{opacity:1;transform:none}

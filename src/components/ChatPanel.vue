@@ -34,6 +34,7 @@ import {
   PanelRightOpen,
   PanelRightClose,
   BookOpen,
+  Layers,
 } from "@lucide/vue";
 import {
   chat,
@@ -50,6 +51,7 @@ import { useSkillsStore } from "../stores/skills";
 import { useArtifactsStore } from "../stores/artifacts";
 import { useChatStore, type Bubble } from "../stores/chat";
 import { useWorkflowsStore } from "../stores/workflows";
+import { useLongTaskStore, detectLongTask } from "../stores/longtask";
 import { useFileDrop } from "../composables/useFileDrop";
 
 function fileName(path: string): string {
@@ -78,6 +80,7 @@ const skillsStore = useSkillsStore();
 const artifactsStore = useArtifactsStore();
 const chatStore = useChatStore();
 const workflowsStore = useWorkflowsStore();
+const longTaskStore = useLongTaskStore();
 
 /** 点击成品文件 chip → 展开右侧抽屉并预览 */
 function openArtifact(path: string) {
@@ -245,6 +248,15 @@ const kbMode = ref(false);
 function toggleKb() {
   kbMode.value = !kbMode.value;
   if (kbMode.value) nextTick(() => inputEl.value?.focus());
+}
+
+// ─────────── 分批长任务（Batch Build）模式开关 ───────────
+// 超长生成（如 60 页 PPT）强制走分批：先规划成清单，每轮只建一小批，断线从清单续跑，
+// 避免单轮输出过长把流式连接拖死。关时也会按「N 页/张/章」启发式自动判定长任务。
+const batchMode = ref(false);
+function toggleBatch() {
+  batchMode.value = !batchMode.value;
+  if (batchMode.value) nextTick(() => inputEl.value?.focus());
 }
 
 // ─────────── 工作流包「使用」→ 填入输入框 ───────────
@@ -458,6 +470,24 @@ async function send() {
 
   input.value = "";
   attachments.value = [];
+
+  // 分批长任务：显式开关 或 启发式判定（「N 页/张/章」且 N ≥ 阈值）→ 走分批编排循环，
+  // 先规划成清单再每轮只建一小批，断线从清单续跑，规避单轮过长把连接拖死。
+  // （目标/毛主席等专用模式优先，不与分批叠加。）
+  const wantBatch =
+    !consult &&
+    !goalMode.value &&
+    !orchestrateMode.value &&
+    (batchMode.value || detectLongTask(prompt));
+  if (wantBatch) {
+    await longTaskStore.runBatchBuild(convId, prompt, display, {
+      permissionMode: permMode.value,
+      skillIds: Array.from(skillsStore.enabledSkills),
+      useKb: kbMode.value || undefined,
+    });
+    return;
+  }
+
   // 交给 chat store：推 user 气泡 + 调后端 + 记录 reqId/sending（按对话 id，多开）
   await chatStore.send(convId, prompt, display, attached, {
     permissionMode: permMode.value,
@@ -471,6 +501,8 @@ async function send() {
 }
 
 async function cancel() {
+  // 先停掉分批编排循环（否则它会在本轮 done 后又发下一批），再取消在飞的子进程
+  if (app.currentConvId) longTaskStore.stop(app.currentConvId);
   await chatStore.cancel(app.currentConvId);
 }
 
@@ -1013,6 +1045,22 @@ async function deleteCurrentConv() {
                   打开后注入完整 KB 结构化 wiki + 双链地图（消耗大量 token）
                   <div class="btn-tooltip-sub">
                     默认关闭以节省上下文；只在需要严格搜索知识库时打开
+                  </div>
+                </div>
+              </div>
+            </button>
+            <button
+              class="toolbar-btn"
+              :class="{ active: batchMode }"
+              @click="toggleBatch"
+            >
+              <Layers :size="14" :stroke-width="1.8" />
+              <span>分批长任务</span>
+              <div class="btn-tooltip">
+                <div class="btn-tooltip-inner">
+                  超长生成（如 60 页 PPT）先规划成清单，每轮只建一小批，断线从断点续跑
+                  <div class="btn-tooltip-sub">
+                    规避单轮输出过长把连接拖死；关时也会按「N 页/张/章」自动判定
                   </div>
                 </div>
               </div>
