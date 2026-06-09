@@ -9,7 +9,7 @@ resolver = "2"
 
 [package]
 name = "polaris-app"
-version = "0.2.17"
+version = "0.2.19"
 description = "Polaris - 本地优先 AI 工作台 (MVP)"
 authors = ["winner3388"]
 edition = "2021"
@@ -32,6 +32,10 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+# 自动更新「防卡死」用：停滞看门狗(time::sleep) + 与下载 future 竞速(select!)。
+# tokio 本就随 tauri 编进来了，这里只是显式开 time/macros 两个 feature；与 Codex 那条
+# 「无 tokio 的 ureq 同步流」互不影响。
+tokio = { version = "1", features = ["time", "macros"] }
 walkdir = "2"
 once_cell = "1"
 directories = "5"
@@ -49,6 +53,9 @@ pdf-extract = "0.10.0" # pdf 文本抽取（纯 Rust，panic 由 convert::guard 
 # Codex(ChatGPT) OAuth Device Code 流程 —— 同步阻塞 HTTP 客户端 (rustls, 无 tokio)。
 # 只用于授权三步: 取设备码 / 轮询 / code 换 token。比 cc-switch 的 reqwest+tokio 轻得多。
 ureq = { version = "2", features = ["json"] }
+# 「聊天机器人」板块「扫码创建机器人」: 把飞书开放平台建应用 URL 编码成二维码 (SVG)。
+# default-features=false → 不拉重型 image crate, 只保留纯 Rust 的 svg 渲染。
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [features]
 default = ["custom-protocol"]

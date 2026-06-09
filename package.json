@@ -1,7 +1,7 @@
 {
   "name": "polaris-app",
   "private": true,
-  "version": "0.2.18",
+  "version": "0.2.19",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -19,6 +19,7 @@
     "@tauri-apps/plugin-process": "^2.0.0",
     "@tauri-apps/plugin-shell": "^2.0.1",
     "@tauri-apps/plugin-updater": "^2.0.0",
+    "@wecom/wecom-aibot-sdk": "^0.1.0",
     "cytoscape": "^3.30.2",
     "cytoscape-fcose": "^2.2.0",
     "marked": "^14.1.3",
