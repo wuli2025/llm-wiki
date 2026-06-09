@@ -378,6 +378,26 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
 
     CHILDREN.lock().insert(req_id.clone(), child);
 
+    // 看门狗(容器/服务端稳健性): 个别 prompt 会让 claude 触发子代理(`claude --print`,
+    // 容器内其 cwd 落在 `/`)对文件系统做无界扫描而长时间不返回 —— 既拖死本轮, 又占住
+    // OAuth 订阅的并发槽拖垮后续消息。超时仍未结束则杀掉整个进程组(claude + 子代理),
+    // claude stdout 随之关闭 → 下面的 reader 线程照常 emit error+done, 系统自愈、释放并发槽。
+    // 由 POLARIS_CHAT_TIMEOUT_SECS 控制: 桌面默认 0=不启用(保持原行为), 容器设为 180。
+    let watchdog_timeout = std::env::var("POLARIS_CHAT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    if watchdog_timeout > 0 {
+        let wd_req = req_id.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(watchdog_timeout));
+            let pid = CHILDREN.lock().get(&wd_req).map(|c| c.id());
+            if let Some(pid) = pid {
+                kill_tree(pid); // 杀进程组: 一并带走 cwd=/ 的子代理
+            }
+        });
+    }
+
     // stderr 读线程: 任何 stderr 行都 emit 为 error 事件; 累积起来给 wait 用
     let app_err = app.clone();
     let req_err = req_id.clone();

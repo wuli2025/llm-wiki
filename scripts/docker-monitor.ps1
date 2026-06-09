@@ -35,9 +35,9 @@ while ((Get-Date) -lt $deadline) {
 
     # 2) 真实对话（验证 spawn→stream→落库→进程回收）
     $before = (Inv "conv_get_messages" @{ conversationId = $cid } | Where-Object { $_.role -eq "assistant" }).Count
-    $reqId = Inv "chat_send" @{ args = @{ prompt = "只回复两个字：在线"; permissionMode = "auto_all"; conversationId = $cid } }
+    $reqId = Inv "chat_send" @{ args = @{ prompt = "请只回复:第${cycle}次心跳OK"; permissionMode = "auto_all"; conversationId = $cid } }
     $replied = $false
-    for ($i = 0; $i -lt 40; $i++) {
+    for ($i = 0; $i -lt 60; $i++) {
       Start-Sleep -Seconds 3
       $after = @(Inv "conv_get_messages" @{ conversationId = $cid } | Where-Object { $_.role -eq "assistant" })
       if ($after.Count -gt $before) { $replied = $true; break }

@@ -19,6 +19,9 @@ services:
       # 2) 访问口令（不设则对所有可达网络开放，公网部署务必设置）
       POLARIS_AUTH_TOKEN: "${POLARIS_AUTH_TOKEN:-}"
       POLARIS_PORT: "8080"
+      # 3) 单轮对话看门狗：超时(秒)未结束则杀掉 claude 进程组，防个别请求无界挂死、
+      #    占住订阅并发槽拖垮后续。0=关闭，容器默认 180s。
+      POLARIS_CHAT_TIMEOUT_SECS: "${POLARIS_CHAT_TIMEOUT_SECS:-180}"
     volumes:
       # 数据持久化（KB / 对话历史 / 项目 / 产物 / 技能）：容器重建不丢
       - polaris-data:/root/Polaris
