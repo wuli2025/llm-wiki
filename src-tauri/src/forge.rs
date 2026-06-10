@@ -286,8 +286,15 @@ pub fn forge_screenshot(
     out: String,
     width: Option<u32>,
     height: Option<u32>,
+    scale: Option<u32>,
 ) -> Result<Value, String> {
-    crate::forge_pptx::screenshot(&url, &out, width.unwrap_or(1920), height.unwrap_or(1080))
+    crate::forge_pptx::screenshot(
+        &url,
+        &out,
+        width.unwrap_or(1920),
+        height.unwrap_or(1080),
+        scale.unwrap_or(2), // 默认 2x 高清
+    )
 }
 
 /// 汇总当前环境出片的拦路项(给 UI 红灯直接展示)。

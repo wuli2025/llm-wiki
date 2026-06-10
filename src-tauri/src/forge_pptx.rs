@@ -228,7 +228,13 @@ fn theme_xml() -> String {
 
 /// 用 chromium headless CLI 给一个 URL/本地 HTML 截图成 PNG。跨平台:容器走镜像 chromium,
 /// win/mac 走 preflight 找到的 Chrome/Edge。这是 Forge capture 的确定性原始能力。
-pub fn screenshot(url_or_file: &str, out_png: &str, width: u32, height: u32) -> Result<Value, String> {
+pub fn screenshot(
+    url_or_file: &str,
+    out_png: &str,
+    width: u32,
+    height: u32,
+    device_scale: u32,
+) -> Result<Value, String> {
     let chromium = crate::forge::find_chromium()
         .ok_or_else(|| "未找到 chromium/chrome：Docker 需 full 镜像，桌面需装 Chrome/Edge".to_string())?;
     // 本地文件转 file:// URL。
@@ -242,17 +248,23 @@ pub fn screenshot(url_or_file: &str, out_png: &str, width: u32, height: u32) -> 
             .map_err(|e| format!("找不到文件 {url_or_file}: {e}"))?;
         format!("file://{}", abs.to_string_lossy().replace('\\', "/"))
     };
+    let mut args: Vec<String> = vec![
+        "--headless=new".into(),
+        "--no-sandbox".into(),
+        "--disable-dev-shm-usage".into(),
+        "--disable-gpu".into(),
+        "--hide-scrollbars".into(),
+        format!("--screenshot={out_png}"),
+        format!("--window-size={width},{height}"),
+    ];
+    if device_scale > 1 {
+        // 2x 高清(投影放大不糊字,Slidev/Marp 默认 deviceScaleFactor=2)。截图像素 = 窗口 × scale,
+        // 版面逻辑尺寸不变(pptx 版面坐标按逻辑 px 算,见 build_pptx 用宽高比),只是更清晰。
+        args.push(format!("--force-device-scale-factor={device_scale}"));
+    }
+    args.push(target);
     let status = std::process::Command::new(&chromium)
-        .args([
-            "--headless=new",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--hide-scrollbars",
-            &format!("--screenshot={out_png}"),
-            &format!("--window-size={width},{height}"),
-            &target,
-        ])
+        .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -261,7 +273,7 @@ pub fn screenshot(url_or_file: &str, out_png: &str, width: u32, height: u32) -> 
     if !status.success() || !Path::new(out_png).is_file() {
         return Err("chromium 截图失败(未生成 PNG)".into());
     }
-    Ok(json!({ "ok": true, "out": out_png, "chromium": chromium }))
+    Ok(json!({ "ok": true, "out": out_png, "chromium": chromium, "device_scale": device_scale }))
 }
 
 /// 数 deck.html 里的幻灯页数:统计 class 列表含独立 token `slide` 的元素(排除 slide-number 等)。
@@ -295,6 +307,7 @@ pub fn capture_slides(
     deck: &str,
     width: u32,
     height: u32,
+    device_scale: u32,
     slides_override: Option<usize>,
 ) -> Result<(std::path::PathBuf, Vec<String>), String> {
     let is_http = deck.starts_with("http://") || deck.starts_with("https://");
@@ -321,7 +334,7 @@ pub fn capture_slides(
     for i in 1..=n {
         let png = frames.join(format!("slide-{i}.png"));
         let url = format!("{file_base}?export=1#/{i}");
-        screenshot(&url, &png.to_string_lossy(), width, height)
+        screenshot(&url, &png.to_string_lossy(), width, height, device_scale)
             .map_err(|e| format!("第 {i} 页截图失败: {e}"))?;
         pngs.push(png.to_string_lossy().to_string());
     }
@@ -336,7 +349,8 @@ pub fn render_deck_to_pptx(
     height: u32,
     slides_override: Option<usize>,
 ) -> Result<Value, String> {
-    let (frames, pngs) = capture_slides(deck, width, height, slides_override)?;
+    // PPT 默认 2x 高清(投影/全屏放大不糊字;架构文档§06①)。
+    let (frames, pngs) = capture_slides(deck, width, height, 2, slides_override)?;
     let n = pngs.len();
     let r = build_pptx(&pngs, out_pptx);
     let _ = std::fs::remove_dir_all(&frames);

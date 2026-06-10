@@ -33,7 +33,9 @@ pub fn render_deck_to_video(
 ) -> Result<Value, String> {
     let secs = if seconds_per_slide > 0.0 { seconds_per_slide } else { 3.0 };
     let fps = if fps == 0 { 30 } else { fps };
-    let (frames, pngs) = crate::forge_pptx::capture_slides(deck, width, height, slides_override)?;
+    // 视频用 1x(帧分辨率 = 目标 width×height,不膨胀编码量);高清交给分辨率参数控制。
+    let (frames, pngs) =
+        crate::forge_pptx::capture_slides(deck, width, height, 1, slides_override)?;
     let n = pngs.len();
 
     // 配音解析:现成音频 > narration 文本走 TTS > 无。

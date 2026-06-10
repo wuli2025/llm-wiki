@@ -502,6 +502,7 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             req_str(a, "out")?,
             opt_usize(a, "width").map(|n| n as u32),
             opt_usize(a, "height").map(|n| n as u32),
+            opt_usize(a, "scale").map(|n| n as u32),
         ),
         "forge_deck_to_pptx" => forge::forge_deck_to_pptx(
             req_str(a, "deck")?,
