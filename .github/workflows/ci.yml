@@ -38,6 +38,29 @@ jobs:
         run: cargo clippy --workspace --all-targets
         continue-on-error: true
 
+  # Forge 跨平台引擎(PPT/视频/TTS)三系统矩阵 —— PRD §08 的「windows+macos+docker 三 job」。
+  # 用 server feature(无 Tauri 的纯引擎，三平台同一份代码)跑 forge 单测:
+  # macOS runner 上跑通 = 真·macOS 验证(无需 Mac 硬件)。
+  forge-matrix:
+    name: Forge engine (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # 引擎编译(server feature) + forge 单测(png/pptx 结构/数页/hex 解码) —— 跨平台一致性守门
+      - name: Forge engine build + tests
+        run: cargo test --no-default-features --features server --lib forge
+
   frontend:
     name: Frontend (type-check + build)
     runs-on: ubuntu-latest
