@@ -307,10 +307,28 @@ pub fn capture_slides(
     device_scale: u32,
     slides_override: Option<usize>,
 ) -> Result<(std::path::PathBuf, Vec<String>), String> {
+    // 上限护栏:畸形 deck/参数别 spawn 成千上万个 chromium 进程拖垮机器(让模块再也不会有问题)。
+    const MAX_SLIDES: usize = 300;
+    const MAX_DECK_BYTES: u64 = 50 * 1024 * 1024;
+    if let Some(n) = slides_override {
+        if n > MAX_SLIDES {
+            return Err(format!("指定页数 {n} 超过上限 {MAX_SLIDES}(疑似参数错误)"));
+        }
+    }
     let is_http = deck.starts_with("http://") || deck.starts_with("https://");
     let file_base = if is_http {
         deck.to_string()
     } else {
+        // deck 文件过大护栏(防超大 HTML 读爆内存)。
+        if let Ok(meta) = std::fs::metadata(deck) {
+            if meta.len() > MAX_DECK_BYTES {
+                return Err(format!(
+                    "deck 文件过大({} 字节 > {}MB 上限)",
+                    meta.len(),
+                    MAX_DECK_BYTES / 1024 / 1024
+                ));
+            }
+        }
         let abs = std::fs::canonicalize(deck).map_err(|e| format!("找不到 deck {deck}: {e}"))?;
         format!("file://{}", abs.to_string_lossy().replace('\\', "/"))
     };
@@ -324,6 +342,11 @@ pub fn capture_slides(
             }
         }
     };
+    if n > MAX_SLIDES {
+        return Err(format!(
+            "幻灯页数 {n} 超过上限 {MAX_SLIDES}(疑似畸形 deck)"
+        ));
+    }
     let frames = std::env::temp_dir().join(format!("forge_deck_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&frames);
     std::fs::create_dir_all(&frames).map_err(|e| format!("建临时帧目录失败: {e}"))?;
@@ -395,6 +418,15 @@ mod tests {
             assert!(names.iter().any(|n| n == need), "缺部件 {need}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capture_slides_rejects_absurd_slide_count() {
+        // 指定离谱页数应立刻被上限拦下(在 spawn 任何 chromium 之前),返回明确错误。
+        let r = capture_slides("does-not-exist.html", 1280, 720, 1, Some(99_999));
+        assert!(r.is_err());
+        let e = r.unwrap_err();
+        assert!(e.contains("上限"), "应是上限错误,实际: {e}");
     }
 
     #[test]
