@@ -328,6 +328,7 @@ pub fn forge_deck_to_video(
     slides: Option<usize>,
     audio: Option<String>,
     narration: Option<String>,
+    transition: Option<f64>,
 ) -> Result<Value, String> {
     crate::forge_video::render_deck_to_video(
         &deck,
@@ -339,6 +340,7 @@ pub fn forge_deck_to_video(
         slides,
         audio,
         narration,
+        transition,
     )
 }
 

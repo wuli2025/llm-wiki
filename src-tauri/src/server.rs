@@ -522,6 +522,7 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             opt_usize(a, "slides"),
             opt_str(a, "audio"),
             opt_str(a, "narration"),
+            a.get("transition").and_then(|v| v.as_f64()),
         ),
         "forge_tts" => forge::forge_tts(
             req_str(a, "text")?,
