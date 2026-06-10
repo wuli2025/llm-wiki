@@ -424,6 +424,12 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             opt_str(a, "conversationId"),
             vec_str(a, "paths"),
         )),
+        "chat_attach_image" => ok(chat::chat_attach_image(
+            opt_str(a, "conversationId"),
+            req_str(a, "name")?,
+            req_str(a, "dataBase64")?,
+        )?),
+        "open_url" => ok(chat::open_url(req_str(a, "url")?)?),
         "artifact_read" => ok(chat::artifact_read(req_str(a, "path")?)?),
         "artifact_write" => ok(chat::artifact_write(
             req_str(a, "path")?,
@@ -524,6 +530,15 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             opt_str(a, "narration"),
             a.get("transition").and_then(|v| v.as_f64()),
             a.get("motion").and_then(|v| v.as_bool()),
+        ),
+        "forge_deck_fx_video" => forge::forge_deck_fx_video(
+            req_str(a, "deck")?,
+            req_str(a, "out")?,
+            opt_usize(a, "fps").map(|n| n as u32),
+            a.get("durationMs").and_then(|v| v.as_u64()),
+            opt_usize(a, "width").map(|n| n as u32),
+            opt_usize(a, "height").map(|n| n as u32),
+            opt_usize(a, "slide"),
         ),
         "forge_tts" => forge::forge_tts(
             req_str(a, "text")?,

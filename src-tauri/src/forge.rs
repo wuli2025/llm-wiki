@@ -346,6 +346,28 @@ pub fn forge_deck_to_video(
     )
 }
 
+/// deck 某页 CSS 动画 → 逐帧真动画视频(__fx.seek + chromium 逐帧截图 + ffmpeg,无需 chromiumoxide)。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn forge_deck_fx_video(
+    deck: String,
+    out: String,
+    fps: Option<u32>,
+    duration_ms: Option<u64>,
+    width: Option<u32>,
+    height: Option<u32>,
+    slide: Option<usize>,
+) -> Result<Value, String> {
+    crate::forge_video::render_deck_fx_video(
+        &deck,
+        &out,
+        fps.unwrap_or(15),
+        duration_ms.unwrap_or(2000),
+        width.unwrap_or(1280),
+        height.unwrap_or(720),
+        slide.unwrap_or(1),
+    )
+}
+
 /// 文本 → mp3 配音(MiniMax T2A,纯 Rust)。无 key 时返回明确错误。
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn forge_tts(

@@ -10,6 +10,115 @@
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static FX_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// deck 某页的 CSS 动画 → 逐帧真动画视频。用 `?fx_t=N` + chromium 逐帧截图(__fx.seek 冻结到 N),
+/// 再 ffmpeg 编码帧序列。**无需 chromiumoxide**(每帧一个 chromium CLI 进程,慢但可行;
+/// chromiumoxide 持久浏览器只是提速)。这是 per-frame fx 视频的「最后一环」,用 CLI 串起已有零件。
+pub fn render_deck_fx_video(
+    deck: &str,
+    out_mp4: &str,
+    fps: u32,
+    duration_ms: u64,
+    width: u32,
+    height: u32,
+    slide: usize,
+) -> Result<Value, String> {
+    let fps = fps.clamp(1, 60);
+    let duration_ms = duration_ms.clamp(200, 30_000);
+    let n_frames = ((duration_ms * fps as u64) / 1000).max(1);
+    if n_frames > 900 {
+        return Err(format!("帧数 {n_frames} 过多(上限 900;降 fps 或时长)"));
+    }
+    let chromium = crate::forge::find_chromium()
+        .ok_or_else(|| "未找到 chromium/chrome".to_string())?;
+    let is_http = deck.starts_with("http://") || deck.starts_with("https://");
+    let file_base = if is_http {
+        deck.to_string()
+    } else {
+        let abs = std::fs::canonicalize(deck).map_err(|e| format!("找不到 deck {deck}: {e}"))?;
+        format!("file://{}", abs.to_string_lossy().replace('\\', "/"))
+    };
+    let seq = FX_SEQ.fetch_add(1, Ordering::Relaxed);
+    let frames = std::env::temp_dir().join(format!("forge_fx_{}_{}", std::process::id(), seq));
+    let _ = std::fs::remove_dir_all(&frames);
+    std::fs::create_dir_all(&frames).map_err(|e| format!("建帧目录失败: {e}"))?;
+    for f in 0..n_frames {
+        let t = f * 1000 / fps as u64;
+        let png = frames.join(format!("f{f:05}.png"));
+        // ?fx_t=N → runtime.js 把动画 seek 到 N ms;--virtual-time-budget 让 seek(load+20ms)先于截图。
+        let url = format!("{file_base}?export=1&fx_t={t}#/{slide}");
+        let mut cmd = Command::new(&chromium);
+        cmd.args([
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--hide-scrollbars",
+            &format!("--screenshot={}", png.to_string_lossy()),
+            &format!("--window-size={width},{height}"),
+            "--virtual-time-budget=800",
+            &url,
+        ]);
+        if let Err(e) = crate::forge::run_with_timeout(cmd, 60, &format!("fx 第{f}帧")) {
+            let _ = std::fs::remove_dir_all(&frames);
+            return Err(format!("第 {f}/{n_frames} 帧截图失败: {e}"));
+        }
+        if !png.is_file() {
+            let _ = std::fs::remove_dir_all(&frames);
+            return Err(format!("第 {f} 帧未生成 PNG"));
+        }
+    }
+    let r = encode_frame_sequence(&frames, out_mp4, fps);
+    let _ = std::fs::remove_dir_all(&frames);
+    r?;
+    Ok(json!({
+        "ok": true, "out": out_mp4, "frames": n_frames, "fps": fps,
+        "duration_ms": duration_ms, "engine": "per-frame fx (chromium CLI)"
+    }))
+}
+
+/// ffmpeg 把 f%05d.png 帧序列编码成 mp4(每帧 1/fps),BT.709。
+fn encode_frame_sequence(frames_dir: &Path, out_mp4: &str, fps: u32) -> Result<(), String> {
+    if let Some(parent) = Path::new(out_mp4).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    let pattern = frames_dir.join("f%05d.png");
+    let mut cmd = Command::new(ffmpeg_bin());
+    cmd.args([
+        "-y",
+        "-framerate",
+        &fps.to_string(),
+        "-i",
+        &pattern.to_string_lossy(),
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2:out_color_matrix=bt709,format=yuv420p",
+        "-r",
+        &fps.to_string(),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-movflags",
+        "+faststart",
+        out_mp4,
+    ]);
+    crate::forge::run_with_timeout(cmd, 600, "ffmpeg fx 帧序列编码")?;
+    if !Path::new(out_mp4).is_file() {
+        return Err("fx 帧序列编码失败(未生成 mp4)".into());
+    }
+    Ok(())
+}
 
 fn ffmpeg_bin() -> String {
     std::env::var("POLARIS_FFMPEG")

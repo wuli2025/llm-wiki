@@ -21,6 +21,9 @@ pub mod wecom;
 // 自动更新依赖 Tauri updater/restart/package_info → 桌面专属（Docker 用 docker pull 更新）。
 #[cfg(feature = "desktop")]
 pub mod updater;
+// 原生标题栏染色（随主题切换，仅桌面窗口有标题栏）
+#[cfg(feature = "desktop")]
+pub mod titlebar;
 
 // ── Docker(server) 外壳：shim AppHandle + axum HTTP/WS 服务 ──
 #[cfg(feature = "server")]
@@ -158,6 +161,8 @@ pub fn run() {
             chat::chat_send,
             chat::chat_cancel,
             chat::chat_attach_files,
+            chat::chat_attach_image,
+            chat::open_url,
             chat::chat_build_manifest,
             chat::artifact_read,
             chat::artifact_write,
@@ -199,6 +204,7 @@ pub fn run() {
             forge::forge_screenshot,
             forge::forge_deck_to_pptx,
             forge::forge_deck_to_video,
+            forge::forge_deck_fx_video,
             forge::forge_tts,
             // 环境医生 (环境监测 + 配置安装)
             doctor::env_check,
@@ -213,6 +219,8 @@ pub fn run() {
             updater::updater_get_state,
             updater::updater_check,
             updater::updater_apply,
+            // 原生标题栏染色（主题切换联动）
+            titlebar::set_titlebar_color,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Polaris application")
