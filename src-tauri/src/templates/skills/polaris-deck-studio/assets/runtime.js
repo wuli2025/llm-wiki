@@ -142,5 +142,38 @@
 
     render();
     window.__deck = { total: total, current: function () { return idx; }, go: go, next: next, prev: prev };
+
+    // ---- 隐形文本层提取(?extract=1):算活动页文本块的包围盒,写进 <script id=polaris-text-rects>。
+    //      forge 用 chromium --dump-dom 取走 → build_pptx 叠 alpha=0 文本框 = 图片精确还可搜索。
+    if (/[?&]extract=1/.test(location.search)) {
+      var TEXT_SEL = "h1,h2,h3,h4,h5,h6,p,li,blockquote,td,th,figcaption,.kicker,.eyebrow,.pill,.label,.title,.subtitle";
+      var extractRects = function () {
+        var active = slides[idx];
+        if (!active) return;
+        var nodes = Array.prototype.slice.call(active.querySelectorAll(TEXT_SEL));
+        var out = [];
+        nodes.forEach(function (el) {
+          var t = (el.textContent || "").trim();
+          if (!t) return;
+          if (el.querySelector(TEXT_SEL)) return; // 取叶子文本块,避免嵌套重复
+          var r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return;
+          var cs = window.getComputedStyle(el);
+          out.push({
+            text: t.slice(0, 2000),
+            x: Math.round(r.left), y: Math.round(r.top),
+            w: Math.round(r.width), h: Math.round(r.height),
+            size: Math.round(parseFloat(cs.fontSize) || 16),
+            bold: (parseInt(cs.fontWeight, 10) || 400) >= 600
+          });
+        });
+        var s = document.getElementById("polaris-text-rects");
+        if (!s) { s = document.createElement("script"); s.type = "application/json"; s.id = "polaris-text-rects"; document.body.appendChild(s); }
+        s.textContent = JSON.stringify(out);
+      };
+      // 等字体/图片布局稳定后抽取。
+      if (document.readyState === "complete") setTimeout(extractRects, 60);
+      else window.addEventListener("load", function () { setTimeout(extractRects, 60); });
+    }
   });
 })();
