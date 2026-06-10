@@ -134,8 +134,11 @@ fn encode_images(
         "veryfast".into(),
     ]);
     if audio.is_some() {
-        // 配音:AAC 音轨,-shortest 让成片随较短流收尾(避免拖尾黑屏/静音)。
+        // 配音:EBU R128 响度归一到 -16 LUFS(口播惯例,成片「专业感」来源——架构文档 §06)+
+        // AAC 音轨;-shortest 让成片随较短流收尾(避免拖尾黑屏/静音)。
         args.extend([
+            "-af".into(),
+            "loudnorm=I=-16:TP=-1.5:LRA=11".into(),
             "-c:a".into(),
             "aac".into(),
             "-b:a".into(),
