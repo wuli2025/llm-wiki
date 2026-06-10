@@ -10,7 +10,11 @@
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use zip::write::SimpleFileOptions;
+
+/// 进程内单调计数器:给每次 capture_slides 唯一临时目录,防多线程并发渲染互相覆盖帧。
+static CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const NS_CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 const NS_REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -347,7 +351,9 @@ pub fn capture_slides(
             "幻灯页数 {n} 超过上限 {MAX_SLIDES}(疑似畸形 deck)"
         ));
     }
-    let frames = std::env::temp_dir().join(format!("forge_deck_{}", std::process::id()));
+    // pid + 进程内唯一序号:并发的两个渲染各用独立目录,不会互相覆盖帧(并发安全)。
+    let seq = CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let frames = std::env::temp_dir().join(format!("forge_deck_{}_{}", std::process::id(), seq));
     let _ = std::fs::remove_dir_all(&frames);
     std::fs::create_dir_all(&frames).map_err(|e| format!("建临时帧目录失败: {e}"))?;
     let mut pngs: Vec<String> = Vec::new();
