@@ -157,14 +157,11 @@ fn encode_images(
     }
     args.extend(["-movflags".into(), "+faststart".into(), out_mp4.to_string()]);
 
-    let status = Command::new(ffmpeg_bin())
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("启动 ffmpeg 失败(检查镜像是否 full / 系统是否装 ffmpeg): {e}"))?;
-    if !status.success() || !Path::new(out_mp4).is_file() {
+    let mut cmd = Command::new(ffmpeg_bin());
+    cmd.args(&args);
+    // 600s 超时:幻灯类低运动编码很快,纯 CPU 多页也够;挂死则杀掉防永久阻塞。
+    crate::forge::run_with_timeout(cmd, 600, "ffmpeg 编码")?;
+    if !Path::new(out_mp4).is_file() {
         return Err("ffmpeg 编码失败(未生成 mp4)".into());
     }
     Ok(())

@@ -263,14 +263,11 @@ pub fn screenshot(
         args.push(format!("--force-device-scale-factor={device_scale}"));
     }
     args.push(target);
-    let status = std::process::Command::new(&chromium)
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("启动 chromium 失败: {e}"))?;
-    if !status.success() || !Path::new(out_png).is_file() {
+    let mut cmd = std::process::Command::new(&chromium);
+    cmd.args(&args);
+    // 90s 超时:单页截图远用不到这么久,挂死则杀掉防永久阻塞。
+    crate::forge::run_with_timeout(cmd, 90, "chromium 截图")?;
+    if !Path::new(out_png).is_file() {
         return Err("chromium 截图失败(未生成 PNG)".into());
     }
     Ok(json!({ "ok": true, "out": out_png, "chromium": chromium, "device_scale": device_scale }))

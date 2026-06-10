@@ -12,6 +12,40 @@ use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
 
+/// 跑外部命令并设超时:超时则杀进程树返回 Err,防 chromium/ffmpeg/say 挂死永久阻塞整个请求
+/// (「让模块再也不会有问题」的硬化——看门狗只管 claude,管不到这些 forge 子进程)。
+/// 调用方传入已配好 args 的 Command(stdio 由本函数置 null)。成功且退出码 0 → Ok。
+pub fn run_with_timeout(mut cmd: std::process::Command, secs: u64, what: &str) -> Result<(), String> {
+    use std::time::{Duration, Instant};
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{what} 启动失败: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("{what} 失败(退出码 {:?})", status.code()))
+                };
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("{what} 超时({secs}s)被终止"));
+                }
+                std::thread::sleep(Duration::from_millis(120));
+            }
+            Err(e) => return Err(format!("{what} 等待失败: {e}")),
+        }
+    }
+}
+
 /// 当前平台标识(给前端按平台展示对应阶梯)。
 pub fn platform() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -310,4 +344,44 @@ fn preflight_blockers(plat: &str, chromium: &Option<String>, ffmpeg: bool, cjk: 
         b.push("缺 ffmpeg：出视频需 full 镜像".to_string());
     }
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 验证 run_with_timeout 真能在超时后杀掉挂死进程并快速返回(让模块再也不会有问题的核心)。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn timeout_kills_hanging_process() {
+        use std::process::Command;
+        use std::time::Instant;
+        // 成功路径:立刻退出 0。
+        let mut ok = Command::new("cmd");
+        ok.args(["/c", "exit", "0"]);
+        assert!(run_with_timeout(ok, 5, "test-ok").is_ok());
+        // 超时路径:ping -n 20(~19s)应被 1s 超时杀掉,且很快返回。
+        let mut hang = Command::new("cmd");
+        hang.args(["/c", "ping", "-n", "20", "127.0.0.1"]);
+        let t = Instant::now();
+        let r = run_with_timeout(hang, 1, "test-hang");
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("超时"));
+        assert!(t.elapsed().as_secs() < 5, "超时后应快速返回,而非等满 19s");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_hanging_process() {
+        use std::process::Command;
+        use std::time::Instant;
+        assert!(run_with_timeout(Command::new("true"), 5, "test-ok").is_ok());
+        let mut hang = Command::new("sleep");
+        hang.arg("20");
+        let t = Instant::now();
+        let r = run_with_timeout(hang, 1, "test-hang");
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("超时"));
+        assert!(t.elapsed().as_secs() < 5);
+    }
 }

@@ -93,13 +93,10 @@ fn synth_macos_say(text: &str, out: &str) -> Result<Value, String> {
     }
     let m4a_str = m4a.to_string_lossy().to_string();
     // 分次 .arg() 避免数组元素类型不齐;-o 指定输出文件,最后是要念的文本。
-    let status = std::process::Command::new("say")
-        .arg("-o")
-        .arg(&m4a_str)
-        .arg(text)
-        .status()
-        .map_err(|e| format!("say 启动失败: {e}"))?;
-    if !status.success() || !m4a.is_file() {
+    let mut cmd = std::process::Command::new("say");
+    cmd.arg("-o").arg(&m4a_str).arg(text);
+    crate::forge::run_with_timeout(cmd, 60, "macOS say")?; // 60s 超时防挂死
+    if !m4a.is_file() {
         return Err("macOS say 合成失败".into());
     }
     let bytes = std::fs::metadata(&m4a).map(|m| m.len()).unwrap_or(0);
