@@ -68,6 +68,12 @@ pub fn build_pptx(image_paths: &[String], out_path: &str) -> Result<Value, Strin
     let cx: u64 = (cy as f64 * ratio).round() as u64;
     let n = images.len();
 
+    // 自动建父目录:out 路径的目录不存在时也不失败(鲁棒 + 用户省事)。
+    if let Some(parent) = Path::new(out_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
     let file = std::fs::File::create(out_path).map_err(|e| format!("创建 {out_path} 失败: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
     let opt = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -267,6 +273,12 @@ pub fn screenshot(
         args.push(format!("--force-device-scale-factor={device_scale}"));
     }
     args.push(target);
+    // 自动建 out 父目录,免得 chromium 因目录不存在而失败。
+    if let Some(parent) = Path::new(out_png).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
     let mut cmd = std::process::Command::new(&chromium);
     cmd.args(&args);
     // 90s 超时:单页截图远用不到这么久,挂死则杀掉防永久阻塞。
@@ -424,6 +436,21 @@ mod tests {
             assert!(names.iter().any(|n| n == need), "缺部件 {need}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_pptx_creates_missing_parent_dirs() {
+        // out 路径父目录不存在时应自动创建并成功,而非「目录不存在」失败。
+        let base = std::env::temp_dir().join("polaris_forge_parent_test");
+        let _ = std::fs::remove_dir_all(&base);
+        let img = base.join("a.png");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&img, b"x").unwrap();
+        let out = base.join("deep/nested/dir/out.pptx"); // deep/nested/dir 不存在
+        let r = build_pptx(&[img.to_string_lossy().into()], &out.to_string_lossy());
+        assert!(r.is_ok(), "应自动建父目录并成功: {r:?}");
+        assert!(out.is_file());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

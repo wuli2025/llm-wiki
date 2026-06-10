@@ -157,6 +157,12 @@ fn encode_images(
     }
     args.extend(["-movflags".into(), "+faststart".into(), out_mp4.to_string()]);
 
+    // 自动建 out 父目录,免得 ffmpeg 因目录不存在失败。
+    if let Some(parent) = Path::new(out_mp4).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
     let mut cmd = Command::new(ffmpeg_bin());
     cmd.args(&args);
     // 600s 超时:幻灯类低运动编码很快,纯 CPU 多页也够;挂死则杀掉防永久阻塞。
