@@ -701,12 +701,14 @@ fn handle_stream_event(
                                 .get("name")
                                 .and_then(|x| x.as_str())
                                 .unwrap_or("unknown");
+                            // 输入摘要(命令/路径/检索词等一行) → 前端工具 pill 可展开看详情
+                            let summary = block.get("input").and_then(tool_input_summary);
                             emit_event(
                                 app,
                                 ChatStreamEvent {
                                     req_id: req_id.into(),
                                     kind: "tool".into(),
-                                    text: None,
+                                    text: summary,
                                     tool: Some(name.to_string()),
                                     conversation_id: conv_id.map(|s| s.to_string()),
                                 },
@@ -1883,6 +1885,120 @@ pub fn chat_attach_files(
         push_attach(&dir, &src, &mut out);
     }
     out
+}
+
+/// 剪贴板贴图:base64 解码后落到会话 uploads 目录(粘贴截图 → 附件管线)。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn chat_attach_image(
+    conversation_id: Option<String>,
+    name: String,
+    data_base64: String,
+) -> Result<AttachedFile, String> {
+    const MAX_BYTES: usize = 20 * 1024 * 1024;
+    let bytes = b64_decode(&data_base64).ok_or("图片数据解析失败")?;
+    if bytes.is_empty() {
+        return Err("空图片".into());
+    }
+    if bytes.len() > MAX_BYTES {
+        return Err("图片超过 20MB 上限".into());
+    }
+    let dir = conversation_dir(conversation_id.as_deref()).join("uploads");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // 只接受简单文件名,杜绝路径穿越
+    let safe: String = name
+        .chars()
+        .filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+    let safe = if safe.trim().is_empty() { "pasted.png".to_string() } else { safe };
+    let dst = unique_upload_path(&dir, &safe);
+    std::fs::write(&dst, &bytes).map_err(|e| e.to_string())?;
+    Ok(AttachedFile {
+        name: file_name_of(&dst),
+        path: dst.to_string_lossy().replace('\\', "/"),
+        kind: "image".into(),
+        size: bytes.len() as u64,
+        ok: true,
+        error: None,
+    })
+}
+
+/// 标准 base64 解码(零新依赖;容忍换行,支持 padding)。
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits = 0u32;
+    for &c in s.as_bytes() {
+        if c == b'\n' || c == b'\r' || c == b'=' {
+            continue;
+        }
+        let v = val(c)?;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// 在系统默认浏览器打开外部链接(回复正文里的 http/https 链接)。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn open_url(url: String) -> Result<(), String> {
+    let u = url.trim();
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        return Err("仅允许打开 http/https 链接".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // rundll32 不解析 &,URL 原样透传(cmd start 会在 & 处截断)
+        Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", u])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(u).spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open").arg(u).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 从 tool_use 的 input JSON 里提一行人能看懂的摘要(命令/文件路径/检索词)。
+fn tool_input_summary(input: &serde_json::Value) -> Option<String> {
+    const KEYS: [&str; 10] = [
+        "command", "file_path", "notebook_path", "pattern", "query", "url",
+        "description", "prompt", "path", "skill",
+    ];
+    for k in KEYS {
+        if let Some(s) = input.get(k).and_then(|x| x.as_str()) {
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            let one_line = s.lines().next().unwrap_or(s);
+            let mut out: String = one_line.chars().take(120).collect();
+            if one_line.chars().count() > 120 || s.lines().count() > 1 {
+                out.push('…');
+            }
+            return Some(out);
+        }
+    }
+    None
 }
 
 fn file_name_of(p: &Path) -> String {
