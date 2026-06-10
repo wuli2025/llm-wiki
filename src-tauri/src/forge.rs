@@ -16,33 +16,71 @@ use std::process::Command;
 /// (「让模块再也不会有问题」的硬化——看门狗只管 claude,管不到这些 forge 子进程)。
 /// 调用方传入已配好 args 的 Command(stdio 由本函数置 null)。成功且退出码 0 → Ok。
 pub fn run_with_timeout(mut cmd: std::process::Command, secs: u64, what: &str) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+    // 捕获 stderr(失败时带上,便于诊断「缺库/编解码器没装/字体缺失」等),stdout 仍丢弃。
     let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("{what} 启动失败: {e}"))?;
-    let deadline = Instant::now() + Duration::from_secs(secs);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err(format!("{what} 失败(退出码 {:?})", status.code()))
-                };
+    // 后台线程边读边截断 stderr:既排空管道防进程写满阻塞,又只留尾部 ~4KB 防 OOM。
+    let errbuf = Arc::new(Mutex::new(String::new()));
+    let reader_handle = child.stderr.take().map(|se| {
+        let buf = errbuf.clone();
+        std::thread::spawn(move || {
+            let mut r = BufReader::new(se);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match r.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let mut b = buf.lock().unwrap();
+                        b.push_str(&line);
+                        if b.len() > 8000 {
+                            let cut = b.len() - 4000;
+                            *b = b[cut..].to_string();
+                        }
+                    }
+                }
             }
+        })
+    });
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    // 循环只决定结局,把 join/格式化挪到循环外做一次,避免 reader_handle 在循环里被 move。
+    let outcome: Result<std::process::ExitStatus, String> = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("{what} 超时({secs}s)被终止"));
+                    let _ = child.wait(); // kill 后管道关闭,reader 线程随之结束
+                    break Err(format!("{what} 超时({secs}s)被终止"));
                 }
                 std::thread::sleep(Duration::from_millis(120));
             }
-            Err(e) => return Err(format!("{what} 等待失败: {e}")),
+            Err(e) => break Err(format!("{what} 等待失败: {e}")),
         }
+    };
+    // 不 join reader 线程:被杀进程的子进程(如 chromium 的子代理/cmd 的 ping)可能仍持 stderr
+    // 管道,join 会阻塞到它们退出。给 50ms 让常规 stderr 排空后读取(诊断 best-effort,绝不阻塞)。
+    std::thread::sleep(Duration::from_millis(50));
+    drop(reader_handle); // 分离线程,随管道关闭自行结束
+    let errtail = {
+        let s = errbuf.lock().unwrap().trim().to_string();
+        if s.is_empty() {
+            String::new()
+        } else {
+            format!(": {s}")
+        }
+    };
+    match outcome {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("{what} 失败(退出码 {:?}){errtail}", status.code())),
+        Err(msg) => Err(format!("{msg}{errtail}")),
     }
 }
 
@@ -368,6 +406,11 @@ mod tests {
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("超时"));
         assert!(t.elapsed().as_secs() < 5, "超时后应快速返回,而非等满 19s");
+        // 失败时 stderr 应进错误信息(可诊断)。
+        let mut fail = Command::new("cmd");
+        fail.args(["/c", "echo BOOMERR 1>&2 & exit 1"]);
+        let e = run_with_timeout(fail, 5, "test-fail").unwrap_err();
+        assert!(e.contains("BOOMERR"), "失败错误应含 stderr,实际: {e}");
     }
 
     #[cfg(unix)]
@@ -383,5 +426,10 @@ mod tests {
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("超时"));
         assert!(t.elapsed().as_secs() < 5);
+        // 失败时 stderr 应进错误信息(可诊断)。
+        let mut fail = Command::new("sh");
+        fail.args(["-c", "echo BOOMERR >&2; exit 1"]);
+        let e = run_with_timeout(fail, 5, "test-fail").unwrap_err();
+        assert!(e.contains("BOOMERR"), "失败错误应含 stderr,实际: {e}");
     }
 }
