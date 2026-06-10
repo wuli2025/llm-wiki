@@ -11,7 +11,7 @@
 use crate::host::{AppHandle, Event};
 use axum::{
     body::Body,
-    extract::{ws::Message, ws::WebSocket, Multipart, Query, State, WebSocketUpgrade},
+    extract::{ws::Message, ws::WebSocket, DefaultBodyLimit, Multipart, Query, State, WebSocketUpgrade},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -69,6 +69,8 @@ pub async fn serve() -> anyhow::Result<()> {
     crate::skills::seed_deck_studio_skill();
     crate::skills::seed_web_studio_skill();
     crate::skills::seed_wechat_typesetter_skill();
+    // 老用户迁移：早期版本首启播种过毛主席资料库的，补装 consult-mao 技能。
+    crate::skills::migrate_consult_mao_for_seeded_kb();
     // 飞书网关「开机自动启动」（若用户开了 auto_start 且凭证齐全）。
     crate::feishu::auto_start_if_enabled(&app);
 
@@ -96,8 +98,12 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/api/upload", post(upload))
         .route("/api/file", get(serve_file))
         .route("/api/health", get(|| async { "ok" }))
+        .route("/api/status", get(status))
         .route("/ws", get(ws_handler))
         .fallback(get(spa_fallback))
+        // 上传整体进内存; 不设上限则单个大 body 直接 OOM 服务进程。512MB 足够覆盖
+        // 知识库/视频素材, 又挡掉恶意巨包。(/ws 流式不受此限, 上传走 multipart 受限)
+        .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
         .with_state(state);
 
     let port: u16 = std::env::var("POLARIS_PORT")
@@ -110,6 +116,149 @@ pub async fn serve() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app_router).await?;
     Ok(())
+}
+
+// ───────────────────────── /api/status 运维水位(R7)─────────────────────────
+//
+// 给群晖运维/监控用的水位接口: 容器内存(贴近 mem_limit/OOM 风险)、宿主内存、数据盘用量
+// (防写满)、claude 配置在位、推理端点(R3)状态。全部 best-effort: 读不到的项返回
+// available:false 而非报错, 非 Linux 环境(开发机)也能编译运行。与 /api/health 一样不需口令
+// (只暴露粗粒度水位, 不含敏感数据)。
+
+async fn status(State(state): State<AppState>) -> Response {
+    let auth_set = state.auth_token.is_some();
+    // 含 df 子进程 + 推理端点探测(阻塞/网络), 丢到阻塞线程池, 勿卡 async worker。
+    let v = tokio::task::spawn_blocking(move || collect_status(auth_set))
+        .await
+        .unwrap_or_else(|_| json!({ "ok": false, "error": "status 采集失败" }));
+    Json(v).into_response()
+}
+
+fn collect_status(auth_set: bool) -> Value {
+    let data_root = directories::UserDirs::new()
+        .map(|u| u.home_dir().join("Polaris"))
+        .unwrap_or_else(|| PathBuf::from("/root/Polaris"));
+    json!({
+        "ok": true,
+        "service": "polaris-server",
+        "auth_token_set": auth_set,
+        "chat_timeout_secs": std::env::var("POLARIS_CHAT_TIMEOUT_SECS")
+            .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0),
+        "container_memory": cgroup_mem(),
+        "host_memory": meminfo_mem(),
+        "data_disk": disk_usage(&data_root),
+        "claude_config": claude_config_status(),
+        "infer": crate::infer::status_json(),
+        "forge": crate::forge::forge_preflight(),
+    })
+}
+
+fn pct(used: u64, total: u64) -> Option<f64> {
+    if total == 0 {
+        None
+    } else {
+        Some(((used as f64 / total as f64) * 1000.0).round() / 10.0)
+    }
+}
+
+/// cgroup v2 容器内存(比宿主内存更贴近 mem_limit / OOM 风险)。
+fn cgroup_mem() -> Value {
+    let used = std::fs::read_to_string("/sys/fs/cgroup/memory.current")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    // memory.max 为 "max" 表示未设上限 → parse 失败即视为无上限。
+    let limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    match (used, limit) {
+        (Some(u), Some(l)) => json!({ "used_bytes": u, "limit_bytes": l, "used_pct": pct(u, l) }),
+        (Some(u), None) => json!({
+            "used_bytes": u, "limit_bytes": null, "used_pct": null,
+            "note": "未设容器内存上限(memory.max=max)，建议设 mem_limit 防泄漏拖垮整机"
+        }),
+        _ => json!({ "available": false, "note": "非 cgroup v2 环境或无权读取" }),
+    }
+}
+
+/// 宿主可用内存(/proc/meminfo)。
+fn meminfo_mem() -> Value {
+    let Ok(txt) = std::fs::read_to_string("/proc/meminfo") else {
+        return json!({ "available": false });
+    };
+    let kb_to_bytes = |line: &str, key: &str| -> Option<u64> {
+        line.strip_prefix(key)
+            .and_then(|r| r.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+            .map(|k| k * 1024)
+    };
+    let mut total = None;
+    let mut avail = None;
+    for line in txt.lines() {
+        if total.is_none() {
+            if let Some(b) = kb_to_bytes(line, "MemTotal:") {
+                total = Some(b);
+            }
+        }
+        if avail.is_none() {
+            if let Some(b) = kb_to_bytes(line, "MemAvailable:") {
+                avail = Some(b);
+            }
+        }
+    }
+    match (total, avail) {
+        (Some(t), Some(a)) => json!({
+            "total_bytes": t, "available_bytes": a, "used_pct": pct(t.saturating_sub(a), t)
+        }),
+        _ => json!({ "available": false }),
+    }
+}
+
+/// 数据盘用量(df -kP <path>)。防「容器写满 /volume1 卷拖垮 DSM」的水位来源。
+fn disk_usage(path: &Path) -> Value {
+    let Ok(out) = std::process::Command::new("df").arg("-kP").arg(path).output() else {
+        return json!({ "available": false, "note": "df 不可用" });
+    };
+    if !out.status.success() {
+        return json!({ "available": false });
+    }
+    let txt = String::from_utf8_lossy(&out.stdout);
+    if let Some(line) = txt.lines().nth(1) {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() >= 4 {
+            let total = f[1].parse::<u64>().ok().map(|k| k * 1024);
+            let used = f[2].parse::<u64>().ok().map(|k| k * 1024);
+            let avail = f[3].parse::<u64>().ok().map(|k| k * 1024);
+            if let (Some(t), Some(u), Some(a)) = (total, used, avail) {
+                return json!({
+                    "path": path.to_string_lossy(),
+                    "total_bytes": t, "used_bytes": u, "available_bytes": a,
+                    "used_pct": pct(u, t)
+                });
+            }
+        }
+    }
+    json!({ "available": false })
+}
+
+/// claude 全局配置文件在位检测(印证 CLAUDE_CONFIG_DIR 落卷修复)。
+fn claude_config_status() -> Value {
+    let (dir, cfg) = match std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        // 设了 CONFIG_DIR → .claude.json 落在该目录内。
+        Some(d) => {
+            let p = Path::new(&d).join(".claude.json");
+            (d, p)
+        }
+        // 未设 → 默认在 HOME 根。
+        None => {
+            let home = directories::UserDirs::new()
+                .map(|u| u.home_dir().to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("/root"));
+            (home.to_string_lossy().to_string(), home.join(".claude.json"))
+        }
+    };
+    json!({ "config_dir": dir, "config_file_present": cfg.is_file() })
 }
 
 // ───────────────────────── 鉴权 ─────────────────────────
@@ -231,10 +380,14 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
         "kb_search" => ok(kb::kb_search(req_str(a, "query")?, opt_usize(a, "topK"))),
         "kb_ingest" => ok(kb::kb_ingest(req_str(a, "sourcePath")?)?),
         "kb_upload_files" => ok(kb::kb_upload_files(vec_str(a, "paths"))),
+        "kb_convert_batch" => ok(kb::kb_convert_batch(vec_str(a, "paths"))?),
         "kb_graph" => ok(kb::kb_graph()),
         "kb_lint" => ok(kb::kb_lint()),
         "kb_enrich_links" => ok(kb::kb_enrich_links(app)?),
         "kb_dedup" => ok(kb::kb_dedup(app)?),
+        "kb_pack_list" => ok(kb::kb_pack_list()),
+        "kb_pack_install" => ok(kb::kb_pack_install(app, req_str(a, "id")?)?),
+        "kb_pack_remove" => ok(kb::kb_pack_remove(req_str(a, "id")?)?),
 
         // ── Conv ──
         "conv_list_projects" => ok(conv::conv_list_projects()),
@@ -336,6 +489,44 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             req_str(a, "userCode")?,
         )?),
         "codex_proxy_info" => ok(codex_proxy::codex_proxy_info()),
+
+        // ── 推理后端(R3)：外部 GPU 节点端点状态(含连通性探测)──
+        "infer_status" => ok(infer::status_json()),
+
+        // ── Forge 渲染能力 preflight：跨平台「能出 PPT/视频吗、缺啥降级」透明上报 ──
+        "forge_preflight" => ok(forge::forge_preflight()),
+        // ── Forge 渲染：截图 + 纯 Rust OOXML 打 .pptx（三平台同一份，替 pptxgenjs）──
+        "forge_build_pptx" => forge::forge_build_pptx(vec_str(a, "images"), req_str(a, "out")?),
+        "forge_screenshot" => forge::forge_screenshot(
+            req_str(a, "url")?,
+            req_str(a, "out")?,
+            opt_usize(a, "width").map(|n| n as u32),
+            opt_usize(a, "height").map(|n| n as u32),
+        ),
+        "forge_deck_to_pptx" => forge::forge_deck_to_pptx(
+            req_str(a, "deck")?,
+            req_str(a, "out")?,
+            opt_usize(a, "width").map(|n| n as u32),
+            opt_usize(a, "height").map(|n| n as u32),
+            opt_usize(a, "slides"),
+        ),
+        "forge_deck_to_video" => forge::forge_deck_to_video(
+            req_str(a, "deck")?,
+            req_str(a, "out")?,
+            a.get("secondsPerSlide").and_then(|v| v.as_f64()),
+            opt_usize(a, "fps").map(|n| n as u32),
+            opt_usize(a, "width").map(|n| n as u32),
+            opt_usize(a, "height").map(|n| n as u32),
+            opt_usize(a, "slides"),
+            opt_str(a, "audio"),
+            opt_str(a, "narration"),
+        ),
+        "forge_tts" => forge::forge_tts(
+            req_str(a, "text")?,
+            req_str(a, "out")?,
+            opt_str(a, "voice"),
+            opt_str(a, "languageBoost"),
+        ),
 
         // ── 环境医生（容器内只读检测；安装类降级为提示）──
         "env_check" => ok(doctor::env_check()),
@@ -527,7 +718,7 @@ async fn serve_file(
         Ok(p) => p,
         Err(_) => return (StatusCode::NOT_FOUND, "文件不存在").into_response(),
     };
-    if !allowed.iter().any(|root| canon.starts_with(root)) {
+    if !allowed.iter().any(|root| crate::kb::path_contains(root, &canon)) {
         return (StatusCode::FORBIDDEN, "路径不在允许范围").into_response();
     }
     match tokio::fs::read(&canon).await {
@@ -577,10 +768,28 @@ fn mime_for(p: &Path) -> &'static str {
 
 async fn spa_fallback(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
     let rel = uri.path().trim_start_matches('/');
-    let mut candidate = state.web_dir.join(rel);
+    // 安全闸: rel 取自原始 URL, 裸 socket 客户端能塞 `../../etc/passwd`(hyper 不规范化
+    // `..` 段)。任一段为 `..` 或绝对/盘符前缀 → 当 SPA 路由回 index.html, 绝不拼出 web_dir。
+    let traversal = rel.split(['/', '\\']).any(|seg| seg == "..")
+        || Path::new(rel).is_absolute()
+        || rel.contains(':');
+    let mut candidate = if traversal {
+        state.web_dir.join("index.html")
+    } else {
+        state.web_dir.join(rel)
+    };
     // 目录或不存在 → 回 index.html（SPA 路由）。
     if rel.is_empty() || !candidate.is_file() {
         candidate = state.web_dir.join("index.html");
+    }
+    // 双保险: canonicalize 后必须仍落在 web_dir 内(防符号链接/漏网的相对段)。
+    if let (Ok(canon), Ok(root)) = (
+        std::fs::canonicalize(&candidate),
+        std::fs::canonicalize(&state.web_dir),
+    ) {
+        if !crate::kb::path_contains(&root, &canon) {
+            candidate = state.web_dir.join("index.html");
+        }
     }
     match tokio::fs::read(&candidate).await {
         Ok(bytes) => {

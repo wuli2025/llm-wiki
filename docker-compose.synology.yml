@@ -1,0 +1,70 @@
+# ════════════════════════════════════════════════════════════════
+# Polaris · 群晖 Synology Container Manager「项目」版
+#   与开发机 docker-compose.yml 的差异（按本仓库 PRD 群晖适配项落地）：
+#     · volumes 改 bind mount 到 /volume1/docker/polaris/*（File Station 可见 + Btrfs 快照可备份）
+#     · 以 PUID/PGID 非 root 运行（容器写共享文件夹的文件属主与宿主一致，禁止 root 跑容器）
+#     · mem_limit 必设（防泄漏拖垮整机；CPU 硬限速在群晖不生效，仅靠优先级）
+#     · 日志轮转（防写满系统分区）
+#     · tini 由镜像自带（不依赖平台 init），看门狗保留
+#
+# 部署步骤（DSM 7.2 Container Manager）：
+#   1) File Station 建共享文件夹 /docker（Btrfs），下建 polaris/{data,claude,config}
+#   2) 控制面板建一个受限用户（如 polaris），记下其 UID/GID，填到下方 PUID/PGID 与 user
+#   3) Container Manager → 项目 → 新增 → 上传本文件 → 构建/启动
+#   4) 登录门户 → 反向代理：外部 https://host:443 → 容器 8080，开 WebSocket、超时 600s
+#   5) 公网暴露务必设 POLARIS_AUTH_TOKEN
+#
+# 注意：群晖内置 Compose 版本较旧，布尔值用 1/0；在目标固件先跑一次 smoke test
+#       确认 healthcheck / mem_limit / build 被识别。
+# ════════════════════════════════════════════════════════════════
+services:
+  polaris:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 要在群晖出 PPT/视频，设为 1 构建 full(+chromium+CJK字体+ffmpeg)；只用聊天/KB/网站保持 0。
+        POLARIS_RENDER: "${POLARIS_RENDER:-0}"
+    image: polaris-web:latest
+    container_name: polaris-web
+    environment:
+      # ── LLM 鉴权（任选其一）──
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
+      ANTHROPIC_AUTH_TOKEN: "${ANTHROPIC_AUTH_TOKEN:-}"
+      # ── 访问口令（公网必填，不设则内网全开放）──
+      POLARIS_AUTH_TOKEN: "${POLARIS_AUTH_TOKEN:-}"
+      POLARIS_PORT: "8080"
+      # ── 单轮看门狗：超时杀 claude 进程组，防个别请求无界挂死 ──
+      POLARIS_CHAT_TIMEOUT_SECS: "${POLARIS_CHAT_TIMEOUT_SECS:-180}"
+      # ── claude 配置目录 → 落进持久卷，消除「配置文件找不到」竞态 ──
+      CLAUDE_CONFIG_DIR: "/root/.claude"
+      # ── 非 root 运行：填入步骤 2 那个受限用户的 UID/GID ──
+      #    entrypoint 据此建同号用户、chown 数据目录、用 gosu 降权。
+      PUID: "${PUID:-1026}"
+      PGID: "${PGID:-100}"
+    volumes:
+      # bind mount 到 /volume1：File Station 可见、可单独 Btrfs 快照复制备份。
+      - /volume1/docker/polaris/data:/root/Polaris
+      - /volume1/docker/polaris/claude:/root/.claude
+      - /volume1/docker/polaris/config:/root/.config
+    ports:
+      - "8080:8080"           # 避开 DSM 占用的 443/5001，对外经反向代理统一 443+TLS
+    restart: unless-stopped
+    mem_limit: 6g             # 必设：防泄漏拖垮整机（CPU 限速在群晖不生效，故不设 cpus=）
+    shm_size: "512m"          # full 渲染：chromium 截大页防 /dev/shm 64MB 崩（slim 无害）
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+# 说明：
+#   · GPU 推理不在本容器内（群晖 Container Manager 不开放容器 GPU 透传）。
+#     A2 推理（ASR/嵌入/重排）部署在独立 Linux 主机，经 POLARIS_INFER_ENDPOINT 对接（见 PRD §04）。
+#   · 本文件用 bind mount，无需顶层 volumes: 段。

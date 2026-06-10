@@ -7,6 +7,11 @@ pub mod conv;
 pub mod convert;
 pub mod doctor;
 pub mod feishu;
+pub mod forge;
+pub mod forge_pptx;
+pub mod forge_tts;
+pub mod forge_video;
+pub mod infer;
 pub mod kb;
 pub mod persona;
 pub mod project;
@@ -75,6 +80,9 @@ pub fn run() {
             // 确保「壹伴排版优化」技能落盘（含 wechat_yiban.py：壹伴样式引擎 + CloakBrowser 驱动，
             // spawn 的 claude agent 才能在磁盘上直接 python 跑它）。best-effort，不阻断启动。
             skills::seed_wechat_typesetter_skill();
+            // 老用户迁移：早期版本首启播种过毛主席资料库的，补装 consult-mao 技能
+            //（改版后该技能随「毛主席」名人资料包一起装，老用户没装过会失效）。
+            skills::migrate_consult_mao_for_seeded_kb();
             // 环境预热: 后台把 claude / pwsh 目录塞进进程 PATH + 设 Git Bash 路径,
             // 让之后 spawn 的 claude CLI 直接「找得到、有 shell」, 无需重启 (见 doctor.rs)。
             doctor::prime_path_for_claude();
@@ -98,10 +106,15 @@ pub fn run() {
             kb::kb_search,
             kb::kb_ingest,
             kb::kb_upload_files,
+            kb::kb_convert_batch,
             kb::kb_graph,
             kb::kb_lint,
             kb::kb_enrich_links,
             kb::kb_dedup,
+            // 名人资料包（下载到自己的资料库，附带配套 skill）
+            kb::kb_pack_list,
+            kb::kb_pack_install,
+            kb::kb_pack_remove,
             // Sandbox (板块⑤ 已抽离为 polaris-sandbox crate, 命令名不变)
             polaris_sandbox::commands::sandbox_status,
             polaris_sandbox::commands::sandbox_build_image,
@@ -179,6 +192,14 @@ pub fn run() {
             provider::codex_start_login,
             provider::codex_poll_login,
             codex_proxy::codex_proxy_info,
+            // Forge 跨平台渲染能力 preflight（能出 PPT/视频吗、缺啥降级，三平台各报各的阶梯）
+            forge::forge_preflight,
+            // Forge 渲染引擎首落地：deck 截图 → 纯 Rust OOXML 打 .pptx（替 pptxgenjs，三平台同一份）
+            forge::forge_build_pptx,
+            forge::forge_screenshot,
+            forge::forge_deck_to_pptx,
+            forge::forge_deck_to_video,
+            forge::forge_tts,
             // 环境医生 (环境监测 + 配置安装)
             doctor::env_check,
             doctor::env_fix_path,

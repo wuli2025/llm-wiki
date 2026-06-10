@@ -116,9 +116,6 @@ pub struct ChatSendArgs {
     /// 目标模式：完成条件。设置后注入「持续推进直到达成」指令。
     #[serde(default)]
     pub goal: Option<String>,
-    /// 「请教毛主席」：注入毛选式客观分析指令，调用毛主席资料库，生成标注来源的 HTML。
-    #[serde(default)]
-    pub consult_mao: bool,
     /// 「动态编排」：把本轮当成多智能体编排——编排器拆成 N 个独立子任务，
     /// 用 Task 子代理并行扇出，每条流水线 实现→对抗式校验→修复，最后汇总。
     #[serde(default)]
@@ -269,12 +266,6 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
         final_prompt.push_str("\n\n---\n\n");
     }
 
-    // 2.6 请教毛主席: 注入毛选式客观分析指令(调资料库 + 生成标来源 HTML)
-    if args.consult_mao {
-        final_prompt.push_str(&mao_consult_directive(&art_dir));
-        final_prompt.push_str("\n\n---\n\n");
-    }
-
     // 2.65 动态编排: 把本轮当成多智能体编排, 用 Task 子代理并行扇出, 每条流水线
     //      实现 -> 对抗式校验 -> 修复, 最后汇总(详见 dynamic_workflow_directive)。
     if args.dynamic_workflow {
@@ -378,22 +369,40 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
 
     CHILDREN.lock().insert(req_id.clone(), child);
 
+    // 「最近一次活动」时间戳: stdout/stderr 每产出一行就刷新(见下面两个 reader 线程)。
+    // 看门狗据此判「空闲挂死」而非「绝对超时」—— 正在活跃流式输出的长任务(批量 PPT/
+    // 长脚本等)不会被误杀, 只有真的长时间零输出(claude 子代理对 `/` 无界扫描卡住)才判挂死。
+    let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
+
     // 看门狗(容器/服务端稳健性): 个别 prompt 会让 claude 触发子代理(`claude --print`,
     // 容器内其 cwd 落在 `/`)对文件系统做无界扫描而长时间不返回 —— 既拖死本轮, 又占住
-    // OAuth 订阅的并发槽拖垮后续消息。超时仍未结束则杀掉整个进程组(claude + 子代理),
-    // claude stdout 随之关闭 → 下面的 reader 线程照常 emit error+done, 系统自愈、释放并发槽。
-    // 由 POLARIS_CHAT_TIMEOUT_SECS 控制: 桌面默认 0=不启用(保持原行为), 容器设为 180。
+    // OAuth 订阅的并发槽拖垮后续消息。**连续空闲**超过阈值(而非一启动就倒计时)才杀掉整个
+    // 进程组(claude + 子代理), claude stdout 随之关闭 → 下面 reader 线程照常 emit error+done,
+    // 系统自愈、释放并发槽。由 POLARIS_CHAT_TIMEOUT_SECS 控制: 桌面默认 0=不启用, 容器 180。
     let watchdog_timeout = std::env::var("POLARIS_CHAT_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
     if watchdog_timeout > 0 {
         let wd_req = req_id.clone();
+        let wd_activity = last_activity.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(watchdog_timeout));
-            let pid = CHILDREN.lock().get(&wd_req).map(|c| c.id());
-            if let Some(pid) = pid {
-                kill_tree(pid); // 杀进程组: 一并带走 cwd=/ 的子代理
+            let timeout = std::time::Duration::from_secs(watchdog_timeout);
+            // 检查节拍: 每 tick 醒来看一次是否空闲超时; tick 不超过 5s, 也不超过 timeout 本身。
+            let tick = std::cmp::min(timeout, std::time::Duration::from_secs(5));
+            loop {
+                std::thread::sleep(tick);
+                // 先读空闲时长(不与 CHILDREN 锁同时持有, 避免锁序问题), 再持锁取 child:
+                // 取到 Some 才证明仍是本 req 的活进程(防 PID 复用误杀); 取到 None = 已正常
+                // 结束被 stdout 线程 remove → 退出看门狗。
+                let idle = wd_activity.lock().elapsed();
+                let g = CHILDREN.lock();
+                let Some(c) = g.get(&wd_req) else { break };
+                if idle >= timeout {
+                    kill_tree(c.id()); // 持锁内杀进程组: 一并带走 cwd=/ 的子代理
+                    break;
+                }
+                // 否则仍在活跃推进, 不误杀, 继续看门(锁随作用域结束释放)。
             }
         });
     }
@@ -404,6 +413,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     let conv_id_err = conv_id_opt.clone();
     let stderr_buf = Arc::new(Mutex::new(String::new()));
     let stderr_buf_clone = stderr_buf.clone();
+    let act_err = last_activity.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
@@ -411,6 +421,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
             if line.trim().is_empty() {
                 continue;
             }
+            *act_err.lock() = std::time::Instant::now(); // 刷新活动: 有产出就不算挂死
             {
                 // 单次加锁 + 封顶: 异常时 stderr 也可能狂刷, 不让它无界累积。
                 let mut buf = stderr_buf_clone.lock();
@@ -438,6 +449,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
     let conv_id_thread = conv_id_opt.clone();
     let stderr_buf_for_done = stderr_buf.clone();
     let art_dir_thread = art_dir.clone();
+    let act_out = last_activity.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut assistant_text = String::new();
@@ -468,6 +480,7 @@ pub async fn chat_send(app: AppHandle, args: ChatSendArgs) -> Result<String, Str
             if line.trim().is_empty() {
                 continue;
             }
+            *act_out.lock() = std::time::Instant::now(); // 刷新活动: 流式产出即视为推进, 防误杀
             let target = if capped { &mut scrap } else { &mut assistant_text };
             match serde_json::from_str::<Value>(&line) {
                 Ok(v) => handle_stream_event(
@@ -1321,58 +1334,6 @@ fn image_capability_directive(provider_name: &str, supported: bool, art_dir: &Pa
             dir = dir
         )
     }
-}
-
-/// 「请教毛主席」指令: 让 claude 以毛主席(毛选)的口吻和思想方法, 沿毛主席资料库
-/// 客观分析用户的问题, 并生成一份标注来源的自包含 HTML。资料库(结构化 wiki)已由
-/// `claude_md::render_for_project` 以长上下文 + 双链地图注入, 用 Read/Glob/Grep 沿双链自取。
-fn mao_consult_directive(art_dir: &Path) -> String {
-    let dir = art_dir.to_string_lossy().replace('\\', "/");
-    format!(
-        "## 请教毛主席 (Consult Mode)\n\n\
-本轮用户开启了「请教毛主席」模式。请你 **化身毛主席(毛泽东同志)**, 就同志提出的问题给出回答, \
-**核心交付物是一份 HTML 文件**, 对话里只作简要铺垫。\n\n\
-**口吻与文风(毛选风格 · 大白话第一)**\n\
-- 写成《毛泽东选集》那种调子: 平实有力、口语化, 多用大白话、多打比方, 庄稼汉、工人都听得懂; \
-不要堆术语、不要掉书袋、不要写论文腔。\n\
-- 称呼用户为「同志」或「小同志」, 自称用「我」。\n\
-- 句子要短, 段落要短, 一段讲一个道理; 道理要落到「该怎么办」上, 不空谈。\n\n\
-**分析方法**(自觉运用毛主席的思想方法, 客观地分析)\n\
-- 实事求是, 一切从实际出发; 调查研究, 没有调查就没有发言权。\n\
-- 矛盾分析法: 抓主要矛盾和矛盾的主要方面, 一分为二地看问题(两点论)。\n\
-- 具体问题具体分析, 反对教条主义; 从群众中来, 到群众中去。\n\n\
-**面向未来的视角(必须)**\n\
-- 不能只就事论事停在当下, 要 **站在未来的眼光回头看今天这件事**: 长远走向是什么? \
-五年、十年、再远些会怎么演变? 现在的小苗头, 将来会长成什么样的大势?\n\
-- 善于看「萌芽中的新东西」: 哪些事情现在看着不起眼, 将来要成主流; 哪些事情现在风光, \
-将来要被时代抛掉。把这个判断讲清楚, 才算给同志一个真有用的答复。\n\n\
-**引用要克制(重要)**\n\
-- **正文一开头不要堆原文/语录**, 不要拿《矛盾论》《实践论》整段往上糊。先用大白话把问题讲透, \
-该点出处就一句话带过(例如「这就是《矛盾论》里讲的抓主要矛盾」)。\n\
-- 详尽的篇目引用、原文摘抄, **统一放到 HTML 文件末尾的「来源」一节**, 不要散在正文上头。\n\n\
-**立场底线**\n\
-- 立场坚定地拥护社会主义、共产主义事业和人民利益; **回答不得违背共产主义、社会主义的基本原则**, \
-不传播违背社会主义核心价值观的内容。\n\n\
-**取证 (KB-first)**\n\
-- 毛主席资料库(结构化 wiki)已随本轮以长上下文 + 双链地图注入, 就在你工作目录的 `PolarisKB/` 下。\n\
-- 下笔前先用 Read/Glob/Grep 翻 `raw/毛主席/` 下相关篇目(如《矛盾论》《实践论》《论持久战》《关于正确处理人民内部矛盾的问题》等)取证, \
-不要凭空发挥; 引用就标明篇目名。\n\n\
-**输出步骤**\n\
-1. 对话里 **只写简短铺垫**: 一两段毛主席口吻的大白话, 点出抓哪个主要矛盾、看到什么未来走向。\
-不要在对话里铺长篇, 详细的分析交给 HTML。\n\
-2. 生成一份 **单文件、自包含的 HTML**(CSS 内联, 字体可读、排版清爽)保存到这个可写目录(用绝对路径):\n   `{dir}`\n\
-   HTML 内容结构建议:\n\
-     - 标题 (问题概括)\n\
-     - 「实事求是」: 把问题摆平, 大白话讲清楚现状\n\
-     - 「主要矛盾」: 抓住主要矛盾和矛盾的主要方面, 一分为二地看\n\
-     - 「该怎么办」: 给同志几条具体的、能落地的办法\n\
-     - 「站在未来看今天」: 长远走向、未来五年十年的演变、现在该种什么苗\n\
-     - 「来源」: 列出引用的篇目, 必要的原文摘抄集中放这里\n\
-   **正文开头不要罗列原文**, 把原文压到「来源」一节去。\n\
-3. 对话末尾用一句话点明生成了哪个 HTML 文件(绝对路径), 方便同志打开。\n\n\
-结尾可以用一句鼓励的话, 例如「为人民服务」「为建设共产主义事业而奋斗」。",
-        dir = dir
-    )
 }
 
 /// 「动态编排」指令: 把本轮当成多智能体编排(Dynamic Workflows)。

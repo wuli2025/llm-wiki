@@ -5,9 +5,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 0=slim(默认,无渲染栈)  1=full(+chromium+fonts-noto-cjk+ffmpeg,能出 PPT/视频)
+        POLARIS_RENDER: "${POLARIS_RENDER:-0}"
     image: polaris-web:latest
     container_name: polaris-web
-    init: true                      # tini：回收 claude spawn 出的子进程僵尸（长稳关键）
+    # tini 已由镜像 ENTRYPOINT 自带（不再依赖此处 init），回收 claude 子进程僵尸。
     ports:
       - "8080:8080"
     environment:
@@ -22,6 +25,15 @@ services:
       # 3) 单轮对话看门狗：超时(秒)未结束则杀掉 claude 进程组，防个别请求无界挂死、
       #    占住订阅并发槽拖垮后续。0=关闭，容器默认 180s。
       POLARIS_CHAT_TIMEOUT_SECS: "${POLARIS_CHAT_TIMEOUT_SECS:-180}"
+      # 4) claude 全局配置目录 → 指向已持久化的 /root/.claude 卷。
+      #    默认 claude 把 .claude.json 写在 HOME 根(/root/.claude.json)，不在任何卷里，
+      #    容器重建即丢；且多个 headless claude 并发抢写易触发「配置文件找不到」竞态告警。
+      #    指向卷内后：.claude.json + backups 落入卷，与 .credentials/settings/projects 同处，
+      #    既持久又消除孤儿文件。凭证路径不变(本就在 /root/.claude/)。
+      CLAUDE_CONFIG_DIR: "/root/.claude"
+      # 5) 外部 GPU 推理节点(嵌入/重排/ASR)。群晖容器不开放 GPU 透传，A2 推理独立部署，
+      #    经此端点对接(见 DEPLOY-SYNOLOGY.md §6)。空=走本机 CPU 兜底。
+      POLARIS_INFER_ENDPOINT: "${POLARIS_INFER_ENDPOINT:-}"
     volumes:
       # 数据持久化（KB / 对话历史 / 项目 / 产物 / 技能）：容器重建不丢
       - polaris-data:/root/Polaris
@@ -30,6 +42,17 @@ services:
       # kb 设置等 XDG 配置
       - polaris-config:/root/.config
     restart: unless-stopped
+    # 内存上限：防单容器泄漏拖垮宿主；超限 OOM kill 本容器，宿主与其它容器存活。
+    # （注：群晖内核缺 CFS 模块，CPU 硬限速 cpus= 不生效，故此处不设，靠优先级。）
+    mem_limit: 6g
+    # chromium 截大页默认 /dev/shm(64MB)易崩 → 调大(full 渲染必备; slim 无害)。
+    shm_size: "512m"
+    # 日志轮转：防 stdout 无限增长写满系统分区。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/health"]
       interval: 30s

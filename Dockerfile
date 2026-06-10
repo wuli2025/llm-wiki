@@ -55,9 +55,28 @@ FROM node:20-slim AS runtime
 # claude CLI 跑 Bash/脚本工具需要：bash、git、python3(pptx/xlsx 等技能)、ripgrep、ca 证书。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash git ca-certificates curl python3 python3-pip python3-venv ripgrep \
+        tini gosu \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g @anthropic-ai/claude-code \
     && npm cache clean --force
+
+# ── 渲染栈(可选 flavor)——Polaris Forge 跨平台 PRD §05：容器「零安装」=渲染栈打进镜像 ──
+#   POLARIS_RENDER=0 → polaris:slim   现状(聊天/KB/网站生成，网站本就不需渲染栈)
+#   POLARIS_RENDER=1 → polaris:full   +chromium(截图)+fonts-noto-cjk(防豆腐块)+ffmpeg(出视频)
+# 构建 full：docker build --build-arg POLARIS_RENDER=1 -t polaris-web:full .
+# CJK 字体是「最隐蔽必踩」坑：缺了 deck 截图全是 □□□，preflight 会用 fc-list 探测并亮红灯。
+ARG POLARIS_RENDER=0
+RUN if [ "$POLARIS_RENDER" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            chromium fonts-noto-cjk fonts-noto-color-emoji ffmpeg \
+        && rm -rf /var/lib/apt/lists/* ; \
+    else \
+        echo "[build] POLARIS_RENDER=0 → slim 镜像(无渲染栈)" ; \
+    fi
+# 让引擎 preflight 能定位浏览器/编码器(slim 下这些路径不存在，preflight 会据此降级)。
+ENV POLARIS_CHROMIUM=/usr/bin/chromium \
+    POLARIS_FFMPEG=ffmpeg \
+    POLARIS_RENDER_FLAVOR=${POLARIS_RENDER}
 
 # 引擎二进制 + 前端静态 + 资源种子
 COPY --from=server /usr/local/bin/polaris-server /usr/local/bin/polaris-server
@@ -71,6 +90,12 @@ ENV HOME=/root \
     # claude headless 默认非交互；让其在容器里直接用环境变量鉴权
     CI=1
 
+# 入口脚本：tini 作 PID 1（镜像内自带，回收 claude spawn 的子进程僵尸，
+# 不再依赖 compose `init: true` 在群晖 Container Manager 下是否生效）；
+# 脚本按 PUID/PGID 决定 root / 非 root 运行。sed 去 CR 防 Windows 换行致 exec 失败。
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
+
 EXPOSE 8080
-# tini 由 compose `init: true` 提供（回收 claude 子进程僵尸）。
-ENTRYPOINT ["polaris-server"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
