@@ -125,15 +125,22 @@ fn encode_images(
     args.extend([
         "-vsync".into(),
         "vfr".into(),
-        // 偶数宽高(libx264/yuv420p 要求)+ 像素格式;幻灯多为偶数尺寸,这步兜底。
+        // 偶数宽高(libx264/yuv420p 要求)+ sRGB→BT.709 真矩阵转换(out_color_matrix)避免偏色发灰
+        //(架构文档§06⑤);下面再打 BT.709 标签使矩阵与标签一致,规避 Remotion「只打标签不转换」的坑。
         "-vf".into(),
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p".into(),
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2:out_color_matrix=bt709,format=yuv420p".into(),
         "-r".into(),
         fps.to_string(),
         "-c:v".into(),
         "libx264".into(),
         "-preset".into(),
         "veryfast".into(),
+        "-colorspace".into(),
+        "bt709".into(),
+        "-color_primaries".into(),
+        "bt709".into(),
+        "-color_trc".into(),
+        "bt709".into(),
     ]);
     if audio.is_some() {
         // 配音:EBU R128 响度归一到 -16 LUFS(口播惯例,成片「专业感」来源——架构文档 §06)+
