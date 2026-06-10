@@ -109,13 +109,45 @@ fn probe_exe(cmd: &str, version_arg: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 找 chromium/chrome/edge 可执行: 先看显式 env(容器里 ENV 已写 /usr/bin/chromium),
-/// 再按平台候选名探测。返回命中的命令字符串。
+/// 应用自带二进制发现(零安装打包用):查 exe 同级 / bin / vendor,以及 macOS `.app/Contents/Resources`。
+/// 让桌面 App 把 chromium/ffmpeg 打进包里 → 用户**什么都不用装**(objc2 原生后端之外的零安装正路)。
+fn bundled_exe(names: &[&str]) -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.to_path_buf();
+    let mut roots = vec![dir.clone(), dir.join("bin"), dir.join("vendor")];
+    // macOS: exe 在 .app/Contents/MacOS/ → 资源在 ../Resources(及其 bin/)。
+    if let Some(contents) = dir.parent() {
+        roots.push(contents.join("Resources"));
+        roots.push(contents.join("Resources").join("bin"));
+    }
+    for r in roots {
+        for n in names {
+            #[cfg(target_os = "windows")]
+            {
+                let pe = r.join(format!("{n}.exe"));
+                if pe.is_file() {
+                    return Some(pe.to_string_lossy().to_string());
+                }
+            }
+            let p = r.join(n);
+            if p.is_file() {
+                return Some(p.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 找 chromium/chrome/edge 可执行: env → 应用自带(零安装打包)→ 平台候选名探测。
 pub fn find_chromium() -> Option<String> {
     if let Ok(p) = std::env::var("POLARIS_CHROMIUM") {
         if !p.is_empty() && (Path::new(&p).is_file() || probe_exe(&p, "--version")) {
             return Some(p);
         }
+    }
+    // 应用自带的浏览器优先(零安装):打进包的 chromium / chrome-headless-shell。
+    if let Some(p) = bundled_exe(&["chrome-headless-shell", "chromium", "chrome", "Chromium"]) {
+        return Some(p);
     }
     #[allow(unused_mut)] // macOS 分支才 push，其余平台不需要 mut
     let mut candidates: Vec<&str> = vec!["chromium", "chromium-browser", "google-chrome", "chrome"];
@@ -439,6 +471,12 @@ mod tests {
         fail.args(["/c", "echo BOOMERR 1>&2 & exit 1"]);
         let e = run_with_timeout(fail, 5, "test-fail").unwrap_err();
         assert!(e.contains("BOOMERR"), "失败错误应含 stderr,实际: {e}");
+    }
+
+    #[test]
+    fn bundled_exe_safe_when_absent() {
+        // 测试环境 exe 旁没有自带 chromium/ffmpeg → 返回 None,不 panic(零安装打包发现逻辑)。
+        assert!(bundled_exe(&["definitely-not-bundled-xyz"]).is_none());
     }
 
     #[cfg(unix)]
