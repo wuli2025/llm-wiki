@@ -68,6 +68,9 @@ ureq = { version = "2", features = ["json"] }
 # 「聊天机器人」板块「扫码创建机器人」: 把飞书开放平台建应用 URL 编码成二维码 (SVG)。
 # default-features=false → 不拉重型 image crate, 只保留纯 Rust 的 svg 渲染。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# 注: 已探明 chromiumoxide 0.7 可编译(Windows 验证),是 per-frame fx 动画视频(__fx.seek)
+# 的持久浏览器捕获方案;但它在 Linux 拉 libdbus-sys(Docker 需加 libdbus-1-dev),且 fx 视频
+# 还需 polaris-fx 动画库大件——是独立多轮工程,届时再引,不为半成品破坏已验证的 Docker 构建。
 
 [features]
 default = ["desktop"]
