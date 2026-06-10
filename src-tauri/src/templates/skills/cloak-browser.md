@@ -22,7 +22,7 @@ Polaris 的**默认浏览器**是 **CloakBrowser** —— 一个源码级改造�
 4. 需要持久会话（保留 cookie / localStorage、绕过隐身检测）：`launch_persistent_context(...)`
 
 ## 约定
-- 默认无头；需要观察过程时 `launch(headed=True)`
+- 默认无头；需要观察过程时 `launch(headless=False)`（参数是 `headless=`，不是 `headed=`）
 - 抓取结果存到工作目录并回报绝对路径
 - 反爬 / 风控场景务必带 `humanize=True`
 

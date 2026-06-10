@@ -13,6 +13,8 @@ version = "0.2.20"
 description = "Polaris - 本地优先 AI 工作台 (MVP)"
 authors = ["winner3388"]
 edition = "2021"
+# 有两个 bin(polaris-app 桌面 / polaris-server Docker)，`cargo run`(tauri dev) 默认跑桌面壳
+default-run = "polaris-app"
 
 [lib]
 name = "polaris_app_lib"

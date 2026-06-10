@@ -54,6 +54,10 @@ fn presets() -> Vec<PersonaPreset> {
 
 /// 项目工作目录的 CLAUDE.md 路径（须与 conv::write_mao_persona / claude_md 一致）。
 fn project_claude_md_path(project_id: &str) -> Option<PathBuf> {
+    // 安全闸: 防 project_id 走 `..` 越出 projects 根写任意 CLAUDE.md(见 conv::is_safe_project_id)。
+    if !crate::conv::is_safe_project_id(project_id) {
+        return None;
+    }
     let user = UserDirs::new()?;
     Some(
         user.home_dir()

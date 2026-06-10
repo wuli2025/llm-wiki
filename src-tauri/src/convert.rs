@@ -114,11 +114,25 @@ fn open_zip(path: &Path) -> Result<zip::ZipArchive<std::fs::File>, String> {
 }
 
 fn read_zip_entry(zip: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result<String, String> {
-    let mut f = zip
+    let f = zip
         .by_name(name)
         .map_err(|_| format!("缺少 {name}"))?;
-    let mut s = String::new();
-    f.read_to_string(&mut s).map_err(|e| e.to_string())?;
+    // 解压上限: docx/pptx 的 document.xml 解压后可远大于压缩包(zip 炸弹), 不封顶会 OOM。
+    // 只读前 TEXT_READ_CAP 字节, 截断处回退到 UTF-8 字符边界, 抽正文足够。
+    let mut buf = Vec::new();
+    f.take(TEXT_READ_CAP).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    // 截断可能切在多字节 UTF-8 字符中间, 回退到最近的有效边界(至多回退 3 字节)。
+    let s = match String::from_utf8(buf) {
+        Ok(s) => s,
+        Err(e) => {
+            let v = e.into_bytes();
+            let mut end = v.len();
+            while end > 0 && std::str::from_utf8(&v[..end]).is_err() {
+                end -= 1;
+            }
+            String::from_utf8_lossy(&v[..end]).into_owned()
+        }
+    };
     Ok(s)
 }
 

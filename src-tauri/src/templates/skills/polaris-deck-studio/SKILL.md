@@ -35,19 +35,27 @@ scripts/export-pptx.mjs    deck.html → .pptx（逐页截图，整版图嵌入�
 - **正文**：直接粘贴的文案，或上传文件的绝对路径（先 `Read` 它们）
 - **产物目录**：最终文件要保存到这里，并在回答末尾列出绝对路径
 
-没有上述配置时（用户在普通对话里直接说「做个 PPT/网页演示」），用合理默认：主题 `minimal-white`、16:9、≤12 页、中等密度、输出 `html`。
+没有上述配置时（用户在普通对话里直接说「做个 PPT/网页演示」），用合理默认：主题走 **`auto`（高级感）**、16:9、≤12 页、中等密度、输出 `html`。
+
+### ★ 主题 = `auto`（即 UI 的「AI 自由发挥」）= 默认高级感
+`auto` **不是**「随便挑一个」，而是**默认做出一眼高级、有感染力的观感**：
+- **优先深色 / 质感主题**，**不要默认白底**。首选：`aurora`（极光渐变辉光）、`glassmorphism`（毛玻璃）、`pitch-deck-vc`（融资路演）、`vaporwave`（蒸汽波）、`cyberpunk-neon`（赛博霓虹）、`tokyo-night`（东京夜）。
+- 配方：**深底 + 渐变强调色（`.gradient-text` 用在关键词上）+ 超大标题（封面 `.h1` 可到 110–160px）+ 克制留白 + 大数字金句页**。少字、字大、一页一事。
+- 仅当内容**明显属于**学术 / 公文 / 财报 / 法务等需要素白严肃的场景，才退回浅色主题（如 `academic-paper`、`corporate-clean`、`minimal-white`）。
+- 用户填了「自定义风格补充」时以其为准（如「黑金高级」→ 在深色主题上叠加金色强调）。
 
 ---
 
-## 主题（17 套，data-theme 取值）
+## 主题（36 套，data-theme 取值）
 
 | 分组 | id |
 |---|---|
-| 浅色 | `minimal-white` `editorial-serif` `swiss-grid` `magazine-bold` `japanese-minimal` `xiaohongshu-white` `academic-paper` `corporate-clean` `soft-pastel` |
-| 深色 | `tokyo-night` `dracula` `nord` `cyberpunk-neon` `terminal-green` `blueprint` |
-| 特色 | `glassmorphism` `neo-brutalism` |
+| 高级感首选（深色/质感） | `aurora` `glassmorphism` `pitch-deck-vc` `vaporwave` `cyberpunk-neon` `tokyo-night` |
+| 深色 | `dracula` `nord` `terminal-green` `blueprint` `catppuccin-mocha` `gruvbox-dark` `retro-tv` `rose-pine` |
+| 浅色 | `minimal-white` `editorial-serif` `swiss-grid` `magazine-bold` `japanese-minimal` `xiaohongshu-white` `academic-paper` `corporate-clean` `soft-pastel` `arctic-cool` `bauhaus` `catppuccin-latte` `engineering-whiteprint` `midcentury` `news-broadcast` `sharp-mono` `solarized-light` `sunset-warm` |
+| 特色 | `neo-brutalism` `memphis-pop` `rainbow-gradient` `y2k-chrome` |
 
-应用主题 = 在 `<html data-theme="tokyo-night">`。运行时按 `T` 可循环切换预览。
+应用主题 = 在 `<html data-theme="aurora">`。运行时按 `T` 可循环切换预览。
 
 ---
 

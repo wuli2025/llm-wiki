@@ -329,9 +329,12 @@ fn run_pipeline(app: &AppHandle, root: &str, root_path: &Path, m: Manifest) {
                 children.push(child);
             }
             Err(e) => {
-                // 起失败: kill 已起的, 收摊。
+                // 起失败: kill 已起的, 收摊。用 kill_tree 连同孙进程(cmd /C npm → node)一起带走,
+                // 裸 c.kill() 只杀直接子进程会漏掉 dev server 真正的 node 进程 → 端口占用泄漏。
                 for mut c in children.drain(..) {
+                    kill_tree(c.id());
                     let _ = c.kill();
+                    let _ = c.wait();
                 }
                 emit_exit(app, root, false, Some(format!("[{}] 启动失败: {}", label, e)));
                 return;

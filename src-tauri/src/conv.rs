@@ -59,10 +59,6 @@ struct State {
     conversations: Vec<Conversation>,
     #[serde(default)]
     messages: Vec<Message>,
-    /// 一次性 marker: 是否已赠送「毛主席」默认项目 + 写入人格 CLAUDE.md。
-    /// 置位后即便用户删了该项目也不再重建 —— 尊重用户。
-    #[serde(default)]
-    seeded_mao: bool,
 }
 
 /// 默认赠送的「毛主席」项目名(前端据此识别该项目, 显示彩蛋空状态)
@@ -85,7 +81,19 @@ pub fn init(_app: &AppHandle) -> Result<()> {
 
     let mut state: State = if path.exists() {
         let txt = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&txt).unwrap_or_default()
+        match serde_json::from_str(&txt) {
+            Ok(s) => s,
+            Err(e) => {
+                // 解析失败别静默 unwrap_or_default() 清空全部历史: 先把损坏文件留底
+                // (state.json.corrupt.bak), 给用户/支持留挽救机会, 再回落空状态。
+                if !txt.trim().is_empty() {
+                    let bak = path.with_extension("json.corrupt.bak");
+                    let _ = fs::write(&bak, &txt);
+                    eprintln!("[conv] state.json 解析失败({e}), 已备份到 {bak:?} 并回落空状态");
+                }
+                State::default()
+            }
+        }
     } else {
         State::default()
     };
@@ -104,10 +112,19 @@ pub fn init(_app: &AppHandle) -> Result<()> {
         });
     }
 
-    // 首启一次性: 赠送「毛主席」项目 + 写入毛主席人格 CLAUDE.md。
-    // 插到最前, 作为默认进入的项目, 让对话框彩蛋空状态可见。
-    if !state.seeded_mao {
-        // 找到/新建毛主席项目，写入人格并绑定其专属资料库 scope（raw/毛主席）。
+    // 注: 此前这里还会首启赠送「毛主席」项目 —— 已随「名人资料包」改版移除,
+    // 改为安装毛主席资料包时由 `ensure_mao_project` 创建。
+
+    *STATE.write() = state;
+    persist();
+    Ok(())
+}
+
+/// 「毛主席」资料包安装时调用: 找到/新建「毛主席」项目(插到最前), 写入人格 CLAUDE.md
+/// 并绑定专属资料库 scope(`raw/毛主席`)。幂等; 用户删了项目后重装资料包会重建。
+pub fn ensure_mao_project() {
+    {
+        let mut state = STATE.write();
         let mao_pid = match state.projects.iter().position(|p| p.name == MAO_PROJECT_NAME) {
             Some(i) => state.projects[i].id.clone(),
             None => {
@@ -135,12 +152,8 @@ pub fn init(_app: &AppHandle) -> Result<()> {
                 p.kb_scope = Some("raw/毛主席".into());
             }
         }
-        state.seeded_mao = true;
     }
-
-    *STATE.write() = state;
     persist();
-    Ok(())
 }
 
 /// 把毛主席人格 CLAUDE.md 写到该项目目录 `~/Polaris/projects/<id>/CLAUDE.md`。
@@ -161,11 +174,25 @@ fn write_mao_persona(project_id: &str) {
     }
 }
 
+/// 原子落盘: 临时文件 + rename。每条消息都会 persist(), 裸 fs::write 在断电/崩溃时
+/// 会把 state.json 截成半截 JSON, 下次启动解析失败 → 全部项目/对话静默蒸发。rename
+/// 在同卷原子, 目标要么旧要么新, 绝不残缺。范式同 provider::atomic_write。
+fn atomic_write_state(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".polaris.tmp");
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, contents)?;
+    fs::rename(&tmp, path)
+}
+
 fn persist() {
     let st = STATE.read();
     let path = STATE_PATH.read().clone();
+    if path.as_os_str().is_empty() {
+        return;
+    }
     if let Ok(txt) = serde_json::to_string_pretty(&*st) {
-        let _ = fs::write(&path, txt);
+        let _ = atomic_write_state(&path, &txt);
     }
 }
 
@@ -344,8 +371,22 @@ pub fn conv_set_project_kb_scope(project_id: String, kb_scope: Option<String>) -
     Ok(())
 }
 
+/// project_id 直接拼进文件系统路径, 必须挡掉 `..` / 路径分隔符 / 盘符,
+/// 否则前端传 `..\..\dir` 可让 create_dir_all / 写 CLAUDE.md 越出 projects 根。
+/// 真实 id 由 `new_id("p")` 生成(纯字母数字), 故该闸不会误伤合法项目。
+pub fn is_safe_project_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains("..")
+        && !id.contains(':')
+}
+
 /// 该项目在磁盘上的工作目录 `~/Polaris/projects/<id>/`(须与 write_mao_persona / claude_md 一致)。
 fn project_dir(project_id: &str) -> Option<PathBuf> {
+    if !is_safe_project_id(project_id) {
+        return None;
+    }
     let user = UserDirs::new()?;
     Some(
         user.home_dir()

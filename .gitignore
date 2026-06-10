@@ -46,3 +46,6 @@ PolarisKB/.polaris_seeded
 .claude-seed/
 .docker-build.log
 docker-compose.override.yml
+
+__pycache__/
+*.pyc

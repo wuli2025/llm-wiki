@@ -165,8 +165,19 @@ h4,.h4{font-size:22px;line-height:1.3;font-weight:600;margin:0 0 8px}
 @keyframes animZoom{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:none}}
 @keyframes animSlideLeft{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:none}}
 @keyframes animSlideRight{from{opacity:0;transform:translateX(-40px)}to{opacity:1;transform:none}}
-/* When exporting to images/PDF we disable entrance animations for clean stills. */
-html.no-anim *{animation:none!important;opacity:1!important;transform:none!important}
+/* When exporting to images/PDF we disable entrance animations for clean stills.
+ * CRITICAL: do NOT force every element to opacity:1 — that would also reveal the
+ * inactive .slide layers (which are opacity:0 by design) and stack all slides on
+ * top of each other in the screenshot. Only reveal animated content INSIDE the
+ * active slide; slide-level visibility stays governed by .slide / .slide.is-active. */
+html.no-anim *{animation:none!important;transition:none!important}
+html.no-anim .slide.is-active [data-anim],
+html.no-anim .slide.is-active .anim-fade-up,
+html.no-anim .slide.is-active .anim-fade,
+html.no-anim .slide.is-active .anim-zoom,
+html.no-anim .slide.is-active .anim-slide-left,
+html.no-anim .slide.is-active .anim-slide-right,
+html.no-anim .slide.is-active .anim-stagger-list>*{opacity:1!important;transform:none!important}
 
 /* ================= PRINT ================= */
 @media print{

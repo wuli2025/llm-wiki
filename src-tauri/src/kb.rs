@@ -23,7 +23,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager};
@@ -63,7 +63,7 @@ static KB_ROOT: Lazy<RwLock<PathBuf>> = Lazy::new(|| RwLock::new(PathBuf::new())
 
 // ───────────────────────── Init ──────────────────────────
 
-pub fn init(app: &AppHandle) -> Result<()> {
+pub fn init(_app: &AppHandle) -> Result<()> {
     let settings = load_settings();
     let root = settings
         .kb_root
@@ -72,13 +72,13 @@ pub fn init(app: &AppHandle) -> Result<()> {
         .unwrap_or_else(|| default_kb_root().unwrap_or_else(|_| PathBuf::from(".")));
     ensure_skeleton(&root)?;
     *KB_ROOT.write() = root.clone();
-    // 把「播种默认库 + 全量扫描解析」挪到后台线程，别拖住窗口出现。
-    // 这俩是启动卡顿主因：seed_default_kb 首启要拷贝整套默认资料库；scan_all 会 WalkDir
-    // 递归读+解析每篇 .md（KB 越大越慢）。而 INDEX 只被 KB 视图/命令按需用，首屏根本不读它，
-    // 所以启动即设好 KB_ROOT（其它板块要它、且很轻），重活丢后台几百 ms 内填好 INDEX。
-    let app = app.clone();
+    // 把「全量扫描解析」挪到后台线程，别拖住窗口出现。
+    // scan_all 会 WalkDir 递归读+解析每篇 .md（KB 越大越慢）。而 INDEX 只被 KB 视图/命令
+    // 按需用，首屏根本不读它，所以启动即设好 KB_ROOT（其它板块要它、且很轻），
+    // 重活丢后台几百 ms 内填好 INDEX。
+    // 注: 此前这里还有「首启播种毛主席资料库」(seed_default_kb)——已改成「名人资料包」
+    // 按需安装(kb_pack_install)，不再初始自带。
     std::thread::spawn(move || {
-        seed_default_kb(&app, &root);
         let docs = scan_all(&root);
         *INDEX.write() = docs;
     });
@@ -91,24 +91,105 @@ fn default_kb_root() -> Result<PathBuf> {
     Ok(home.join("Polaris").join("PolarisKB"))
 }
 
-// ───────────────────────── 默认资料库播种 ─────────────────────────
+// ───────────────────────── 名人资料包 (KB Packs) ─────────────────────────
+//
+// 随安装包打进来的名人资料(`resources/seed-kb/<名人>/`)**不再首启自动播种**，
+// 改为「名人知识库」里的可安装资料包：点「下载到我的资料库」才拷到 `<KB>/raw/<名人>/`，
+// 并顺带把配套 skill(内含该资料库的使用方法)装到用户技能目录 —— 资料和用法一起到手。
+// 移除资料包时配套 skill 一并移除。
 
-/// 首启一次性播种「默认资料库」: 把随安装包打进来的毛主席资料库拷到 KB 的 `raw/` 下。
-/// 用一次性 marker(`<root>/.polaris_seeded`)记录, 之后即便用户在「管理」里清空、
-/// 或在「浏览」里逐条删除, 重启也 **不会** 再次重播 —— 尊重用户对资料库的删除。
-fn seed_default_kb(app: &AppHandle, root: &Path) {
-    let marker = root.join(".polaris_seeded");
-    if marker.exists() {
-        return;
-    }
-    if let Some(src) = seed_source(app) {
-        let _ = copy_dir_recursive(&src, &root.join("raw"));
-    }
-    // 不管有没有播到内容都打 marker, 避免每次启动都尝试拷贝
-    let _ = fs::write(&marker, b"seeded\n");
+/// 资料包定义(编译期目录)。payload 走 `resources/seed-kb/<dir>`，仍随安装包分发，
+/// 「下载」即本地拷贝，离线可用；将来要做远程包再扩 source 字段。
+struct KbPackDef {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    /// `resources/seed-kb/` 与 `raw/` 下共用的目录名
+    dir: &'static str,
+    /// 配套 skill(技能目录 id)，安装/移除资料包时一并装/卸
+    skill_id: &'static str,
 }
 
-/// 定位打进安装包的资料库种子目录(其内含 `毛主席/`)。
+fn pack_catalog() -> Vec<KbPackDef> {
+    vec![KbPackDef {
+        id: "mao",
+        name: "毛主席",
+        description: "《毛泽东选集》等著作的结构化资料库。装入后消息里写「请教毛主席」即可让他用毛选式大白话 + 矛盾分析法客观分析问题、生成标注来源的 HTML；同时自动创建「毛主席」人格项目。",
+        dir: "毛主席",
+        skill_id: "consult-mao",
+    }]
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KbPackMeta {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub skill_id: String,
+    pub installed: bool,
+}
+
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn kb_pack_list() -> Vec<KbPackMeta> {
+    let root = KB_ROOT.read().clone();
+    pack_catalog()
+        .into_iter()
+        .map(|p| KbPackMeta {
+            id: p.id.into(),
+            name: p.name.into(),
+            description: p.description.into(),
+            skill_id: p.skill_id.into(),
+            installed: root.join("raw").join(p.dir).exists(),
+        })
+        .collect()
+}
+
+/// 安装资料包：拷资料到 `raw/<名人>/` + 重扫索引 + 装配套 skill。返回索引文件总数。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn kb_pack_install(app: AppHandle, id: String) -> Result<usize, String> {
+    let pack = pack_catalog()
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("没有资料包 '{}'", id))?;
+    let src = seed_source(&app)
+        .map(|s| s.join(pack.dir))
+        .filter(|s| s.exists())
+        .ok_or("安装包内未找到该资料包的数据(资源目录缺失)")?;
+    let root = KB_ROOT.read().clone();
+    copy_dir_recursive(&src, &root.join("raw").join(pack.dir)).map_err(|e| e.to_string())?;
+    let docs = scan_all(&root);
+    let n = docs.len();
+    *INDEX.write() = docs;
+    // 配套 skill(含资料库使用方法)装到用户技能目录。best-effort: 失败不回滚资料。
+    let _ = crate::skills::install_skill(pack.skill_id.to_string());
+    // 毛主席包附带「毛主席」人格项目(人格 CLAUDE.md + 专属 KB scope)
+    if pack.id == "mao" {
+        crate::conv::ensure_mao_project();
+    }
+    Ok(n)
+}
+
+/// 移除资料包：删 `raw/<名人>/` + 重扫索引 + 卸配套 skill。返回索引文件总数。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn kb_pack_remove(id: String) -> Result<usize, String> {
+    let pack = pack_catalog()
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("没有资料包 '{}'", id))?;
+    let root = KB_ROOT.read().clone();
+    let dst = root.join("raw").join(pack.dir);
+    if dst.exists() {
+        fs::remove_dir_all(&dst).map_err(|e| e.to_string())?;
+    }
+    let _ = crate::skills::delete_skill(pack.skill_id.to_string());
+    let docs = scan_all(&root);
+    let n = docs.len();
+    *INDEX.write() = docs;
+    Ok(n)
+}
+
+/// 定位打进安装包的资料库种子目录(其内含 `毛主席/` 等资料包数据)。
 /// 发布版走 Tauri `resource_dir`; 开发期回退到 `src-tauri/resources/seed-kb`。
 fn seed_source(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(rd) = app.path().resource_dir() {
@@ -354,6 +435,39 @@ pub fn kb_scan() -> Result<usize, String> {
 
 static KB_COMPILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// 知识库维护互斥: compile / enrich_links / dedup 三者都 spawn 后台线程改写同一批 wiki
+/// 文件(读-改-写)。并发跑会互相覆盖(lost update)甚至 dedup 删文件时 enrich 正在写它。
+/// 用一个全局忙标志串行化, RAII guard 在线程结束(Drop)时自动释放。
+static KB_TASK_BUSY: AtomicBool = AtomicBool::new(false);
+
+struct KbTaskGuard;
+impl Drop for KbTaskGuard {
+    fn drop(&mut self) {
+        KB_TASK_BUSY.store(false, Ordering::SeqCst);
+    }
+}
+/// 抢占维护锁; 已有任务在跑则返回 Err(前端可提示稍候)。把返回的 guard `move` 进后台线程,
+/// 线程跑完(正常/出错/panic)都会 Drop 释放。
+fn acquire_kb_task() -> Result<KbTaskGuard, String> {
+    if KB_TASK_BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("已有知识库维护任务在运行, 请等它结束后再试".into());
+    }
+    Ok(KbTaskGuard)
+}
+
+/// KB 内容原子落盘: 临时文件 + rename(同卷原子)。dedup/enrich 改写 wiki 页时若裸 fs::write
+/// 中途崩溃会把页面截成半截, 丢失 AI/用户内容。统一走这里。
+fn kb_atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".polaris.tmp");
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, contents)?;
+    fs::rename(&tmp, path)
+}
+
 /// 编译进度事件 (前端「构建知识网」进度面板订阅 `kb:compile`)。
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -453,8 +567,10 @@ pub fn kb_compile(app: AppHandle) -> Result<String, String> {
     let root_disp = root.to_string_lossy().replace('\\', "/");
     let prompt = compile_directive(&root_disp);
 
+    let _kb_task = acquire_kb_task()?;
     let run_id_thread = run_id.clone();
     std::thread::spawn(move || {
+        let _kb_task = _kb_task; // 持锁直到本线程结束(Drop 释放)
         emit_compile(&app, &run_id_thread, "phase", Some("启动 wiki 维护者…".into()));
 
         // prompt 经 stdin 喂给 claude (而非命令行参数): 大 prompt 不会撞 Windows 命令行
@@ -934,8 +1050,10 @@ pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
         return Err("wiki/ 暂无可链接的页面, 请先构建知识网".into());
     }
 
+    let _kb_task = acquire_kb_task()?;
     let run_id_t = run_id.clone();
     std::thread::spawn(move || {
+        let _kb_task = _kb_task; // 持锁直到本线程结束(Drop 释放)
         let emit = |kind: &str, text: Option<String>, applied: Option<usize>| {
             let _ = app.emit(
                 "kb:enrich",
@@ -1022,7 +1140,7 @@ pub fn kb_enrich_links(app: AppHandle) -> Result<String, String> {
                 }
             }
             if changed {
-                if fs::write(&full, &content).is_ok() {
+                if kb_atomic_write(&full, &content).is_ok() {
                     emit("phase", Some(format!("已补链: {}", page.rsplit('/').next().unwrap_or(&page))), None);
                 }
             }
@@ -1170,8 +1288,10 @@ pub fn kb_dedup(app: AppHandle) -> Result<String, String> {
         return Err("规则粗筛未发现疑似重复页 (标题归一化后无碰撞)".into());
     }
 
+    let _kb_task = acquire_kb_task()?;
     let run_id_t = run_id.clone();
     std::thread::spawn(move || {
+        let _kb_task = _kb_task; // 持锁直到本线程结束(Drop 释放)
         let emit = |kind: &str, text: Option<String>, merged: Option<usize>| {
             let _ = app.emit(
                 "kb:dedup",
@@ -1299,7 +1419,7 @@ fn merge_duplicate_page(root: &Path, canonical: &str, dup: &str) -> Result<(), S
     canon_body.push_str(&format!(
         "\n<!-- 合并自 {dup} (kb_dedup) -->\n## (并入) {dup_title}\n\n{dup_content}\n"
     ));
-    fs::write(&canon_full, &canon_body).map_err(|e| e.to_string())?;
+    kb_atomic_write(&canon_full, &canon_body).map_err(|e| e.to_string())?;
 
     // ② 全库重写双链 [[dup_title]] → [[canon_title]]
     if !dup_title.eq_ignore_ascii_case(&canon_title) {
@@ -1319,7 +1439,7 @@ fn merge_duplicate_page(root: &Path, canonical: &str, dup: &str) -> Result<(), S
                 if content.contains(&format!("[[{dup_title}")) {
                     let rewritten = rewrite_wikilink_target(&content, &dup_title, &canon_title);
                     if rewritten != content {
-                        let _ = fs::write(p, rewritten);
+                        let _ = kb_atomic_write(p, &rewritten);
                     }
                 }
             }
@@ -1338,7 +1458,7 @@ fn merge_duplicate_page(root: &Path, canonical: &str, dup: &str) -> Result<(), S
             .collect();
         let new_idx = kept.join("\n");
         if new_idx != idx_content {
-            let _ = fs::write(&index_md, new_idx);
+            let _ = kb_atomic_write(&index_md, &new_idx);
         }
     }
     Ok(())
@@ -1675,7 +1795,7 @@ pub fn kb_delete(rel_path: String) -> Result<usize, String> {
 
 /// 清空资料库(管理页「清空资料库」用): 删除 `raw/` 下全部资料并重建空 `raw/`,
 /// 保留三层骨架与 CLAUDE.md / wiki。返回清空后剩余索引文件数。
-/// 注: 不删 `<root>/.polaris_seeded` marker, 所以重启 **不会** 重新播种默认资料库。
+/// 已安装的名人资料包随之清掉, 想要回来去「名人资料包」重新安装即可。
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn kb_clear() -> Result<usize, String> {
     let root = KB_ROOT.read().clone();
@@ -1867,6 +1987,138 @@ pub struct KbUploadResult {
     pub message: String,
 }
 
+// ───────────────────────── 批量转换 md (管理页「批量转换 md 文件」) ─────────────────────────
+//
+// 与拖拽上传/ingest 的差别: 这是「只要 markdown」的批量通道 ——
+// 可抽文本的 (PDF/Word/Excel/PPT/文本/代码) 转成 .md 入 raw/;
+// 视频类明确跳过 (主要针对非视频类文件, 视频留给将来的 ASR 链路);
+// 图片/音频/压缩包等抽不出文本的也跳过**而不是原样复制**, 避免把大体积二进制灌进知识库。
+
+/// 视频扩展名 (小写)。注意不含 "ts" —— 那会误伤 TypeScript 源码 (TEXT_EXTS 按文本转)。
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "m2ts", "3gp",
+    "rmvb", "rm", "vob", "ogv",
+];
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KbConvertReport {
+    /// 扫到的文件总数
+    pub total: usize,
+    /// 成功转成 md 的数量 (含缓存命中复用)
+    pub converted: usize,
+    /// 视频类跳过数
+    pub skipped_video: usize,
+    /// 其它跳过数 (图片/音频/压缩包等不可抽文本, 以及 KB 内已是 md 的文件)
+    pub skipped_other: usize,
+    /// 失败明细 "文件名: 原因"
+    pub failed: Vec<String>,
+}
+
+/// 批量转换: 路径(文件或文件夹, 文件夹递归展开)下的非视频类文件 → markdown 入 raw/ 并增量索引。
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn kb_convert_batch(paths: Vec<String>) -> Result<KbConvertReport, String> {
+    const MAX_FILES: usize = 2000;
+    let root = KB_ROOT.read().clone();
+    let raw_dir = root.join("raw");
+    fs::create_dir_all(&raw_dir).map_err(|e| e.to_string())?;
+
+    let files = expand_to_files(&paths, MAX_FILES);
+    if files.is_empty() {
+        return Err("没找到文件: 请确认填的是存在的文件或文件夹绝对路径".into());
+    }
+
+    let mut cache = IngestCache::load(&root);
+    let mut report = KbConvertReport {
+        total: files.len(),
+        converted: 0,
+        skipped_video: 0,
+        skipped_other: 0,
+        failed: Vec::new(),
+    };
+    let mut new_rels: Vec<String> = Vec::new();
+
+    for f in &files {
+        let ext = f
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if VIDEO_EXTS.contains(&ext.as_str()) {
+            report.skipped_video += 1;
+            continue;
+        }
+        // KB 根内已是 md 的文件不重转, 防止用户把 KB 根自己填进来时自吞出 "(2)" 副本
+        if ext == "md" && f.starts_with(&root) {
+            report.skipped_other += 1;
+            continue;
+        }
+        match convert_one_md(&root, &raw_dir, f, &mut cache) {
+            Ok(Some(rel)) => {
+                report.converted += 1;
+                new_rels.push(rel);
+            }
+            Ok(None) => report.skipped_other += 1,
+            Err(e) => {
+                let name = f
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| f.to_string_lossy().to_string());
+                report.failed.push(format!("{name}: {e}"));
+            }
+        }
+    }
+    cache.save(&root);
+
+    // 增量索引新产物, 避免全量重扫
+    for rel in &new_rels {
+        let full = root.join(rel);
+        if let Ok(rp) = full.strip_prefix(&root) {
+            if let Some(doc) = parse_doc(&full, rp) {
+                index_add_doc(doc);
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// 单文件「只要 md」转换: 可抽文本 → 写 raw/<stem>.md 并记缓存; 不可抽 → Ok(None) 跳过。
+/// 与 ingest_one 的差别: 不做「不可转就原样复制」的兜底。
+fn convert_one_md(
+    root: &Path,
+    raw_dir: &Path,
+    src: &Path,
+    cache: &mut IngestCache,
+) -> Result<Option<String>, String> {
+    if !src.is_file() {
+        return Err("不是文件".into());
+    }
+    let src_key = src.to_string_lossy().replace('\\', "/");
+    let fingerprint = content_fingerprint(src);
+    if let Some(fp) = &fingerprint {
+        if let Some(raw_rel) = cache.lookup_valid(root, &src_key, fp) {
+            // 只复用 md 产物; 旧通道原样复制进来的非 md 产物不算"已转换"
+            if raw_rel.ends_with(".md") {
+                return Ok(Some(raw_rel));
+            }
+        }
+    }
+    let Some(md) = convert::convert_to_markdown(src)? else {
+        return Ok(None);
+    };
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "untitled".into());
+    let dst = unique_path(raw_dir, &stem, "md");
+    let titled = format!("# {stem}\n\n{md}");
+    fs::write(&dst, titled).map_err(|e| e.to_string())?;
+    let rel = rel_of(root, &dst);
+    if let Some(fp) = fingerprint {
+        cache.record(src_key, fp, rel.clone());
+    }
+    Ok(Some(rel))
+}
+
 // ───────────────────────── 增量入库缓存 (借鉴 llm_wiki ingest-cache) ─────────────────────────
 //
 // 痛点: 重复拖同一批资料入库, 每次都全量重转 (PDF/docx 抽取很贵)。
@@ -1925,6 +2177,10 @@ impl IngestCache {
         Some(raw_rel.clone())
     }
 
+    /// 该源已记录的旧产物相对路径(用于内容变更时删除陈旧副本)。
+    fn stale_artifact(&self, src_key: &str) -> Option<String> {
+        self.entries.get(src_key).map(|(_, rel)| rel.clone())
+    }
     fn record(&mut self, src_key: String, fp: String, raw_rel: String) {
         self.entries.insert(src_key, (fp, raw_rel));
         self.dirty = true;
@@ -1949,6 +2205,15 @@ fn ingest_one(root: &Path, src: &Path, cache: &mut IngestCache) -> Result<String
     if let Some(fp) = &fingerprint {
         if let Some(raw_rel) = cache.lookup_valid(root, &src_key, fp) {
             return Ok(raw_rel);
+        }
+    }
+
+    // 指纹变了(源文件被编辑过重新拖入): 先删旧产物。否则 unique_path 会另写 "stem (2).md",
+    // 旧的陈旧内容永远留在 raw/ 和 INDEX 里, 被搜索/图谱/编译当成独立页一并引用。
+    if let Some(old_rel) = cache.stale_artifact(&src_key) {
+        let old = root.join(&old_rel);
+        if old.exists() {
+            let _ = fs::remove_file(&old);
         }
     }
 

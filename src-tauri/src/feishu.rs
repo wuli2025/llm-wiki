@@ -629,7 +629,6 @@ fn handle_bridge_line(app: &AppHandle, cfg: &FeishuConfig, bot_open_id: &str, li
                 skill_ids: None,
                 conversation_id: Some(conv_id.clone()),
                 goal: None,
-                consult_mao: false,
                 dynamic_workflow: false,
                 use_kb: false,
                 batch_build: false,
@@ -686,6 +685,19 @@ fn run_bridge_once(app: &AppHandle, dir: &std::path::Path, cfg: &FeishuConfig, b
         }
     };
     let pid = child.id();
+    // stderr 必须排水: 设了 piped 却没人读, node 写满 ~64KB 管道缓冲就会阻塞, 连带停止
+    // 写 stdout → 网关「活着但不发消息」静默挂死, 守护线程也不会重起。开线程读掉并转日志。
+    if let Some(stderr) = child.stderr.take() {
+        let app_err = app.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let line = line.trim();
+                if !line.is_empty() {
+                    emit_log(&app_err, format!("[bridge stderr] {line}"));
+                }
+            }
+        });
+    }
     let stdout = match child.stdout.take() {
         Some(s) => s,
         None => return 0,

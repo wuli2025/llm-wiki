@@ -86,7 +86,23 @@ const WECHAT_TS_ID: &str = "wechat-md-typesetter";
 //     兜底 render 复用已开 ctx 开新标签（不再另起同步 Playwright→消除 'Sync API inside asyncio loop' 崩溃）。
 // v4：按真机 dump 校 SELECTORS —— editor_body 加新版 ProseMirror；title_input 改专指文章标题(避开草稿箱搜索框)；
 //     new_article_entry 精确点「写图文」。注：editor_body 仍需真机在编辑器打开态确认一次。
-const WECHAT_TS_VERSION: &str = "4";
+// v5：两段解耦根治「老卡在上传」—— 注入改走「粘贴通道」(合成 ClipboardEvent，走 ProseMirror 事务，
+//     和真壹伴/135editor 同路；innerHTML 硬塞会被 PM 清掉/不入草稿数据)，配三级降级+字数校验+保存回执；
+//     publish 拆两段(先纯文字稳传入草稿，再套样式，样式挂了文字也已落地)；新增 --text-only 与
+//     restyle 模式(对已存草稿原地换主题，normalize 后幂等不叠样式)；--timeout 可调(默认 300s)。
+// v6：panel 模式(壹伴插件形态)——编辑器页面右侧注入可视化面板：7 套主题模板点选换肤 +「AI 改风格」
+//     大白话定制(expose_function 桥→python→claude CLI 生成主题 JSON)+清除样式+保存草稿；
+//     STYLIZE 支持主题对象/bg 整体背景/overrides 微调/plain 素颜，新增清新绿/活力橙/米纸预设。
+// v7：按真机反馈三修——①背景改不了：bg 从「包 section」改「按块铺设」(每块自带 background 内联,
+//     编辑器剥不掉,135editor 同法)；②换肤改「原地直改活 DOM」优先(像浏览器插件改 HTML),粘贴通道
+//     降为兜底；③AI 用不了：expose_function 桥换成页面变量轮询握手(__polarisAI.pending↔__polarisAIResult)；
+//     模板升到 8 套×6 种标题形态(h2Mode)，新增黛青。
+// v8：长图链路(用户拍板的新路线,根治编辑器改字数/清样式)——snapshot=成品 HTML→全页截长图(@2x)
+//     →段落空隙切片(下钻单子链找段落层;clip 配 full_page=True 才能裁视口外)+manifest;
+//     publish-image=切片转 dataURL→File→合成 paste 贴进编辑器(原生欢迎零清洗)→等 img 落位/
+//     换 mmbiz 外链→真文字导语(--intro)→填标题→存草稿。MediaOps 加「长图模式」开关(__longimg,
+//     隐式带上本技能)。snapshot 已本地实测(单/多切片+段落切点目检);publish-image 待真机。
+const WECHAT_TS_VERSION: &str = "8";
 const WECHAT_TS_SKILL_MD: &str =
     include_str!("templates/skills/wechat-md-typesetter/SKILL.md");
 const WECHAT_TS_YIBAN_PY: &str =
@@ -117,6 +133,15 @@ fn catalog() -> Vec<CatalogSkill> {
             source: "third-party",
             preinstalled: true,
             system_prompt: include_str!("templates/skills/deep-research.md"),
+        },
+        // ── 名人资料包配套技能（随知识库「名人资料包」一起装/卸，不单独预装） ──
+        CatalogSkill {
+            id: "consult-mao",
+            name: "请教毛主席",
+            description: "化身毛主席，用毛选式大白话+矛盾分析法客观分析问题：调毛主席资料库取证、站在未来看今天，生成标注来源的自包含 HTML。随「毛主席」名人资料包一起安装，装好后消息里写「请教毛主席」即自动激活",
+            source: "official",
+            preinstalled: false,
+            system_prompt: include_str!("templates/skills/consult-mao.md"),
         },
         CatalogSkill {
             id: "skill-creator",
@@ -589,14 +614,42 @@ pub fn detect_image_intent(prompt: &str) -> bool {
     triggers.iter().any(|t| lower.contains(t))
 }
 
+/// 检测是否是「请教毛主席」的任务（原对话框开关，现改为技能 + 意图自动激活：
+/// 消息里写「请教毛主席」等说法即注入毛选式分析指令，无需任何按钮）。
+pub fn detect_mao_consult_intent(prompt: &str) -> bool {
+    let triggers = [
+        "请教毛主席",
+        "请教一下毛主席",
+        "问问毛主席",
+        "问一下毛主席",
+        "毛主席怎么看",
+        "毛主席会怎么",
+        "以毛主席的视角",
+        "用毛主席的视角",
+        "从毛主席的视角",
+        "用毛选分析",
+        "毛选式分析",
+    ];
+    triggers.iter().any(|t| prompt.contains(t))
+}
+
 /// 按任务意图自动激活的 skill（不依赖用户在对话框点选）。可返回多个。
 /// 创建技能意图 → skill-creator；网页/浏览器自动化 → cloak-browser；
-/// 做 PPT → pptx；生成图片 → image-gen。
+/// 做 PPT → pptx；生成图片 → image-gen；请教毛主席 → consult-mao。
 pub fn auto_skills_for_intent(prompt: &str) -> Vec<(SkillMeta, String)> {
     let mut out = Vec::new();
     if detect_skill_creation_intent(prompt) {
         if let Some(s) = find("skill-creator") {
             out.push(s);
+        }
+    }
+    if detect_mao_consult_intent(prompt) {
+        // 只在已安装时注入(skill 随「毛主席」名人资料包一起装到用户技能目录;
+        // 没装资料包就注入指令只会让模型对着空目录瞎找)
+        if let Some(s) = find("consult-mao") {
+            if s.0.installed {
+                out.push(s);
+            }
         }
     }
     if detect_browser_intent(prompt) {
@@ -928,6 +981,26 @@ fn write_video_studio_files(dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 老用户迁移：早期版本首启会自动播种毛主席资料库、且 consult-mao 的前身(对话框开关 /
+/// 预装技能)开箱即用；改版后 skill 随「毛主席」名人资料包安装。已被播种过资料
+/// (`<KB>/raw/毛主席` 在盘上)但技能目录里没有 consult-mao 的老用户，启动时补装一次，
+/// 避免升级后「请教毛主席」失效。资料不在(从未播种/已移除)则不动。best-effort。
+pub fn migrate_consult_mao_for_seeded_kb() {
+    let kb_raw_mao = std::path::PathBuf::from(crate::kb::kb_root())
+        .join("raw")
+        .join("毛主席");
+    if !kb_raw_mao.exists() {
+        return;
+    }
+    let Some(root) = skills_dir() else {
+        return;
+    };
+    if root.join("consult-mao").join("skill.md").exists() {
+        return;
+    }
+    let _ = install_skill("consult-mao".to_string());
+}
+
 /// 启动时确保「壹伴排版优化」技能在 ~/Polaris/skills 落盘（多文件，含 wechat_yiban.py 可执行脚本）。
 ///
 /// 与 deck/video studio 同策略：目录缺失 / 版本旧（`.polaris_version` < `WECHAT_TS_VERSION`）就（重）写；
@@ -1155,6 +1228,16 @@ fn unzip(zip: &Path, dest: &Path) -> Result<(), String> {
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn delete_skill(id: String) -> Result<(), String> {
+    // 安全闸: id 直接拼进 remove_dir_all 的路径, 必须挡掉 `..` / 路径分隔符 / 盘符,
+    // 否则前端(或被注入的 webview 脚本)能传 `..\..\Docs` 或绝对路径删任意目录。
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || id.contains(':')
+    {
+        return Err("非法技能 ID".into());
+    }
     let Some(root) = skills_dir() else {
         return Err("无法获取用户目录".into());
     };
