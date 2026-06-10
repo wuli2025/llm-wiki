@@ -723,6 +723,26 @@ def _mark_body(frame):
     return None
 
 
+# 新版编辑器标题框也是 ProseMirror（最矮的那个）。仅当存在 ≥2 个 PM（标题+正文）才标记——
+# 老版编辑器标题是 textarea、只有 1 个正文 PM，这里返回 None，交给 textarea 路处理。
+JS_MARK_SHORTEST_TITLE = r"""
+() => {
+  var pms = Array.prototype.slice.call(
+    document.querySelectorAll("div.ProseMirror[contenteditable=true]"));
+  if (pms.length < 2) return null;
+  var best = null, bestH = Infinity;
+  pms.forEach(function (el) {
+    var h = el.offsetHeight || el.clientHeight || 0;
+    if (h > 0 && h < bestH) { bestH = h; best = el; }
+  });
+  if (!best) return null;
+  pms.forEach(function (el) { el.removeAttribute("data-polaris-title"); });
+  best.setAttribute("data-polaris-title", "1");
+  return true;
+}
+"""
+
+
 def _find_editor(ctx_or_page):
     """跨「所有标签页 × 所有 frame」找正文可编辑容器（公众号「写图文」常开在新标签，正文又在 UEditor
     的 iframe 里）。返回 (page, frame, selector)；找不到返回 (None, None, None)。"""
@@ -801,24 +821,39 @@ def _inject_html(frame, body_sel, html, expect_len):
 
 
 def _fill_title(frame, editor_page, title):
-    """填标题（best-effort）：标题框可能在编辑器 frame 或其所在标签页主文档。"""
+    """填标题（best-effort，新旧编辑器都兼容）：
+    ① 老版：标题是 textarea（#js_title）→ fill/type。
+    ② 新版：标题框也是 ProseMirror（最矮的那个）→ 标记最矮 PM、点击聚焦、键入。
+    标题框可能在编辑器 frame 或其所在标签页主文档。"""
     if not title:
         return False
+    # ① 老版 textarea 标题
     tin, _ = _first(frame, SELECTORS["title_input"])
     if not tin:
         tin, _ = _first(editor_page, SELECTORS["title_input"])
-    if not tin:
-        return False
-    try:
-        tin.fill(title)
-        return True
-    except Exception:
+    if tin:
         try:
-            tin.click()
-            tin.type(title)
+            tin.fill(title)
             return True
         except Exception:
-            return False
+            try:
+                tin.click()
+                tin.type(title)
+                return True
+            except Exception:
+                pass
+    # ② 新版 ProseMirror 标题（修复文档①：新版编辑器标题也是 PM，旧 textarea 选择器抓不到）
+    for fr in (frame, editor_page):
+        try:
+            if fr.evaluate(JS_MARK_SHORTEST_TITLE):
+                el = fr.query_selector('[data-polaris-title="1"]')
+                if el:
+                    el.click()  # 聚焦标题 PM
+                    editor_page.keyboard.type(title)  # 真键入，走 ProseMirror 事务
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 def _save_draft(editor_page):
