@@ -289,6 +289,63 @@ pub fn screenshot(
     Ok(json!({ "ok": true, "out": out_png, "chromium": chromium, "device_scale": device_scale }))
 }
 
+/// 隐形文本层第一步:用 chromium `--dump-dom` 抽取 deck 某页渲染后的文本+包围盒。
+/// 页面在 `?extract=1` 时(runtime.js 提供)把 `[{text,x,y,w,h}]` 写进
+/// `<script id="polaris-text-rects">`;dump-dom 输出 JS 跑完的 DOM,我们从中解析出来。
+/// **无需 chromiumoxide/CDP**。返回 rect 数组(空数组=该页无文本或非 Polaris deck)。
+pub fn extract_text_rects(deck: &str, slide: usize, width: u32, height: u32) -> Result<Vec<Value>, String> {
+    let chromium = crate::forge::find_chromium()
+        .ok_or_else(|| "未找到 chromium/chrome".to_string())?;
+    let file_base = if deck.starts_with("http://")
+        || deck.starts_with("https://")
+        || deck.starts_with("file://")
+    {
+        deck.to_string()
+    } else {
+        let abs = std::fs::canonicalize(deck).map_err(|e| format!("找不到 deck {deck}: {e}"))?;
+        format!("file://{}", abs.to_string_lossy().replace('\\', "/"))
+    };
+    let url = format!("{file_base}?export=1&extract=1#/{slide}");
+    // --virtual-time-budget 让 chromium 跑完页面 JS(含 load/rAF)后退出,--dump-dom 输出最终 DOM。
+    let out = std::process::Command::new(&chromium)
+        .args([
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--hide-scrollbars",
+            &format!("--window-size={width},{height}"),
+            "--virtual-time-budget=3000",
+            "--dump-dom",
+            &url,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("启动 chromium --dump-dom 失败: {e}"))?;
+    if !out.status.success() {
+        return Err("chromium --dump-dom 失败".into());
+    }
+    parse_text_rects(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// 从 dump-dom 的 HTML 里抠出 `<script id="polaris-text-rects">` 的 JSON 数组。
+fn parse_text_rects(html: &str) -> Result<Vec<Value>, String> {
+    let marker = "id=\"polaris-text-rects\"";
+    let Some(i) = html.find(marker) else {
+        return Ok(Vec::new()); // 没有该元素 = 非 Polaris deck 或无文本,优雅返回空(不报错)。
+    };
+    let after = &html[i..];
+    let gt = after.find('>').ok_or("text-rects script 标签异常")?;
+    let body = &after[gt + 1..];
+    let end = body.find("</script>").ok_or("text-rects script 未闭合")?;
+    let json = body[..end].trim();
+    if json.is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str::<Vec<Value>>(json).map_err(|e| format!("text-rects JSON 解析失败: {e}"))
+}
+
 /// 数 deck.html 里的幻灯页数:统计 class 列表含独立 token `slide` 的元素(排除 slide-number 等)。
 /// 与 runtime.js 的 `.deck > .slide` 结构一致。数不到则返回 0(调用方退化为整页一张)。
 pub fn count_slides(html: &str) -> usize {
@@ -460,6 +517,53 @@ mod tests {
         assert!(r.is_err());
         let e = r.unwrap_err();
         assert!(e.contains("上限"), "应是上限错误,实际: {e}");
+    }
+
+    #[test]
+    fn parse_text_rects_extracts_json() {
+        let html = r#"<html><body><script type="application/json" id="polaris-text-rects">[{"text":"hi","x":10,"y":20,"w":100,"h":30}]</script></body></html>"#;
+        let r = parse_text_rects(html).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0]["text"], "hi");
+        // 无该元素 → 优雅返回空,不报错。
+        assert_eq!(parse_text_rects("<html></html>").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn extract_text_rects_via_dumpdom_when_chromium_present() {
+        // Edge CLI 的 --dump-dom 时序不可靠(Windows 桌面本走 WebView2,非此 CLI 路);
+        // 真 chromium/Chrome 才测(Docker 已手动验证机制正确:x100/y50/w200/h40)。
+        match crate::forge::find_chromium().as_deref() {
+            None => {
+                eprintln!("[e2e] 跳过:未发现 chromium/chrome");
+                return;
+            }
+            Some(c) if c.to_lowercase().contains("edge") => {
+                eprintln!("[e2e] 跳过:Edge CLI dump-dom 时序不可靠");
+                return;
+            }
+            _ => {}
+        }
+        let dir = std::env::temp_dir().join("forge_rects_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let deck = dir.join("deck.html");
+        std::fs::write(
+            &deck,
+            "<!doctype html><html><body>\
+<div id=\"t\" style=\"position:absolute;left:100px;top:50px;width:200px;height:40px\">Hello Polaris</div>\
+<script type=\"application/json\" id=\"polaris-text-rects\"></script>\
+<script>window.addEventListener('load',function(){var el=document.getElementById('t');\
+var r=el.getBoundingClientRect();document.getElementById('polaris-text-rects').textContent=\
+JSON.stringify([{text:el.textContent,x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height)}]);});</script>\
+</body></html>",
+        )
+        .unwrap();
+        let rects = extract_text_rects(&deck.to_string_lossy(), 1, 1280, 720)
+            .expect("extract_text_rects 应成功");
+        assert_eq!(rects.len(), 1, "应抽到 1 个文本框,实际: {rects:?}");
+        assert_eq!(rects[0]["text"], "Hello Polaris");
+        assert_eq!(rects[0]["x"].as_i64(), Some(100));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

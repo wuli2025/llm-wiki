@@ -82,8 +82,9 @@ jobs:
           workspaces: src-tauri
       - name: Install Google Chrome
         run: brew install --cask google-chrome || true
-      - name: 真实 deck→pptx on macOS
-        run: cargo test --no-default-features --features server --lib deck_to_pptx_e2e -- --nocapture
+      - name: 真实 deck→pptx + 文本提取 on macOS
+        # when_chromium_present 同时匹配 deck_to_pptx_e2e 与 extract_text_rects 两个真 Chrome e2e。
+        run: cargo test --no-default-features --features server --lib when_chromium_present -- --nocapture
 
   frontend:
     name: Frontend (type-check + build)
