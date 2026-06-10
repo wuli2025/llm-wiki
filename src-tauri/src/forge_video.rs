@@ -44,9 +44,18 @@ pub fn render_deck_to_video(
     } else if let Some(text) = narration.filter(|s| !s.trim().is_empty()) {
         let mp3 = frames.join("narration.mp3");
         match crate::forge_tts::synth(&text, &mp3.to_string_lossy(), None, None) {
-            Ok(_) => {
-                audio_label = "tts (MiniMax)";
-                Some(mp3.to_string_lossy().to_string())
+            Ok(res) => {
+                // 实际音频路径以返回为准(macOS say 会落 .m4a 而非 .mp3)。
+                let actual = res
+                    .get("out")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| mp3.to_string_lossy().to_string());
+                audio_label = match res.get("engine").and_then(|x| x.as_str()) {
+                    Some("macos-say") => "tts (macOS say 离线)",
+                    _ => "tts (MiniMax)",
+                };
+                Some(actual)
             }
             Err(e) => {
                 // 配音失败不阻断出片:退化为无声(诚实告知)。

@@ -66,9 +66,53 @@ pub fn synth(
     voice: Option<&str>,
     language_boost: Option<&str>,
 ) -> Result<Value, String> {
-    let key = discover_key().ok_or_else(|| {
-        "找不到 MiniMax key：在供应商坞启用「MiniMax」或设环境变量 MINIMAX_API_KEY".to_string()
-    })?;
+    // 有 key → MiniMax(L0 最佳);无 key → macOS 退系统 say 离线配音(L3,零安装),
+    // 其余平台报错让调用方降级无声。
+    if let Some(key) = discover_key() {
+        return synth_minimax(text, out_mp3, voice, language_boost, &key);
+    }
+    // 无 key 兜底:每个 OS 上恰好一个 cfg 块被编译,作为函数尾表达式返回 Result(勿用 return/分号)。
+    #[cfg(target_os = "macos")]
+    {
+        synth_macos_say(text, out_mp3)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("找不到 MiniMax key：在供应商坞启用「MiniMax」或设环境变量 MINIMAX_API_KEY（macOS 无 key 可走系统 say 离线配音）".to_string())
+    }
+}
+
+/// macOS 系统内置 `say` → 离线配音(零安装,PRD 的 AvSpeech/L3 等价物;走系统 CLI，
+/// 与 chromium/ffmpeg 同philosophy，不碰无法验证的 objc2 FFI)。say 不支持 mp3，
+/// 输出 .m4a(AAC);ffmpeg mux 按内容识别，扩展名无所谓。
+#[cfg(target_os = "macos")]
+fn synth_macos_say(text: &str, out: &str) -> Result<Value, String> {
+    let m4a = std::path::Path::new(out).with_extension("m4a");
+    if let Some(p) = m4a.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let m4a_str = m4a.to_string_lossy().to_string();
+    // 分次 .arg() 避免数组元素类型不齐;-o 指定输出文件,最后是要念的文本。
+    let status = std::process::Command::new("say")
+        .arg("-o")
+        .arg(&m4a_str)
+        .arg(text)
+        .status()
+        .map_err(|e| format!("say 启动失败: {e}"))?;
+    if !status.success() || !m4a.is_file() {
+        return Err("macOS say 合成失败".into());
+    }
+    let bytes = std::fs::metadata(&m4a).map(|m| m.len()).unwrap_or(0);
+    Ok(json!({ "ok": true, "out": m4a_str, "engine": "macos-say", "bytes": bytes }))
+}
+
+fn synth_minimax(
+    text: &str,
+    out_mp3: &str,
+    voice: Option<&str>,
+    language_boost: Option<&str>,
+    key: &str,
+) -> Result<Value, String> {
     let endpoint = std::env::var("MINIMAX_T2A_URL").unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string());
     let model = std::env::var("MINIMAX_TTS_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let voice = voice
@@ -122,6 +166,24 @@ pub fn synth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // macOS 系统 say 离线配音(无 key 兜底)。仅在 macOS 编译/运行——CI macos runner 自带 say,
+    // 英文默认音色即可验证「真能产出音频」。这是 macOS 原生 TTS 路的运行时证据,无需 Mac 硬件。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_say_offline_tts() {
+        let out = std::env::temp_dir().join("forge_say_test.m4a");
+        let _ = std::fs::remove_file(&out);
+        let outp = out.to_string_lossy().to_string();
+        let r = synth_macos_say("Hello from Polaris Forge on macOS.", &outp)
+            .expect("say 应成功产出音频");
+        assert_eq!(r["engine"], "macos-say");
+        let p = std::path::Path::new(r["out"].as_str().unwrap());
+        assert!(p.is_file(), "say 应产出 m4a 文件");
+        assert!(std::fs::metadata(p).unwrap().len() > 0, "音频应非空");
+        let _ = std::fs::remove_file(p);
+    }
+
     #[test]
     fn hex_decode_roundtrip() {
         assert_eq!(hex_to_bytes("48656c6c6f"), Some(b"Hello".to_vec()));
