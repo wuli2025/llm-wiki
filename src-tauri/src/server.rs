@@ -509,6 +509,7 @@ fn dispatch_sync(cmd: &str, a: &Value, app: AppHandle) -> Result<Value, String> 
             req_str(a, "out")?,
             opt_usize(a, "width").map(|n| n as u32),
             opt_usize(a, "height").map(|n| n as u32),
+            a.get("searchable").and_then(|v| v.as_bool()),
             opt_usize(a, "slides"),
         ),
         "forge_deck_to_video" => forge::forge_deck_to_video(

@@ -42,7 +42,16 @@ fn xml_decl() -> &'static str {
 }
 
 /// 把图片列表打成 .pptx。返回 {ok, out, slides, slide_size_emu}。
+/// text_layer=Some((每页文本rects, 窗口宽, 窗口高)) 时叠 alpha=0 隐形文本框(可搜索/读屏);None=纯图。
 pub fn build_pptx(image_paths: &[String], out_path: &str) -> Result<Value, String> {
+    build_pptx_inner(image_paths, out_path, None)
+}
+
+pub fn build_pptx_inner(
+    image_paths: &[String],
+    out_path: &str,
+    text_layer: Option<(&[Vec<Value>], u32, u32)>,
+) -> Result<Value, String> {
     if image_paths.is_empty() {
         return Err("没有图片可打包".into());
     }
@@ -161,7 +170,12 @@ pub fn build_pptx(image_paths: &[String], out_path: &str) -> Result<Value, Strin
         let i = idx + 1;
         let media_ext = if ext == "jpg" || ext == "jpeg" { "jpeg" } else { "png" };
         put(&mut zip, &format!("ppt/media/image{i}.{media_ext}"), bytes)?;
-        put(&mut zip, &format!("ppt/slides/slide{i}.xml"), slide_xml(cx, cy).as_bytes())?;
+        // 该页的隐形文本框(若启用文本层且该页有 rects)。
+        let boxes = match text_layer {
+            Some((rects, w, h)) if idx < rects.len() => text_boxes_xml(&rects[idx], cx, cy, w, h),
+            _ => String::new(),
+        };
+        put(&mut zip, &format!("ppt/slides/slide{i}.xml"), slide_xml(cx, cy, &boxes).as_bytes())?;
         put(
             &mut zip,
             &format!("ppt/slides/_rels/slide{i}.xml.rels"),
@@ -182,7 +196,7 @@ pub fn build_pptx(image_paths: &[String], out_path: &str) -> Result<Value, Strin
     }))
 }
 
-fn slide_xml(cx: u64, cy: u64) -> String {
+fn slide_xml(cx: u64, cy: u64, text_boxes: &str) -> String {
     format!(
         "{decl}<p:sld xmlns:a=\"{a}\" xmlns:r=\"{r}\" xmlns:p=\"{p}\"><p:cSld><p:spTree>\
 <p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\
@@ -190,9 +204,52 @@ fn slide_xml(cx: u64, cy: u64) -> String {
 <p:pic><p:nvPicPr><p:cNvPr id=\"2\" name=\"Slide Image\"/><p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>\
 <p:blipFill><a:blip r:embed=\"rId2\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>\
 <p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>\
-</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>",
+{text_boxes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>",
         decl = xml_decl(), a = NS_A, r = NS_R, p = NS_P
     )
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// 把一页的文本 rects(窗口 px)生成 alpha=0 隐形文本框 OOXML(叠在图片上=可搜索/读屏)。
+/// 窗口 px → slide EMU 按比例;px 字号 → OOXML 1/100 pt(×0.75×100=×75)。
+fn text_boxes_xml(rects: &[Value], cx: u64, cy: u64, win_w: u32, win_h: u32) -> String {
+    if rects.is_empty() || win_w == 0 || win_h == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut id = 10u32; // 图片占 id=2,文本框从 10 起避免冲突
+    for r in rects {
+        let getf = |k: &str| r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let text = r.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let (pw, ph) = (getf("w"), getf("h"));
+        if text.is_empty() || pw <= 0.0 || ph <= 0.0 {
+            continue;
+        }
+        let ex = (getf("x") * cx as f64 / win_w as f64).round() as i64;
+        let ey = (getf("y") * cy as f64 / win_h as f64).round() as i64;
+        let ew = (pw * cx as f64 / win_w as f64).round() as i64;
+        let eh = (ph * cy as f64 / win_h as f64).round() as i64;
+        let sz = (getf("size").max(8.0) * 75.0).round() as i64;
+        let bold = if r.get("bold").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 };
+        out.push_str(&format!(
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"t{id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
+<p:spPr><a:xfrm><a:off x=\"{ex}\" y=\"{ey}\"/><a:ext cx=\"{ew}\" cy=\"{eh}\"/></a:xfrm>\
+<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\
+<p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/>\
+<a:p><a:r><a:rPr lang=\"zh-CN\" sz=\"{sz}\" b=\"{bold}\">\
+<a:solidFill><a:srgbClr val=\"000000\"><a:alpha val=\"0\"/></a:srgbClr></a:solidFill></a:rPr>\
+<a:t>{}</a:t></a:r></a:p></p:txBody></p:sp>",
+            xml_escape(text)
+        ));
+        id += 1;
+    }
+    out
 }
 
 fn slide_layout_xml(_cx: u64, _cy: u64) -> String {
@@ -442,15 +499,31 @@ pub fn render_deck_to_pptx(
     out_pptx: &str,
     width: u32,
     height: u32,
+    searchable: bool,
     slides_override: Option<usize>,
 ) -> Result<Value, String> {
     // PPT 默认 2x 高清(投影/全屏放大不糊字;架构文档§06①)。
     let (frames, pngs) = capture_slides(deck, width, height, 2, slides_override)?;
     let n = pngs.len();
-    let r = build_pptx(&pngs, out_pptx);
+    // 隐形文本层(架构文档②差异化):逐页 dump-dom 提取文本 rects → 叠 alpha=0 文本框 = 可搜索/读屏。
+    // 额外一次 chromium/页;某页提取失败则该页降级为纯图(不阻断)。非 Polaris deck(无 runtime.js)→空。
+    let slides_text: Vec<Vec<Value>> = if searchable {
+        (1..=n)
+            .map(|i| extract_text_rects(deck, i, width, height).unwrap_or_default())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let layer = if searchable {
+        Some((slides_text.as_slice(), width, height))
+    } else {
+        None
+    };
+    let r = build_pptx_inner(&pngs, out_pptx, layer);
     let _ = std::fs::remove_dir_all(&frames);
     let r = r?;
-    Ok(json!({ "ok": true, "out": out_pptx, "slides": n, "detail": r }))
+    let text_total: usize = slides_text.iter().map(|v| v.len()).sum();
+    Ok(json!({ "ok": true, "out": out_pptx, "slides": n, "searchable": searchable, "text_boxes": text_total, "detail": r }))
 }
 
 #[cfg(test)]
@@ -492,6 +565,37 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == need), "缺部件 {need}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_pptx_text_layer_embeds_searchable_text() {
+        let dir = std::env::temp_dir().join("polaris_forge_textlayer");
+        let _ = std::fs::create_dir_all(&dir);
+        let img = dir.join("a.png");
+        std::fs::write(&img, b"fake").unwrap();
+        let out = dir.join("out.pptx");
+        let rects = vec![vec![serde_json::json!(
+            {"text":"Hello<World>","x":50.0,"y":40.0,"w":200.0,"h":46.0,"size":40.0,"bold":true}
+        )]];
+        let r = build_pptx_inner(
+            &[img.to_string_lossy().into()],
+            &out.to_string_lossy(),
+            Some((&rects, 1280, 720)),
+        )
+        .unwrap();
+        assert_eq!(r["slides"], 1);
+        let f = std::fs::File::open(&out).unwrap();
+        let mut z = zip::ZipArchive::new(f).unwrap();
+        let mut s = String::new();
+        use std::io::Read;
+        z.by_name("ppt/slides/slide1.xml")
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        assert!(s.contains("<a:alpha val=\"0\"/>"), "应有 alpha=0 隐形文本");
+        assert!(s.contains("Hello&lt;World&gt;"), "文本应 XML 转义并嵌入");
+        assert!(s.contains("txBox=\"1\""), "应是文本框");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -599,8 +703,15 @@ fromHash();addEventListener('hashchange',fromHash);</script></body></html>",
         )
         .unwrap();
         let out = dir.join("out.pptx");
-        let r = render_deck_to_pptx(&deck.to_string_lossy(), &out.to_string_lossy(), 1280, 720, None)
-            .expect("render_deck_to_pptx 应成功");
+        let r = render_deck_to_pptx(
+            &deck.to_string_lossy(),
+            &out.to_string_lossy(),
+            1280,
+            720,
+            false,
+            None,
+        )
+        .expect("render_deck_to_pptx 应成功");
         assert_eq!(r["slides"], 2);
         let f = std::fs::File::open(&out).unwrap();
         let z = zip::ZipArchive::new(f).expect("产出应是合法 zip");

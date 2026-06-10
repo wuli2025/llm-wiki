@@ -302,6 +302,7 @@ pub fn forge_deck_to_pptx(
     out: String,
     width: Option<u32>,
     height: Option<u32>,
+    searchable: Option<bool>,
     slides: Option<usize>,
 ) -> Result<Value, String> {
     crate::forge_pptx::render_deck_to_pptx(
@@ -309,6 +310,7 @@ pub fn forge_deck_to_pptx(
         &out,
         width.unwrap_or(1920),
         height.unwrap_or(1080),
+        searchable.unwrap_or(true), // 默认开隐形文本层(可搜索 PPT=差异化卖点)
         slides,
     )
 }
