@@ -33,6 +33,12 @@ pub fn render_deck_to_video(
 ) -> Result<Value, String> {
     let secs = if seconds_per_slide > 0.0 { seconds_per_slide } else { 3.0 };
     let fps = if fps == 0 { 30 } else { fps };
+    // fail-fast:指定了配音文件但不存在 → 立刻报错,别白截完所有图再被 ffmpeg 拒(用户省事)。
+    if let Some(a) = audio.as_deref().filter(|s| !s.is_empty()) {
+        if !Path::new(a).is_file() {
+            return Err(format!("指定的配音文件不存在: {a}"));
+        }
+    }
     // 视频用 1x(帧分辨率 = 目标 width×height,不膨胀编码量);高清交给分辨率参数控制。
     let (frames, pngs) =
         crate::forge_pptx::capture_slides(deck, width, height, 1, slides_override)?;
@@ -82,6 +88,28 @@ pub fn render_deck_to_video(
         "duration_sec": secs * n as f64,
         "audio": audio_label
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn missing_audio_fails_fast_before_capture() {
+        // 指定不存在的配音文件应在截图之前就报错(无需 chromium),省掉无用截图。
+        let r = render_deck_to_video(
+            "any-deck.html",
+            "/tmp/x.mp4",
+            3.0,
+            30,
+            1280,
+            720,
+            None,
+            Some("definitely-not-here.mp3".to_string()),
+            None,
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("配音文件不存在"));
+    }
 }
 
 fn encode_images(
