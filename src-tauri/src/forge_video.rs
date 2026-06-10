@@ -31,6 +31,7 @@ pub fn render_deck_to_video(
     audio: Option<String>,
     narration: Option<String>,
     transition: Option<f64>,
+    motion: bool,
 ) -> Result<Value, String> {
     let secs = if seconds_per_slide > 0.0 { seconds_per_slide } else { 3.0 };
     let fps = if fps == 0 { 30 } else { fps };
@@ -77,7 +78,18 @@ pub fn render_deck_to_video(
         None
     };
 
-    let result = encode_images(&frames, &pngs, out_mp4, secs, fps, audio_path.as_deref(), transition);
+    let result = encode_images(
+        &frames,
+        &pngs,
+        out_mp4,
+        secs,
+        fps,
+        audio_path.as_deref(),
+        transition,
+        motion,
+        width,
+        height,
+    );
     let _ = std::fs::remove_dir_all(&frames);
     result?;
     let dur = match transition {
@@ -113,6 +125,7 @@ mod tests {
             Some("definitely-not-here.mp3".to_string()),
             None,
             None,
+            false,
         );
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("配音文件不存在"));
@@ -127,6 +140,9 @@ fn encode_images(
     fps: u32,
     audio: Option<&str>,
     transition: Option<f64>,
+    motion: bool,
+    width: u32,
+    height: u32,
 ) -> Result<(), String> {
     if pngs.is_empty() {
         return Err("没有帧可编码".into());
@@ -137,11 +153,9 @@ fn encode_images(
             let _ = std::fs::create_dir_all(parent);
         }
     }
-    // 转场模式(架构文档§06④):页间交叉淡入。opt-in,多于 1 页才有意义。
-    if let Some(t) = transition {
-        if pngs.len() > 1 {
-            return encode_xfade(pngs, out_mp4, secs, fps, audio, t);
-        }
+    // 动画路(§06④转场 / Ken Burns 运镜):转场需多于 1 页;运镜单页也可。
+    if motion || (transition.is_some() && pngs.len() > 1) {
+        return encode_animated(pngs, out_mp4, secs, fps, audio, transition, motion, width, height);
     }
     // ── 默认:concat 硬切 ──
     // concat demuxer 清单:每图一条 file + duration;最后一张需再列一次(concat 末帧时长怪癖)。
@@ -216,24 +230,33 @@ fn encode_images(
     Ok(())
 }
 
-/// 页间交叉淡入(xfade)编码:N 张图各驻留 secs 秒,相邻间 t 秒淡入淡出。
-/// 总时长 = n*secs - (n-1)*t。架构文档§06④「页间转场」。
-fn encode_xfade(
+/// 动画编码:N 张图各驻留 secs 秒。transition=Some(t) 时相邻 xfade 淡入(总时长 n*secs-(n-1)*t);
+/// motion=true 时每页加 Ken Burns 中心缓推运镜(电影感,§06 动画感,无需 chromiumoxide)。
+fn encode_animated(
     pngs: &[String],
     out_mp4: &str,
     secs: f64,
     fps: u32,
     audio: Option<&str>,
-    transition: f64,
+    transition: Option<f64>,
+    motion: bool,
+    width: u32,
+    height: u32,
 ) -> Result<(), String> {
     let n = pngs.len();
-    let t = transition.clamp(0.1, secs * 0.8); // 转场不超过每页时长 80%
+    let t = transition.map(|t| t.clamp(0.1, secs * 0.8));
+    let frames_per = (secs * fps as f64).round().max(1.0) as u64;
+    let (ew, eh) = (width & !1, height & !1); // 偶数输出尺寸(zoompan s 需具体 WxH)
     let mut args: Vec<String> = vec!["-y".into()];
     for p in pngs {
-        args.push("-loop".into());
-        args.push("1".into());
-        args.push("-t".into());
-        args.push(format!("{secs}"));
+        // 运镜:输入单帧(zoompan 用 d 生成整段;若 -loop 多帧会让 zoompan 输出爆炸)。
+        // 非运镜:-loop 1 -t secs 给整段静帧供 xfade。
+        if !motion {
+            args.push("-loop".into());
+            args.push("1".into());
+            args.push("-t".into());
+            args.push(format!("{secs}"));
+        }
         args.push("-i".into());
         args.push(p.clone());
     }
@@ -241,27 +264,49 @@ fn encode_xfade(
         args.push("-i".into());
         args.push(a.to_string());
     }
-    // filter_complex:每输入 scale+BT.709+fps+统一时基,再 xfade 链。
+    // 每输入:scale→(可选 Ken Burns 运镜)→BT.709/format/fps/统一时基。
     let mut fc = String::new();
     for k in 0..n {
+        // Ken Burns:从 1.0 缓慢推到 1.10,向中心。zoompan 需先定输出尺寸(用偶数源尺寸)。
+        let kb = if motion {
+            // z 每帧 +0.10/frames_per;x/y 居中。s 用 iw/ih(scale 后的偶数尺寸)。
+            let zinc = 0.10 / frames_per as f64;
+            format!(
+                "zoompan=z='min(zoom+{zinc:.6},1.10)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames_per}:s={ew}x{eh}:fps={fps},"
+            )
+        } else {
+            String::new()
+        };
         fc.push_str(&format!(
-            "[{k}:v]scale=trunc(iw/2)*2:trunc(ih/2)*2:out_color_matrix=bt709,format=yuv420p,fps={fps},settb=AVTB[s{k}];"
+            "[{k}:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,{kb}format=yuv420p,fps={fps},settb=AVTB[s{k}];"
         ));
     }
-    let mut prev = "s0".to_string();
-    for k in 1..n {
-        let offset = (k as f64) * (secs - t);
-        let label = if k == n - 1 { "vout".to_string() } else { format!("x{k}") };
-        fc.push_str(&format!(
-            "[{prev}][s{k}]xfade=transition=fade:duration={t}:offset={offset}[{label}];"
-        ));
-        prev = label;
+    let map_label;
+    if let Some(t) = t {
+        // xfade 链
+        let mut prev = "s0".to_string();
+        for k in 1..n {
+            let offset = (k as f64) * (secs - t);
+            let label = if k == n - 1 { "vout".to_string() } else { format!("x{k}") };
+            fc.push_str(&format!(
+                "[{prev}][s{k}]xfade=transition=fade:duration={t}:offset={offset}[{label}];"
+            ));
+            prev = label;
+        }
+        map_label = if n == 1 { "s0".to_string() } else { "vout".to_string() };
+    } else {
+        // 无转场:concat 拼接(motion 时各段已是运镜视频,不能用 concat demuxer)。
+        for k in 0..n {
+            fc.push_str(&format!("[s{k}]"));
+        }
+        fc.push_str(&format!("concat=n={n}:v=1:a=0[vout];"));
+        map_label = "vout".to_string();
     }
     fc.pop(); // 去掉末尾 ;
     args.push("-filter_complex".into());
     args.push(fc);
     args.push("-map".into());
-    args.push("[vout]".into());
+    args.push(format!("[{map_label}]"));
     if audio.is_some() {
         args.push("-map".into());
         args.push(format!("{n}:a"));
