@@ -13,6 +13,42 @@
 (function () {
   "use strict";
 
+  // ── polaris-fx：确定性逐帧时钟（per-frame fx 视频的 deck 侧基础，无需 chromiumoxide）。
+  //    __fx.seek(tMs) 把所有 CSS 动画设到绝对时刻 t（WAAPI），让逐帧截图得到真动画。
+  //    URL ?fx_t=N（毫秒）→ 加载后 seek 到该帧（将来由持久浏览器逐帧驱动 + 截图编码）。
+  window.__fx = {
+    seek: function (tMs) {
+      try {
+        var anims = document.getAnimations ? document.getAnimations() : [];
+        for (var i = 0; i < anims.length; i++) {
+          try { anims[i].pause(); anims[i].currentTime = tMs; } catch (e) {}
+        }
+      } catch (e) {}
+    },
+    // spring 物理弹簧纯函数（Remotion 参数系）：给定 t(秒) 返回 0→1 的位移，可驱动 transform。
+    spring: function (cfg) {
+      cfg = cfg || {};
+      var mass = cfg.mass || 1, stiffness = cfg.stiffness || 100, damping = cfg.damping || 10;
+      var w0 = Math.sqrt(stiffness / mass);
+      var zeta = damping / (2 * Math.sqrt(stiffness * mass));
+      return function (tSec) {
+        if (zeta < 1) {
+          var wd = w0 * Math.sqrt(1 - zeta * zeta);
+          return 1 - Math.exp(-zeta * w0 * tSec) * (Math.cos(wd * tSec) + (zeta * w0 / wd) * Math.sin(wd * tSec));
+        }
+        return 1 - Math.exp(-w0 * tSec) * (1 + w0 * tSec);
+      };
+    }
+  };
+  (function () {
+    var m = /[?&]fx_t=(\d+(?:\.\d+)?)/.exec(location.search);
+    if (m) {
+      var seekNow = function () { window.__fx.seek(parseFloat(m[1])); };
+      if (document.readyState === "complete") setTimeout(seekNow, 20);
+      else window.addEventListener("load", function () { setTimeout(seekNow, 20); });
+    }
+  })();
+
   var THEMES = [
     "minimal-white", "editorial-serif", "swiss-grid", "magazine-bold",
     "japanese-minimal", "xiaohongshu-white", "academic-paper", "corporate-clean",
