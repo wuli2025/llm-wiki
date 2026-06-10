@@ -66,6 +66,25 @@ jobs:
       - name: Forge engine build + tests
         run: cargo test --no-default-features --features server --lib forge
 
+  # macOS「真能出片」运行时验证:装真 Chrome,在 macOS runner 上跑 deck→截图→pptx 全流水线
+  # (无需 Mac 硬件)。证明 macOS 不止编译过,而是真能产出成品。
+  forge-e2e-macos:
+    name: Forge e2e (macOS · 真 Chrome 出 pptx)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Google Chrome
+        run: brew install --cask google-chrome || true
+      - name: 真实 deck→pptx on macOS
+        run: cargo test --no-default-features --features server --lib deck_to_pptx_e2e -- --nocapture
+
   frontend:
     name: Frontend (type-check + build)
     runs-on: ubuntu-latest

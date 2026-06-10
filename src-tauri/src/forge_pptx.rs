@@ -393,6 +393,41 @@ mod tests {
         assert_eq!(count_slides("<p class=\"slides foo\">x</p>"), 0); // slides ≠ slide
     }
 
+    // 真实流水线 e2e:deck→chromium 截图→pptx。仅当环境有 chromium/chrome 时跑(否则跳过),
+    // 因此在普通单测环境安全、在「装了浏览器」的 CI job(如 macOS brew Chrome)上真正执行 ——
+    // 这是 macOS「真能出片」的运行时证据,无需 Mac 硬件。
+    #[test]
+    fn deck_to_pptx_e2e_when_chromium_present() {
+        if crate::forge::find_chromium().is_none() {
+            eprintln!("[e2e] 跳过:未发现 chromium/chrome");
+            return;
+        }
+        let dir = std::env::temp_dir().join("forge_e2e_deck");
+        let _ = std::fs::create_dir_all(&dir);
+        let deck = dir.join("deck.html");
+        std::fs::write(
+            &deck,
+            "<!doctype html><html><head><meta charset=utf-8><style>\
+.slide{position:absolute;inset:0;opacity:0}.slide.is-active{opacity:1}</style></head>\
+<body><div class=\"deck\">\
+<section class=\"slide\" style=\"background:#7aa2f7\">A</section>\
+<section class=\"slide\" style=\"background:#0b0f1a;color:#fff\">B</section></div><script>\
+var s=[].slice.call(document.querySelectorAll('.slide'));\
+function go(n){n=Math.max(0,Math.min(s.length-1,n));s.forEach(function(e,i){e.classList.toggle('is-active',i===n)})}\
+function fromHash(){var m=/^#\\/(\\d+)/.exec(location.hash||'');go(m?+m[1]-1:0)}\
+fromHash();addEventListener('hashchange',fromHash);</script></body></html>",
+        )
+        .unwrap();
+        let out = dir.join("out.pptx");
+        let r = render_deck_to_pptx(&deck.to_string_lossy(), &out.to_string_lossy(), 1280, 720, None)
+            .expect("render_deck_to_pptx 应成功");
+        assert_eq!(r["slides"], 2);
+        let f = std::fs::File::open(&out).unwrap();
+        let z = zip::ZipArchive::new(f).expect("产出应是合法 zip");
+        assert!(z.len() >= 10, "pptx 部件数应 >=10");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn png_size_reads_ihdr() {
         // 1x1 PNG。
