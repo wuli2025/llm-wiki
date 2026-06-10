@@ -72,6 +72,10 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # 的持久浏览器捕获方案;但它在 Linux 拉 libdbus-sys(Docker 需加 libdbus-1-dev),且 fx 视频
 # 还需 polaris-fx 动画库大件——是独立多轮工程,届时再引,不为半成品破坏已验证的 Docker 构建。
 
+# 原生标题栏染色（titlebar.rs）：Win11 DwmSetWindowAttribute 让标题栏随主题与框面同色
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+
 [features]
 default = ["desktop"]
 # 桌面构建：Tauri 外壳 + 各插件 + 沙箱板块 + 自定义协议。
